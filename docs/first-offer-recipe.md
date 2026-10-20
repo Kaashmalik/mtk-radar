@@ -63,6 +63,8 @@ python workers/publishing/main.py --api http://localhost:8000 --once
 ```
 
 - [ ] Verify token-expiry recovery once: expire a token on purpose → the account flips to `token_expired`, the post pauses, the calendar shows the alert; refresh the credentials and confirm the worker reports `active` again
+- [ ] Run the expiry/token monitor (week 11): `python workers/monitor/main.py --once` — expires past-due offers, queues overdue rechecks, auto-pauses their scheduled posts (DB trigger), and alerts on dead platform tokens
+- [ ] Log one correction via `POST /offers/{id}/corrections` and confirm the offer's page links it to the affected videos/posts
 - [ ] Log measured numbers: time spent, missed details, corrections, rendering reliability — this calibration decides what gets automated next
 
 ## Hard no's (§4, §11)

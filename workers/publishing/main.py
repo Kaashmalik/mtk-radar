@@ -36,12 +36,18 @@ from platforms import (  # noqa: E402
     FacebookAdapter,
     NotConfiguredError,
     OAuthConfig,
+    TikTokAdapter,
+    TikTokConfig,
     TokenExpiredError,
     YouTubeAdapter,
 )
 
 API_URL_DEFAULT = "http://localhost:8000"
 SWEEP_INTERVAL_S = 60
+
+# §17: scheduling/publishing is only allowed from these offer states; the
+# worker rechecks the LIVE state immediately before every upload.
+PUBLISHABLE_OFFER_STATES = ("verified", "approved_for_video", "published")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("publishing")
@@ -85,6 +91,16 @@ class Publisher:
                     )
                 else:
                     log.warning("Facebook account registered but FACEBOOK_* env missing")
+            elif platform == "tiktok":
+                cfg = TikTokConfig.from_env()
+                if cfg:
+                    adapters[platform] = TikTokAdapter(
+                        config=cfg, account_id=account["id"],
+                        on_refresh=self._make_refresh_hook(account["id"]),
+                    )
+                else:
+                    log.warning("TikTok account registered but TIKTOK_* env missing "
+                                "(requires an approved developer app)")
         return adapters
 
     def _make_refresh_hook(self, account_id: str):
@@ -131,6 +147,20 @@ class Publisher:
         render = self._latest_render(post["offer_id"])
         if render is None:
             self._report(post["id"], ok=False, detail="no render available for this offer")
+            return
+
+        # §17: recheck offer validity again immediately before publish. The DB
+        # trigger pauses scheduled posts when an offer expires/changes; this is
+        # the second, moment-of-upload defense.
+        try:
+            offer = self.api.get(f"/offers/{post['offer_id']}").json()
+            if offer.get("state") not in PUBLISHABLE_OFFER_STATES:
+                self.api.post(f"/schedules/{post['id']}/pause")
+                self._report(post["id"], ok=False,
+                             detail=f"offer state '{offer.get('state')}' — publish blocked (§17 recheck)")
+                return
+        except httpx.HTTPError as exc:
+            self._report(post["id"], ok=False, detail=f"cannot verify offer state: {exc}")
             return
 
         video_path = render["video_path"]

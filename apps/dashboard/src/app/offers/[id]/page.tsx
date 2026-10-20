@@ -4,6 +4,7 @@ import ScheduleForm from "./ScheduleForm";
 /**
  * Offer workspace (weeks 5-6): verified offer → script versions, command-card
  * safety, capture sessions with redaction-review state.
+ * Week 11 (§18): correction log linked to the affected videos/posts.
  */
 
 const API = process.env.API_URL ?? "http://localhost:8000";
@@ -117,12 +118,54 @@ async function getRenders(id: string): Promise<RenderRow[]> {
   }
 }
 
+type CorrectionRow = {
+  id: string;
+  note: string;
+  corrected_by: string;
+  version_hash: string | null;
+  created_at: string;
+};
+
+type ImpactRow = {
+  offer: { state: string; correction_note: string | null };
+  schedules: {
+    id: string;
+    platform: string;
+    state: string;
+    local_time: string;
+    privacy: string;
+    remote_post_id: string | null;
+    outcome_detail: string | null;
+  }[];
+};
+
+async function getCorrections(id: string): Promise<CorrectionRow[]> {
+  try {
+    const res = await fetch(`${API}/offers/${id}/corrections`, { cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+async function getImpact(id: string): Promise<ImpactRow | null> {
+  try {
+    const res = await fetch(`${API}/offers/${id}/impact`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 export default async function OfferPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const offer = await getOffer(id);
   const scripts = await getScripts(id);
   const captures = await getCaptures(id);
   const renders = await getRenders(id);
+  const [corrections, impact] = await Promise.all([getCorrections(id), getImpact(id)]);
 
   if (!offer) {
     return (
@@ -238,6 +281,61 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
       </section>
 
       <section className="card">
+        <h2>Corrections &amp; affected posts ({corrections.length})</h2>
+        {corrections.length === 0 && !offer.correction_note ? (
+          <p className="muted small">
+            No corrections logged. Corrections pause affected scheduled posts
+            automatically and link the videos/posts they came from (monitor:
+            <code> python workers/monitor/main.py</code>).
+          </p>
+        ) : (
+          <div style={{ display: "grid", gap: "0.6rem" }}>
+            {offer.correction_note && (
+              <p className="small" style={{ color: "#f0883e" }}>
+                ⚠ Current correction note: {offer.correction_note}
+              </p>
+            )}
+            {corrections.map((c) => (
+              <article key={c.id} className="entry">
+                <div className="small">
+                  {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
+                  {c.note}
+                  <div className="muted small">
+                    by {c.corrected_by}
+                    {c.version_hash && <> · supersedes script {c.version_hash}</>}
+                  </div>
+                </div>
+              </article>
+            ))}
+            {impact && impact.schedules.length > 0 && (
+              <div>
+                <h3 className="small" style={{ margin: "0.3rem 0 0.4rem" }}>
+                  Affected videos/posts (§18 week 11):
+                </h3>
+                <ul>
+                  {impact.schedules.map((s) => {
+                    let autoPaused: string | null = null;
+                    if (s.outcome_detail) {
+                      try { autoPaused = JSON.parse(s.outcome_detail)?.detail ?? null; } catch {}
+                    }
+                    return (
+                      <li key={s.id} className="small">
+                        <strong>{s.platform}</strong> — {s.state}
+                        {s.remote_post_id && <> · live post {s.remote_post_id}</>}
+                        {autoPaused && (
+                          <span style={{ color: "#f0883e" }}> · {autoPaused}</span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="card">
         <h2>Evidence ({offer.evidence.length})</h2>
         <ul>
           {offer.evidence.map((ev) => (
@@ -294,6 +392,11 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
           border-radius: 8px;
           padding: 0.6rem 0.8rem;
           font-size: 0.8rem;
+        }
+        .entry {
+          border: 1px solid #21262d;
+          border-radius: 8px;
+          padding: 0.7rem 0.9rem;
         }
         .script {
           background: #0d1117;

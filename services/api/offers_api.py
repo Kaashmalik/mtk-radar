@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 import db
 from redact import scan as scan_secrets
@@ -366,6 +366,138 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
     await _audit(pool, actor=t.reviewer or "worker", action=f"transition:{current}->{target}",
                  entity="offers", entity_id=offer_id, detail={"note": t.note})
     return {"id": offer_id, "state": row["state"], "previous": current}
+
+
+# ---------------------------------------------------------------- corrections + impact (week 11)
+
+
+class CorrectionIn(BaseModel):
+    note: str = Field(min_length=3, max_length=2000)
+    corrected_by: str = Field(min_length=1)
+    version_hash: Optional[str] = None
+
+
+@router.post("/{offer_id}/corrections", status_code=201)
+async def add_correction(offer_id: uuid.UUID, body: CorrectionIn) -> dict:
+    """Log a correction (§3 Learn step) and demote the offer to 'corrected' when
+    the state machine allows. Pausing of affected scheduled posts is enforced by
+    the trg_pause_on_offer_change database trigger (007) — this endpoint only
+    reports how many were caught."""
+    pool = db.get()
+    offer = await pool.fetchrow(
+        "SELECT state::text AS state, title FROM offers WHERE id = $1", offer_id
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+
+    row = await pool.fetchrow(
+        """
+        INSERT INTO offer_corrections (offer_id, note, corrected_by, version_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        """,
+        offer_id, body.note, body.corrected_by, body.version_hash,
+    )
+    await pool.execute(
+        "UPDATE offers SET correction_note = $2, updated_at = now() WHERE id = $1",
+        offer_id, body.note,
+    )
+
+    current = offer["state"]
+    state_changed = False
+    new_state = current
+    if can_transition(current, "corrected"):
+        new_row = await pool.fetchrow(
+            "UPDATE offers SET state = 'corrected', updated_at = now() "
+            "WHERE id = $1 RETURNING state::text AS state",
+            offer_id,
+        )
+        new_state = new_row["state"]
+        state_changed = True
+
+    await _audit(pool, actor=body.corrected_by,
+                 action="correction:recorded" if not state_changed else "transition:%s->corrected" % current,
+                 entity="offers", entity_id=offer_id,
+                 detail={"note": body.note, "version_hash": body.version_hash})
+
+    return {
+        "correction_id": row["id"],
+        "offer_id": offer_id,
+        "offer_state": new_state,
+        "state_changed": state_changed,
+        "auto_paused_posts": await _count_scheduled(pool, offer_id),
+    }
+
+
+@router.get("/{offer_id}/corrections")
+async def list_corrections(offer_id: uuid.UUID) -> list[dict]:
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        SELECT id, offer_id, note, corrected_by, version_hash, created_at
+        FROM offer_corrections WHERE offer_id = $1
+        ORDER BY created_at DESC
+        """,
+        offer_id,
+    )
+    return [dict(r) for r in rows]
+
+
+@router.get("/{offer_id}/impact")
+async def offer_impact(offer_id: uuid.UUID) -> dict:
+    """'Corrections link to affected videos' (§18 week 11): everything produced
+    from this offer — renders, captures, and the platform posts they became."""
+    pool = db.get()
+    offer = await pool.fetchrow(
+        "SELECT id, title, state::text AS state, correction_note FROM offers WHERE id = $1",
+        offer_id,
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+
+    renders = await pool.fetch(
+        """
+        SELECT r.id, r.preset, r.width, r.height, r.video_path,
+               r.script_version, r.status, r.created_at
+        FROM renders r WHERE r.offer_id = $1
+        ORDER BY r.created_at DESC
+        """,
+        offer_id,
+    )
+    captures = await pool.fetch(
+        """
+        SELECT id, redaction_reviewed, created_at
+        FROM capture_sessions WHERE offer_id = $1
+        ORDER BY created_at DESC
+        """,
+        offer_id,
+    )
+    schedules = await pool.fetch(
+        """
+        SELECT s.id, s.platform, s.state::text AS state, s.local_time, s.privacy,
+               s.remote_post_id, s.outcome_detail::text AS outcome_detail
+        FROM schedules s WHERE s.offer_id = $1
+        ORDER BY s.local_time
+        """,
+        offer_id,
+    )
+    correction_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM offer_corrections WHERE offer_id = $1", offer_id
+    )
+    return {
+        "offer": dict(offer),
+        "renders": [dict(r) for r in renders],
+        "captures": [dict(c) for c in captures],
+        "schedules": [dict(s) for s in schedules],
+        "correction_count": correction_count,
+    }
+
+
+async def _count_scheduled(pool: asyncpg.Pool, offer_id: uuid.UUID) -> int:
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM schedules WHERE offer_id = $1 AND state = 'scheduled'",
+        offer_id,
+    )
 
 
 # ---------------------------------------------------------------- scripts (weeks 5-6)
