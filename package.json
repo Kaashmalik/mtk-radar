@@ -1,0 +1,1 @@
+{"name": "mtk-radar", "version": "0.1.0", "private": true, "scripts": {"dev": "docker compose -f infra/docker/docker-compose.yml up", "api": "uvicorn services.api.main:app --reload --port 8000", "setup": "pnpm install"}}

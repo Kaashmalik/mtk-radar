@@ -67,22 +67,43 @@ Video generation is **blocked** from `Candidate` or `Evidence needed` states. If
 | Video | FFmpeg · optional Remotion templates · Kdenlive/CapCut handoff |
 | Publishing | Official platform APIs (YouTube Data, Meta Graph, TikTok Content Posting) · optional Postiz |
 
-## Planned Repository Layout
+## Project Layout
 
 ```
-apps/dashboard/            # Web admin console
-apps/extension/            # Save-current-page extension
-services/api/              # API service
+apps/dashboard/            # Web admin console (Next.js)
+apps/extension/            # Save-current-page extension (Manifest V3)
+services/api/              # API service (FastAPI + Postgres)
+services/api/db/migrations/001_init.sql
 workers/collectors/        # Source collection jobs
 workers/verification/      # Extraction & evidence jobs
 workers/video/             # Rendering jobs
 workers/publishing/        # Platform upload jobs
-packages/source-adapters/  # Per-source collection adapters
-packages/offer-schema/     # Shared offer data model
-packages/video-templates/  # Templated video configs
-infra/docker/              # Deployment configs
-docs/                      # Source registry, security, third-party notices
+packages/offer-schema/     # Shared offer life-cycle + validation schemas
+packages/source-adapters/  # Per-source collection adapters (planned)
+packages/video-templates/  # Templated video configs (planned)
+infra/docker/              # Docker Compose dev environment
+docs/                      # Master plan, source registry, security, notices
 ```
+
+## Quick Start
+
+```bash
+cp .env.example .env                  # never commit the real .env
+docker compose -f infra/docker/docker-compose.yml up   # postgres + redis + api + dashboard
+```
+
+- Dashboard: http://localhost:3000 · API health: http://localhost:8000/health
+- DB schema initializes from `services/api/db/migrations/` on first boot
+- Extension: load `apps/extension/` via `chrome://extensions` → Developer mode → Load unpacked
+
+## Documentation
+
+- [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
+- [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
+- [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — upstream repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
+- [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
+- [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
+- [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, and obligations.
 
 ## Delivery Roadmap
 
