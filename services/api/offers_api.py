@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
 import db
+from redact import scan as scan_secrets
 from schemas import (
     EvidenceIn,
     ExtractionIn,
@@ -28,9 +29,12 @@ from schemas import (
     OfferUpdate,
     TransitionIn,
 )
+from scriptgen import generate as generate_script_payload
 from state import (
     OFFER_STATES,
+    VIDEO_ALLOWED_STATES,
     TransitionError,
+    can_generate_video,
     can_transition,
     requires_review,
 )
@@ -364,10 +368,91 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
     return {"id": offer_id, "state": row["state"], "previous": current}
 
 
+# ---------------------------------------------------------------- scripts (weeks 5-6)
+
+
+@router.post("/{offer_id}/script", status_code=201)
+async def create_script(offer_id: uuid.UUID, created_by: str = Query(default="reviewer")) -> dict:
+    """Generate a versioned claim script + checklist + command cards.
+
+    HARD GATE: blocked unless the offer state allows video (§3) — this is the
+    enforcement point of "unverified records cannot enter script generation".
+    """
+    pool = db.get()
+    offer = await pool.fetchrow(
+        """
+        SELECT id, title, provider, category, offer_type,
+               eligibility::text AS eligibility, value::text AS value,
+               claim_steps::text AS claim_steps, promo_code, redemption_url,
+               expires_at, renewal::text AS renewal, state::text AS state
+        FROM offers WHERE id = $1
+        """,
+        offer_id,
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+    if not can_generate_video(offer["state"]):
+        raise HTTPException(
+            status_code=409,
+            detail=f"script generation blocked: offer state is '{offer['state']}' "
+                   "(master plan §3 — verified with official evidence required)",
+        )
+
+    evidence = await pool.fetch(
+        """
+        SELECT url, captured_at, excerpt FROM evidence
+        WHERE offer_id = $1 AND official AND domain_ok
+        ORDER BY captured_at DESC
+        """,
+        offer_id,
+    )
+    payload = generate_script_payload(dict(offer), [dict(r) for r in evidence])
+
+    unsafe = [c for c in payload["command_cards"] if c["unsafe_reasons"]]
+    version_row = await pool.fetchrow(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM offer_scripts WHERE offer_id = $1",
+        offer_id,
+    )
+    version = version_row["next"]
+    row = await pool.fetchrow(
+        """
+        INSERT INTO offer_scripts (offer_id, version, markdown, checklist, command_cards, created_by)
+        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+        RETURNING id, version
+        """,
+        offer_id, version, payload["markdown"], _json(payload["checklist"]),
+        _json(payload["command_cards"]), created_by,
+    )
+    await _audit(pool, actor=created_by, action="generate_script", entity="offer_scripts",
+                 entity_id=row["id"],
+                 detail={"version": version, "unsafe_command_cards": len(unsafe)})
+    return {
+        "id": row["id"],
+        "version": version,
+        "markdown": payload["markdown"],
+        "checklist": payload["checklist"],
+        "command_cards": payload["command_cards"],
+        "unsafe_command_cards": len(unsafe),
+    }
+
+
+@router.get("/{offer_id}/scripts")
+async def list_scripts(offer_id: uuid.UUID) -> list[dict]:
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        SELECT id, version, markdown, command_cards::text AS command_cards,
+               created_by, created_at
+        FROM offer_scripts WHERE offer_id = $1 ORDER BY version DESC
+        """,
+        offer_id,
+    )
+    return [dict(r) for r in rows]
+
+
 @router.post("/sweep-stale")
 async def sweep_stale() -> dict:
     """Correction workflow: expired deals auto-pause; overdue rechecks demote."""
-
     pool = db.get()
     expired = await pool.fetch(
         """

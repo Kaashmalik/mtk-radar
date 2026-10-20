@@ -106,7 +106,9 @@ export default async function ReviewPage() {
               <article key={offer.id} className="offer">
                 <div className="offer-head">
                   <div>
-                    <h3>{offer.title}</h3>
+                    <h3>
+                      <a href={`/offers/${offer.id}`}>{offer.title}</a>
+                    </h3>
                     <p className="muted small">
                       {offer.provider} · {offer.category} · {offer.offer_type}
                       {offer.expires_at && (

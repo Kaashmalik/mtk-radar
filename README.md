@@ -124,6 +124,7 @@ CI runs both on every push (`.github/workflows/ci.yml`).
 
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
 - [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
+- [`docs/first-offer-recipe.md`](docs/first-offer-recipe.md) — the pilot case-study recipe: pre-flight, script, guided capture, redaction review, hard no's.
 - [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — upstream repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
 - [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
 - [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
@@ -155,12 +156,6 @@ MTK RADAR catalogs offers as distinct types: free/open-weight models, hosted inf
 - Offers are rechecked before recording **and** before scheduled publication; expired deals auto-pause queued posts.
 - No API keys, tokens, or personal account data ever appear in footage, transcripts, or project bundles.
 - Synthetic narration/visuals are labeled where platform policy requires it; correction links and version dates live in every video description.
-
-## Documentation
-
-- [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
-- [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — open-source repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
-- [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
 
 ## License
 
