@@ -46,6 +46,18 @@ type OfferDetail = {
   correction_note: string | null;
 };
 
+type RenderRow = {
+  id: string;
+  preset: string;
+  width: number;
+  height: number;
+  duration_s: string | null;
+  video_path: string;
+  script_version: number | null;
+  disclosure: string | { synthetic_narration?: boolean };
+  status: string;
+};
+
 type CommandCard = {
   command: string;
   source_url?: string | null;
@@ -85,11 +97,31 @@ async function getCaptures(id: string): Promise<CaptureRow[]> {
   }
 }
 
+async function getRenders(id: string): Promise<RenderRow[]> {
+  try {
+    const res = await fetch(`${API}/renders?offer_id=${id}`, { cache: "no-store" });
+    if (!res.ok) return [];
+    const rows: RenderRow[] = await res.json();
+    return rows.map((r) => ({
+      ...r,
+      disclosure:
+        typeof r.disclosure === "string"
+          ? (() => {
+              try { return JSON.parse(r.disclosure as string); } catch { return {}; }
+            })()
+          : r.disclosure,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export default async function OfferPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const offer = await getOffer(id);
   const scripts = await getScripts(id);
   const captures = await getCaptures(id);
+  const renders = await getRenders(id);
 
   if (!offer) {
     return (
@@ -166,6 +198,30 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                   <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
                 )}
                 {c.reviewer && <span className="muted small"> ({c.reviewer})</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Rendered exports ({renders.length})</h2>
+        {renders.length === 0 ? (
+          <p className="muted small">
+            None yet. Render from versioned sources:
+            <code> python workers/render/main.py --offer {offer.id} --video capture.mp4</code>
+          </p>
+        ) : (
+          <ul>
+            {renders.map((r) => (
+              <li key={r.id}>
+                <strong>{r.preset}</strong> {r.width}×{r.height}
+                {r.duration_s && <> · {Number(r.duration_s).toFixed(0)}s</>}
+                {r.script_version && <> · script v{r.script_version}</>}
+                {r.disclosure && typeof r.disclosure === "object" && r.disclosure.synthetic_narration && (
+                  <span style={{ color: "#f0883e" }}> · TTS narration (label required)</span>
+                )}
+                <div className="muted small">{r.video_path}</div>
               </li>
             ))}
           </ul>

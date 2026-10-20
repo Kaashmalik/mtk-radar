@@ -43,7 +43,15 @@ python workers/capture/main.py --offer <OFFER_ID> --api http://localhost:8000
 
 ## Phase 4 — Post-capture
 
-- [ ] Produce 16:9 master + 9:16 vertical (weeks 7-8 pipeline)
+- [ ] Render from versioned sources (ffmpeg on PATH required):
+
+```bash
+pip install -r workers/render/requirements.txt
+python workers/render/main.py --offer <OFFER_ID> --capture <CAPTURE_ID> --video capture.mp4
+```
+
+- [ ] Produces a reproducible project bundle: `script.md`, `evidence.json`, captions (.srt/.vtt), 16:9 + 9:16 exports, and `edit_manifest.json` — regenerate, never hand-edit exported files
+- [ ] TTS narration (optional): set `TTS_BASE_URL`/`TTS_API_KEY`/`TTS_MODEL`; renders then carry disclosure metadata (`synthetic_narration: true`) — apply platform labels where required (§5)
 - [ ] Private/unlisted test upload; **recheck offer validity once more before it would ever go public**
 - [ ] Log measured numbers: time spent, missed details, corrections, rendering reliability — this calibration decides what gets automated next
 

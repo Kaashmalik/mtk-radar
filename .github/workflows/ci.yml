@@ -22,7 +22,7 @@ jobs:
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests
-        run: pytest services/api/tests workers/verification/tests -v
+        run: pytest services/api/tests workers/verification/tests workers/render/tests -v
 
   node:
     name: Node (offer-schema + dashboard types)
