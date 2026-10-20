@@ -62,6 +62,8 @@ export default async function Home() {
             {health.status === "ok" ? "healthy" : "unreachable"}
           </strong>{" "}
           · <a href="/review">Open review desk →</a>
+          {" · "}
+          <a href="/calendar">Content calendar →</a>
         </p>
       </section>
 

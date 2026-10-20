@@ -1,4 +1,5 @@
 import GenerateScriptButton from "./GenerateScriptButton";
+import ScheduleForm from "./ScheduleForm";
 
 /**
  * Offer workspace (weeks 5-6): verified offer → script versions, command-card
@@ -151,6 +152,8 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         {offer.promo_code && <> · code <code>{offer.promo_code}</code></>}
         {offer.expires_at && <> · expires {new Date(offer.expires_at).toLocaleDateString("en-GB")}</>}
         {offer.correction_note && <> · ⚠ {offer.correction_note}</>}
+        {" · "}
+        <a href="/calendar">Open calendar →</a>
       </p>
 
       <section className="card">
@@ -201,6 +204,12 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
               </li>
             ))}
           </ul>
+        )}
+        {renders.length > 0 && (
+          <div style={{ marginTop: "0.8rem" }}>
+            <h3 className="small" style={{ margin: "0 0 0.4rem" }}>Schedule a test post (private first)</h3>
+            <ScheduleForm offerId={offer.id} />
+          </div>
         )}
       </section>
 

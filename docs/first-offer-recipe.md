@@ -53,6 +53,8 @@ python workers/render/main.py --offer <OFFER_ID> --capture <CAPTURE_ID> --video 
 - [ ] Produces a reproducible project bundle: `script.md`, `evidence.json`, captions (.srt/.vtt), 16:9 + 9:16 exports, and `edit_manifest.json` — regenerate, never hand-edit exported files
 - [ ] TTS narration (optional): set `TTS_BASE_URL`/`TTS_API_KEY`/`TTS_MODEL`; renders then carry disclosure metadata (`synthetic_narration: true`) — apply platform labels where required (§5)
 - [ ] Private/unlisted test upload; **recheck offer validity once more before it would ever go public**
+- [ ] Editing handoff (optional manual edit): `python workers/render/handoff.py --project projects/<OFFER_ID>` → asset bundle + import notes (no native project files promised — plan §5)
+- [ ] Schedule the test post from the offer page or calendar (defaults private; approve → schedule from the calendar; pause/resume revalidate the approved script hash)
 - [ ] Log measured numbers: time spent, missed details, corrections, rendering reliability — this calibration decides what gets automated next
 
 ## Hard no's (§4, §11)
