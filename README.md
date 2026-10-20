@@ -92,9 +92,33 @@ cp .env.example .env                  # never commit the real .env
 docker compose -f infra/docker/docker-compose.yml up   # postgres + redis + api + dashboard
 ```
 
-- Dashboard: http://localhost:3000 · API health: http://localhost:8000/health
+- Dashboard (review inbox): http://localhost:3000 · API health: http://localhost:8000/health
 - DB schema initializes from `services/api/db/migrations/` on first boot
 - Extension: load `apps/extension/` via `chrome://extensions` → Developer mode → Load unpacked
+
+### Run the collectors (Week 2)
+
+```bash
+# 1. Seed the source registry (Tier-A sources from docs/source-registry.md)
+pip install -r services/api/requirements.txt
+python services/api/scripts/seed_sources.py
+
+# 2. Start the collector worker (RSS, GitHub releases, page watch)
+pip install -r workers/requirements.txt
+python workers/collectors/main.py
+```
+
+New candidates appear once (deduplicated by canonical URL) in the review inbox.
+
+### Tests & checks
+
+```bash
+pip install pytest -r services/api/requirements.txt
+pytest services/api/tests -v     # dedup/canonicalization unit tests
+pnpm install && pnpm typecheck   # offer-schema types
+```
+
+CI runs both on every push (`.github/workflows/ci.yml`).
 
 ## Documentation
 

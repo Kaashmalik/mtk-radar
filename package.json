@@ -1,1 +1,1 @@
-{"name": "mtk-radar", "version": "0.1.0", "private": true, "scripts": {"dev": "docker compose -f infra/docker/docker-compose.yml up", "api": "uvicorn services.api.main:app --reload --port 8000", "setup": "pnpm install"}}
+{"name": "mtk-radar", "version": "0.1.0", "private": true, "scripts": {"dev": "docker compose -f infra/docker/docker-compose.yml up", "setup": "pnpm install", "test": "pytest services/api/tests -v", "typecheck": "tsc --noEmit -p packages/offer-schema", "seed:sources": "python scripts/seed_sources.py"}, "devDependencies": {"typescript": "^5.7.2"}}

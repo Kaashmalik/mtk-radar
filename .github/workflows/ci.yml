@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python (API + collectors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r services/api/requirements.txt
+          pip install -r workers/requirements.txt
+          pip install pytest
+      - name: Syntax-check all Python
+        run: python -m compileall services workers packages
+      - name: Unit tests
+        run: pytest services/api/tests -v
+
+  node:
+    name: Node (offer-schema + dashboard types)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install workspace
+        run: pnpm install
+      - name: Typecheck offer schema
+        run: pnpm exec tsc --noEmit -p packages/offer-schema
+      # TODO(week-3): `next build` once the dashboard gains real pages/CI deps
