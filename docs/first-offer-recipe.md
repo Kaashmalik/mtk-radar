@@ -55,6 +55,14 @@ python workers/render/main.py --offer <OFFER_ID> --capture <CAPTURE_ID> --video 
 - [ ] Private/unlisted test upload; **recheck offer validity once more before it would ever go public**
 - [ ] Editing handoff (optional manual edit): `python workers/render/handoff.py --project projects/<OFFER_ID>` → asset bundle + import notes (no native project files promised — plan §5)
 - [ ] Schedule the test post from the offer page or calendar (defaults private; approve → schedule from the calendar; pause/resume revalidate the approved script hash)
+- [ ] Publish via the worker (week 10): register the account's credential *reference* (`POST /platform-accounts`, e.g. `credential_source: "env:YOUTUBE_*"`), export the real credentials in env only, then run a private test upload:
+
+```bash
+pip install -r workers/publishing/requirements.txt
+python workers/publishing/main.py --api http://localhost:8000 --once
+```
+
+- [ ] Verify token-expiry recovery once: expire a token on purpose → the account flips to `token_expired`, the post pauses, the calendar shows the alert; refresh the credentials and confirm the worker reports `active` again
 - [ ] Log measured numbers: time spent, missed details, corrections, rendering reliability — this calibration decides what gets automated next
 
 ## Hard no's (§4, §11)

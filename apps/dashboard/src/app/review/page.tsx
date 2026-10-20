@@ -131,7 +131,7 @@ export default async function ReviewPage() {
                 <p className="small">
                   Evidence: <strong>{offer.official_evidence}</strong> official /
                   {offer.evidence_count} total
-                  {offer.conflicts && Array.isArray(offer.conflicts) && offer.conflicts.length > 0 && (
+                  {Array.isArray(offer.conflicts) && offer.conflicts.length > 0 && (
                     <span style={{ color: "#f0883e" }}>
                       {" "}· ⚠ {offer.conflicts.length} extraction conflict(s)
                     </span>

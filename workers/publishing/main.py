@@ -1,21 +1,233 @@
-"""Publishing worker — scheduled multi-platform uploads.
+"""Publishing worker — scheduled multi-platform uploads (week 10, master plan §6/§17).
 
-Weeks 9-10 target (master plan §18): a private/test upload and token-expiry
-recovery are verified.
+Official APIs only (YouTube Data API, Meta Graph). NO browser automation to
+evade platform rules.
 
-Hard rules (master plan §6/§17):
-- Schedule belongs in the dashboard; each queued post references an approved
-  video version AND a valid offer evidence snapshot.
-- Revalidate the offer before upload and again right before publish; auto-pause
-  affected posts if the offer expires or changes.
-- Retries must use idempotency keys (unique in DB) with backoff; a manual
-  pause/cancel control is always operator-visible.
-- Never automate browser clicks to evade platform API rules. Official APIs
-  only: YouTube Data API, Meta Graph API, TikTok Content Posting API,
-  with Postiz as an optional integration (AGPL obligations reviewed).
+Sweep (every tick, or once with --once):
+  1. Load platform accounts from the API; build adapters for configured ones.
+  2. Fetch 'scheduled' posts that are due (local_time <= now).
+  3. For each: locate the render file, upload via the adapter, report the
+     result (idempotent by schedule id).
+  4. Token-expiry recovery: on TokenExpiredError → mark the account expired,
+     pause the queue, raise an operator-visible alert. On later successful
+     refresh, accounts auto-return to 'active' via the on_refresh hook —
+     schedules stay paused for explicit operator resume (human gate, §17).
+
+Usage:
+    pip install -r workers/publishing/requirements.txt
+    python main.py [--once] [--api http://localhost:8000]
 """
 
-# Queue states: draft → needs_approval → approved → scheduled → published|failed|paused
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
+
+from platforms import (  # noqa: E402
+    FacebookAdapter,
+    NotConfiguredError,
+    OAuthConfig,
+    TokenExpiredError,
+    YouTubeAdapter,
+)
+
+API_URL_DEFAULT = "http://localhost:8000"
+SWEEP_INTERVAL_S = 60
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
+log = logging.getLogger("publishing")
+
+
+class Publisher:
+    def __init__(self, api_url: str = API_URL_DEFAULT):
+        self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"))
+
+    # ------------------------------------------------------------ adapters
+
+    def build_adapters(self) -> dict[str, object]:
+        """Instantiate adapters from credential REFERENCES in platform_accounts
+        (credential_source like 'env:YOUTUBE_*'). Raw tokens never come from DB."""
+        adapters: dict[str, object] = {}
+
+        try:
+            accounts = self.api.get("/platform-accounts").json()
+        except httpx.HTTPError as exc:
+            log.error("cannot list platform accounts: %s", exc)
+            return adapters
+
+        for account in accounts:
+            platform = account["platform"]
+            if platform == "youtube":
+                oauth = OAuthConfig.from_env()
+                if oauth:
+                    adapters[platform] = YouTubeAdapter(
+                        oauth=oauth, account_id=account["id"],
+                        on_refresh=self._make_refresh_hook(account["id"]),
+                    )
+                else:
+                    log.warning("YouTube account registered but YOUTUBE_* env missing")
+            elif platform == "facebook":
+                page_id = os.environ.get("FACEBOOK_PAGE_ID", "")
+                token = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "")
+                if page_id and token:
+                    adapters[platform] = FacebookAdapter(
+                        page_id=page_id, page_access_token=token,
+                        account_id=account["id"],
+                    )
+                else:
+                    log.warning("Facebook account registered but FACEBOOK_* env missing")
+        return adapters
+
+    def _make_refresh_hook(self, account_id: str):
+        def hook(expires_at) -> None:
+            try:
+                self.api.post(
+                    f"/platform-accounts/{account_id}/refreshed",
+                    json={"expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at)},
+                )
+                log.info("account %s token refreshed (expiry reported, token kept in memory)", account_id)
+            except httpx.HTTPError as exc:
+                log.warning("could not report refresh for account %s: %s", account_id, exc)
+        return hook
+
+    # ---------------------------------------------------------------- sweep
+
+    def run_once(self) -> int:
+        now = datetime.now(timezone.utc)
+        adapters = self.build_adapters()
+
+        posts = self.api.get("/schedules", params={"state": "scheduled", "limit": 200}).json()
+        due = [p for p in posts if _is_due(p.get("local_time"), now)]
+        if due:
+            log.info("%d scheduled post(s) due", len(due))
+
+        published = 0
+        for post in due:
+            try:
+                self._publish(post, adapters)
+                published += 1
+            except Exception as exc:  # noqa: BLE001
+                log.exception("publish failed for schedule %s", post["id"])
+                self._report(post["id"], ok=False, detail=f"unexpected: {exc}")
+        return published
+
+    def _publish(self, post: dict, adapters: dict) -> None:
+        platform = post["platform"]
+        adapter = adapters.get(platform)
+        if adapter is None:
+            self._report(post["id"], ok=False,
+                         detail=f"platform '{platform}' not configured (register env credentials)")
+            return
+
+        render = self._latest_render(post["offer_id"])
+        if render is None:
+            self._report(post["id"], ok=False, detail="no render available for this offer")
+            return
+
+        video_path = render["video_path"]
+        # object-storage phase pending: the file must exist on this host
+        if not Path(video_path).exists():
+            self._report(post["id"], ok=False,
+                         detail=f"render file not on this host: {video_path} (storage phase pending)")
+            return
+
+        meta = post.get("metadata")
+        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        meta.setdefault("title", f"{post.get('offer_title', 'MTK RADAR AI')}")
+
+        try:
+            remote_id = adapter.upload(
+                Path(video_path),
+                meta,
+                privacy=post.get("privacy", "private"),
+                idempotency_key=post.get("idempotency_key") or post["id"],
+            )
+        except TokenExpiredError as exc:
+            log.error("ALERT token expiry on %s: %s — account marked expired, post paused",
+                      platform, exc)
+            account_id = getattr(adapter, "account_id", None)
+            if account_id:
+                self.api.post(f"/platform-accounts/{account_id}/mark-expired",
+                              json={"detail": str(exc)})
+            self.api.post(f"/schedules/{post['id']}/pause")
+            return
+        except NotConfiguredError as exc:
+            self._report(post["id"], ok=False, detail=str(exc))
+            return
+
+        self._report(post["id"], ok=True, remote_post_id=remote_id,
+                     detail=f"uploaded to {platform} ({post.get('privacy', 'private')})")
+        log.info("published %s → %s (%s)", post["id"], platform, remote_id)
+
+    def _latest_render(self, offer_id: str) -> dict | None:
+        try:
+            renders = self.api.get("/renders", params={"offer_id": offer_id}).json()
+            return renders[0] if renders else None
+        except httpx.HTTPError:
+            return None
+
+    def _report(self, schedule_id: str, *, ok: bool, detail: str | None = None,
+                remote_post_id: str | None = None) -> None:
+        try:
+            self.api.post(
+                f"/schedules/{schedule_id}/result",
+                json={"ok": ok, "remote_post_id": remote_post_id, "detail": detail},
+            )
+        except httpx.HTTPError as exc:
+            log.error("failed to report result for %s: %s", schedule_id, exc)
+
+    # ------------------------------------------------------------ main loop
+
+    def run_forever(self, interval_s: int = SWEEP_INTERVAL_S) -> None:
+        log.info("publishing worker started against %s", self.api.base_url)
+        while True:
+            try:
+                self.run_once()
+                time.sleep(interval_s)
+            except httpx.HTTPError as exc:
+                log.error("API unreachable, retrying in %ss: %s", interval_s, exc)
+                time.sleep(interval_s)
+
+
+def _is_due(local_time: str | None, now: datetime) -> bool:
+    if not local_time:
+        return False
+    try:
+        when = datetime.fromisoformat(local_time.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when <= now
+
+
+def _account_hint(adapters: dict, platform: str) -> str | None:
+    adapter = adapters.get(platform)
+    return getattr(adapter, "account_id", None)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MTK RADAR publishing worker")
+    parser.add_argument("--once", action="store_true", help="run one sweep and exit")
+    parser.add_argument("--api", default=API_URL_DEFAULT)
+    args = parser.parse_args()
+
+    publisher = Publisher(args.api)
+    if args.once:
+        count = publisher.run_once()
+        log.info("sweep complete: %d published", count)
+        return
+    publisher.run_forever()
+
 
 if __name__ == "__main__":
-    raise NotImplementedError("publish adapters not implemented yet (weeks 9-11)")
+    main()

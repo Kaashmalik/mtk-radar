@@ -18,11 +18,12 @@ jobs:
         run: |
           pip install -r services/api/requirements.txt
           pip install -r workers/requirements.txt
+          pip install -r workers/publishing/requirements.txt
           pip install pytest
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests
-        run: pytest services/api/tests workers/verification/tests workers/render/tests -v
+        run: pytest services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
 
   node:
     name: Node (offer-schema + dashboard types)
@@ -38,4 +39,6 @@ jobs:
         run: pnpm install
       - name: Typecheck offer schema
         run: pnpm exec tsc --noEmit -p packages/offer-schema
-      # TODO(week-3): `next build` once the dashboard gains real pages/CI deps
+      - name: Typecheck dashboard
+        run: pnpm exec tsc --noEmit -p apps/dashboard
+      # TODO: `next build` once CI deps/settings for the dashboard are settled

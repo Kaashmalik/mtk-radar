@@ -4,6 +4,8 @@ import ScheduleActions from "./ScheduleActions";
  * Content calendar (week 9, master plan §17): per-platform schedules displayed
  * in Asia/Karachi by default, with operator pause/cancel controls and the
  * reapproval rule surfaced on hash mismatch.
+ * Week 10 (§6): publishing account health — credential references only, token
+ * expiry surfaced so the operator can recover dead sessions.
  */
 
 const API = process.env.API_URL ?? "http://localhost:8000";
@@ -37,6 +39,27 @@ async function getSchedules(): Promise<ScheduleRow[]> {
   }
 }
 
+type AccountRow = {
+  id: string;
+  platform: string;
+  account_handle: string;
+  credential_source: string;
+  status: string;
+  expires_at: string | null;
+  last_refreshed_at: string | null;
+  last_error: string | null;
+};
+
+async function getAccounts(): Promise<AccountRow[]> {
+  try {
+    const res = await fetch(`${API}/platform-accounts`, { cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
 const STATE_COLORS: Record<string, string> = {
   draft: "#8b949e",
   needs_approval: "#d29922",
@@ -60,7 +83,7 @@ function timeLabel(iso: string): string {
 }
 
 export default async function CalendarPage() {
-  const rows = await getSchedules();
+  const [rows, accounts] = await Promise.all([getSchedules(), getAccounts()]);
 
   const byDay = new Map<string, ScheduleRow[]>();
   for (const row of rows) {
@@ -77,6 +100,51 @@ export default async function CalendarPage() {
         Per-platform schedules · {DISPLAY_TZ} display timezone · pause/resume with
         hash revalidation (edited content stays paused until reapproved).
       </p>
+
+      <section className="card">
+        <h2>Publishing accounts</h2>
+        {accounts.length === 0 ? (
+          <p className="muted small">
+            No platform accounts registered. Register credential references
+            (env prefixes or vault paths — never raw tokens) via
+            <code> POST /platform-accounts</code>.
+          </p>
+        ) : (
+          <div style={{ display: "grid", gap: "0.5rem" }}>
+            {accounts.map((a) => {
+              const color =
+                a.status === "active" ? "#3fb950"
+                : a.status === "token_expired" ? "#f85149"
+                : "#8b949e";
+              return (
+                <article key={a.id} className="entry">
+                  <div className="entry-head">
+                    <div>
+                      <strong>{a.platform}</strong> — {a.account_handle}
+                      <div className="muted small">
+                        {a.credential_source}
+                        {a.expires_at && (
+                          <> · token expires {timeLabel(a.expires_at)} {dayKey(a.expires_at)}</>
+                        )}
+                        {a.last_refreshed_at && (
+                          <> · last refreshed {dayKey(a.last_refreshed_at)}</>
+                        )}
+                        {a.last_error && <> · ⚠ {a.last_error}</>}
+                      </div>
+                    </div>
+                    <span
+                      className="badge"
+                      style={{ color, borderColor: color }}
+                    >
+                      {a.status}
+                    </span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       {rows.length === 0 ? (
         <section className="card">
