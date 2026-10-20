@@ -16,14 +16,16 @@ import asyncpg
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+import db
 from normalize import canonicalize_url, hash_parts
+from offers_api import router as offers_router
 from schemas import ItemIn, PollResult, SourceIn
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.2.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,25 +35,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_pool: asyncpg.Pool | None = None
+app.include_router(offers_router)
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    await db.init(DATABASE_URL)
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    if _pool:
-        await _pool.close()
-
-
-def _pool_or_500() -> asyncpg.Pool:
-    if _pool is None:
-        raise HTTPException(status_code=503, detail="db pool not ready")
-    return _pool
+    await db.close()
 
 
 # ---------------------------------------------------------------- health
@@ -60,7 +54,7 @@ def _pool_or_500() -> asyncpg.Pool:
 @app.get("/health")
 async def health() -> dict:
     """Liveness + DB connectivity probe."""
-    pool = _pool_or_500()
+    pool = db.get()
     try:
         await pool.fetchval("SELECT 1")
     except Exception as exc:  # noqa: BLE001
@@ -73,7 +67,7 @@ async def health() -> dict:
 
 @app.get("/sources")
 async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
-    pool = _pool_or_500()
+    pool = db.get()
     rows = await pool.fetch(
         """
         SELECT id, provider, canonical_domain, account_handle, category, adapter,
@@ -91,7 +85,7 @@ async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
 @app.post("/sources", status_code=201)
 async def create_source(source: SourceIn) -> dict:
     """Register a source. Idempotent on (provider, canonical_domain)."""
-    pool = _pool_or_500()
+    pool = db.get()
     existing = await pool.fetchrow(
         "SELECT id FROM sources WHERE provider = $1 AND COALESCE(canonical_domain, '') = $2",
         source.provider,
@@ -124,7 +118,7 @@ async def create_source(source: SourceIn) -> dict:
 @app.post("/sources/{source_id}/poll-result")
 async def poll_result(source_id: uuid.UUID, result: PollResult) -> dict:
     """Collectors report back after each poll → updates last_checked_at and health."""
-    pool = _pool_or_500()
+    pool = db.get()
     row = await pool.fetchrow(
         """
         UPDATE sources
@@ -152,11 +146,10 @@ async def create_item(item: ItemIn) -> dict:
     — keyed by (source_id, external_item_id) and by the canonical URL + text hash.
     Re-submissions return the existing item with `created: false, duplicate: true`.
     """
-    pool = _pool_or_500()
-    source_id = await _resolve_source_id(pool, item.source_id)
-
+    pool = db.get()
+    resolved = await _resolve_source_id(pool, item.source_id)
     if item.source_id is None:
-        item.source_id = source_id
+        item.source_id = resolved
     source_id = item.source_id
 
     external_item_id = item.external_item_id or str(uuid.uuid4())
@@ -208,7 +201,7 @@ async def list_items(
     limit: int = Query(default=50, le=200),
 ) -> list[dict]:
     """Review inbox — unprocessed candidates first (most recent)."""
-    pool = _pool_or_500()
+    pool = db.get()
     rows = await pool.fetch(
         """
         SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
@@ -229,7 +222,7 @@ async def list_items(
 
 @app.patch("/items/{item_id}/processed")
 async def mark_processed(item_id: uuid.UUID, processed: bool = True) -> dict:
-    pool = _pool_or_500()
+    pool = db.get()
     row = await pool.fetchrow(
         "UPDATE items SET processed = $2 WHERE id = $1 RETURNING id",
         item_id,
@@ -280,6 +273,4 @@ def _json(value) -> str:
     return json.dumps(value, default=str)
 
 
-# TODO(week-3): POST /offers/{id}/evidence — immutable evidence snapshots.
-# TODO(week-3): POST /offers/{id}/transition — offer state machine gatekeeping.
 # TODO(week-9): POST /schedules — schedule creation requires approved version hash.

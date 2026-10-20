@@ -60,7 +60,8 @@ export default async function Home() {
           API:{" "}
           <strong className={health.status === "ok" ? "ok" : "down"}>
             {health.status === "ok" ? "healthy" : "unreachable"}
-          </strong>
+          </strong>{" "}
+          · <a href="/review">Open review desk →</a>
         </p>
       </section>
 
