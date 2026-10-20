@@ -114,6 +114,8 @@ MTK RADAR catalogs offers as distinct types: free/open-weight models, hosted inf
 ## Documentation
 
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
+- [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — open-source repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
+- [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
 
 ## License
 
