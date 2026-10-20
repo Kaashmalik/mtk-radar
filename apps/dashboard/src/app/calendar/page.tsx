@@ -95,6 +95,7 @@ export default async function CalendarPage() {
   return (
     <main className="page">
       <a href="/review" className="back">← Review desk</a>
+      <a href="/analytics" className="back" style={{ marginLeft: "0.9rem" }}>Analytics →</a>
       <h1>Content calendar</h1>
       <p className="tagline">
         Per-platform schedules · {DISPLAY_TZ} display timezone · pause/resume with

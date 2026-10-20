@@ -1,0 +1,4 @@
+# Line-ending policy: shell scripts must stay LF (they run in Linux containers).
+*.sh text eol=lf
+*.sql text
+*.py text

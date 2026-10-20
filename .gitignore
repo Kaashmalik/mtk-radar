@@ -26,3 +26,6 @@ coverage/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Backups (infra/backup.sh output) — sensitive, never commit
+backups/

@@ -114,11 +114,18 @@ New candidates appear once (deduplicated by canonical URL) in the review inbox.
 
 ```bash
 pip install pytest -r services/api/requirements.txt
-pytest services/api/tests -v     # dedup/canonicalization unit tests
-pnpm install && pnpm typecheck   # offer-schema types
+pytest services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
+pnpm install && pnpm typecheck   # offer-schema types + dashboard
 ```
 
 CI runs both on every push (`.github/workflows/ci.yml`).
+
+### Operations (Week 12)
+
+- **Analytics** — dashboard `/analytics` page + `GET /api/analytics`: pipeline funnel, verification load, publishing outcomes, source freshness.
+- **Migrations** — `pnpm migrate` (or `python services/api/db_migrate.py`); numbered SQL, applied once, recorded in `schema_migrations`.
+- **Backup/restore** — `pnpm backup` (`infra/backup.sh`, pg_dump custom format + retention); monthly restore drill via `infra/restore.sh`.
+- See [`docs/runbook.md`](docs/runbook.md) for deployment hardening, token-expiry recovery, incident playbooks, and the first production review.
 
 ## Documentation
 
@@ -128,6 +135,7 @@ CI runs both on every push (`.github/workflows/ci.yml`).
 - [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — upstream repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
 - [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
 - [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
+- [`docs/runbook.md`](docs/runbook.md) — **operational runbook**: deployment, migrations, backup/restore drills, credential & source recovery, incident playbooks, retention policy, first production review.
 - [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, and obligations.
 
 ## Delivery Roadmap
