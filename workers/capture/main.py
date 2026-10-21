@@ -23,11 +23,18 @@ What it does:
 
 import argparse
 import json
+import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
+
+from object_storage import capture_key, make_from_env  # noqa: E402
 
 from redact_local import scan as scan_secrets  # slim copy of the API's scanner
 
@@ -140,10 +147,29 @@ class CaptureSession:
         else:
             print("\nStep log looks clean of known secret patterns — reviewer must still confirm.")
 
+        # v0.15: when storage is configured, the recording is uploaded and the
+        # DB gets a portable ref (s3://… / local://…) instead of a host-local
+        # absolute path — renders and publishing can then run on other hosts.
+        stored_path = video_path
+        if video_path:
+            storage = make_from_env()
+            if storage is not None:
+                try:
+                    stored_path = storage.put(
+                        Path(video_path),
+                        capture_key(
+                            self.offer_id,
+                            Path(self.out_dir).name,
+                            Path(video_path).name,
+                        ),
+                    )
+                except OSError as exc:
+                    print(f"storage upload failed ({exc}) — registering local path")
+
         payload = {
-            "video_path": video_path,
+            "video_path": stored_path,
             "step_log": self.step_log,
-            "notes": f"local capture dir: {self.out_dir}",
+            "notes": f"capture dir: {self.out_dir}",
         }
         resp = self.api.post(f"/offers/{self.offer_id}/captures", json=payload)
         if resp.status_code == 201:

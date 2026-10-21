@@ -39,6 +39,43 @@ services:
       timeout: 3s
       retries: 10
 
+  # ---- S3-compatible object storage (v0.15, profile: storage) -------------
+  # Renders/captions/captures become portable s3:// refs in the DB. Start the
+  # stack with --profile workers --profile storage; set MTK_STORAGE_BACKEND=s3
+  # plus MTK_S3_* (see .env.example) so workers publish refs.
+  minio:
+    profiles: ["storage"]
+    image: quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  storage-init:
+    profiles: ["storage"]
+    image: quay.io/minio/mc:RELEASE.2024-06-13T16-04-24Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+             mc mb --ignore-existing local/$${MTK_S3_BUCKET:-mtk-radar}"
+    environment:
+      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+
   api:
     build:
       context: ../../services/api
@@ -89,6 +126,14 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
+      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
+      MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+      MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
       YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
       YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:-}
@@ -123,3 +168,5 @@ services:
 
 volumes:
   pgdata:
+  minio-data:
+  storage-cache:

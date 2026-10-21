@@ -144,9 +144,45 @@ measure (docs/first-offer-recipe.md drives the steps):
   automated next
 - [ ] CI green on `main`; `python -m compileall services workers packages` clean
 
-## 8. Known gaps (explicit, not hidden)
-- Object storage for capture/render files: local paths only — the publishing
-  worker fails with "render file not on this host" when scaled out.
+## 8. Object storage (v0.15)
+
+Capture videos, renders and captions live in **object storage**; the DB stores
+portable *refs*, never host-local paths. Render, publishing and review can then
+run on different hosts.
+
+| Ref form | Meaning |
+| --- | --- |
+| `s3://<bucket>/<key>` | S3-compatible store (MinIO/AWS/R2/B2) — the multi-host option |
+| `local://<key>` | shared filesystem root (NFS/bind mount) — single-host option |
+| `projects/…` / `/abs/path` | legacy rows (pre-v0.15): resolved against the worker's CWD, unchanged |
+
+**Env** (see `.env.example`):
+- `MTK_STORAGE_BACKEND` unset → legacy relative-path flow (everything still works single-host).
+- `local` → files under `MTK_STORAGE_LOCAL_ROOT` (default `./storage`).
+- `s3` → needs `MTK_S3_ENDPOINT`, `MTK_S3_BUCKET`, `MTK_S3_ACCESS_KEY`, `MTK_S3_SECRET_KEY`, `MTK_S3_REGION`.
+- `MTK_STORAGE_CACHE` — where publishing/render materialize refs (default `./.storage-cache`).
+
+**Flow:** capture worker uploads its recording and registers a ref; render
+worker materializes the capture ref (env-configured driver), renders, uploads
+mp4 + captions, registers refs; publishing worker materializes the render ref
+to its cache before platform upload — a ref that can't be produced on that
+host fails the post with an actionable message ("set MTK_STORAGE_BACKEND or
+run on the render host") instead of a silent file-missing error.
+
+**Compose:** `docker compose --profile workers --profile storage up` starts
+MinIO + bucket creation (`storage-init`). Render remains a host-side run
+(ffmpeg + browser assets) — it uploads over HTTP to MinIO wherever it runs.
+
+**Implementation:** `packages/object_storage/` — zero-dep (httpx only),
+hand-rolled AWS SigV4 validated against AWS's published test vectors *and*
+against a live S3-compatible server (put / get / exists / delete round-trip).
+All 18 storage tests run in CI and `pnpm test`.
+
+Migration of legacy rows: none required — plain paths keep resolving as
+before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
+rows to refs.
+
+## 9. Known gaps (explicit, not hidden)
 - TTS narration segments are mixed into one track and mapped into renders
   (v0.14: disclosure metadata now matches the actual audio); stream-copy concat
   assumes homogenous codec output from the TTS provider.

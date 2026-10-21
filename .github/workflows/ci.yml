@@ -47,14 +47,14 @@ jobs:
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests
-        run: pytest services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
+        run: pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
       - name: Integration tests (real Postgres, real migrations, full pipeline)
         env:
           MTK_TEST_DATABASE_URL: postgresql://mtk:mtk@localhost:5432/mtk_radar_ci
         run: pytest services/api/tests/test_integration.py -v
 
   node:
-    name: Node (offer-schema + dashboard types)
+    name: Node (offer-schema + dashboard types + production build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +73,7 @@ jobs:
         run: pnpm --dir apps/dashboard build
 
   e2e:
-    name: E2E (full stack: Postgres + API + dashboard + browser)
+    name: "E2E — full stack (Postgres + API + dashboard + browser)"
     runs-on: ubuntu-latest
     needs: [python, node]
 

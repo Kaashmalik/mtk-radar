@@ -35,11 +35,18 @@ def _api_auth_headers() -> dict:
     return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 import captions as captions_mod  # noqa: E402
 import narration as narration_mod  # noqa: E402
 import project as project_mod  # noqa: E402
 import render as render_mod  # noqa: E402
+from object_storage import (  # noqa: E402
+    captions_key,
+    make_from_env,
+    materialize,
+    render_key,
+)
 from presets import get_preset  # noqa: E402
 
 API_URL_DEFAULT = "http://localhost:8000"
@@ -109,9 +116,20 @@ class RenderJob:
                 "no capture video — pass --video or record one first "
                 "(workers/capture/main.py)"
             )
-        if not Path(capture_video).exists():
-            raise SystemExit(f"capture video not found: {capture_video} — object-storage "
-                             "download support lands with the infra phase")
+        # v0.15: a managed ref (s3://, local://) is materialized into the
+        # project first; plain paths keep working on the host that has them.
+        if not isinstance(capture_video, str):  # defensive: asyncpg row value
+            capture_video = str(capture_video)
+        local_capture = materialize(
+            capture_video, self.project / "assets" / "captures"
+        )
+        if local_capture is not None:
+            capture_video = str(local_capture)
+        elif not Path(capture_video).exists():
+            raise SystemExit(
+                f"capture video unavailable on this host: {capture_video} — "
+                "configure MTK_STORAGE_* or pass --video with a local file"
+            )
 
         # captions from the step log (source-derived, deterministic)
         step_log = json.loads(capture["step_log"]) if capture and isinstance(capture.get("step_log"), str) \
@@ -181,6 +199,26 @@ class RenderJob:
         )
         manifest_path = project_mod.write_edit_manifest(self.project, manifest)
         log.info("edit manifest written: %s", manifest_path)
+
+        # v0.15: when storage is configured, outputs become managed refs
+        # (s3://… or local://…) stored in the DB — consumers on any host can
+        # materialize them. Unset MTK_STORAGE_BACKEND keeps the legacy
+        # repo-relative paths (single-host flow).
+        storage = make_from_env()
+        if storage is not None:
+            for render_row in results:
+                preset = render_row["preset"]
+                try:
+                    render_row["video_path"] = storage.put(
+                        self.project / f"renders/{offer['id']}-{preset}.mp4",
+                        render_key(offer["id"], preset),
+                    )
+                    render_row["captions_path"] = storage.put(
+                        self.project / "assets/captions.srt",
+                        captions_key(offer["id"], preset),
+                    )
+                except OSError as exc:
+                    log.error("storage upload failed (%s) — keeping local paths", exc)
 
         for render_row in results:
             payload = {

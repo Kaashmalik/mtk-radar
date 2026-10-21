@@ -38,6 +38,9 @@ def _api_auth_headers() -> dict:
     return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
+
+from object_storage import materialize  # noqa: E402
 
 from platforms import (  # noqa: E402
     FacebookAdapter,
@@ -171,10 +174,15 @@ class Publisher:
             return
 
         video_path = render["video_path"]
-        # object-storage phase pending: the file must exist on this host
-        if not Path(video_path).exists():
+        # v0.15: managed refs (s3://, local://) are materialized to a local
+        # cache before upload; legacy plain paths resolve against the CWD
+        # (single-host flow). A ref that can't be produced here fails the post
+        # with an actionable message instead of a bare "not found".
+        video_file = materialize(video_path, Path(os.environ.get("MTK_STORAGE_CACHE", "./.storage-cache")))
+        if video_file is None:
             self._report(post["id"], ok=False,
-                         detail=f"render file not on this host: {video_path} (storage phase pending)")
+                         detail=f"render file not available on this host: {video_path} "
+                                "(set MTK_STORAGE_BACKEND or run on the render host)")
             return
 
         meta = post.get("metadata")
@@ -183,7 +191,7 @@ class Publisher:
 
         try:
             remote_id = adapter.upload(
-                Path(video_path),
+                video_file,
                 meta,
                 privacy=post.get("privacy", "private"),
                 idempotency_key=post.get("idempotency_key") or post["id"],
