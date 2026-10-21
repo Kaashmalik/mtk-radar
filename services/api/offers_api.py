@@ -166,6 +166,43 @@ async def stale_offers() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@router.get("/audit/verified")
+async def audit_verified(limit: int = Query(default=200, le=2000)) -> dict:
+    """Read-only inventory: verified offers that would fail today's gate (slice 14).
+
+    The plan's legacy step is a human decision, so this reports candidates
+    without demoting anything. Each entry carries the same problems a transition
+    to `verified` would raise now, because both use `_verified_problems`.
+    """
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        SELECT id, title, provider, updated_at FROM offers
+        WHERE state = 'verified'
+        ORDER BY updated_at ASC
+        LIMIT $1
+        """,
+        limit,
+    )
+    failures = []
+    for row in rows:
+        problems = await _verified_problems(pool, row["id"])
+        if problems:
+            failures.append({
+                "id": row["id"], "title": row["title"], "provider": row["provider"],
+                "updated_at": row["updated_at"], "problems": problems,
+            })
+    return {
+        "checked": len(rows),
+        "failed": len(failures),
+        "offers": failures,
+        "requirements": {
+            "fetch_provenance": _require_fetch_provenance(),
+            "extraction_coverage": _require_extraction_coverage(),
+        },
+    }
+
+
 @router.get("/{offer_id}")
 async def get_offer(offer_id: uuid.UUID) -> dict:
     pool = db.get()
@@ -764,8 +801,12 @@ async def sweep_stale() -> dict:
 # ---------------------------------------------------------------- gates
 
 
-async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
-    """Revalidate stored proposals, including legacy rows, never trust complete."""
+async def _verified_problems(pool, offer_id: uuid.UUID) -> list[str]:
+    """Everything that would block `verified` now; empty when the gate passes.
+
+    Shared by the transition gate and the read-only legacy audit so the report
+    cannot drift from what a promotion would actually refuse.
+    """
     latest = await pool.fetchrow(
         """
         SELECT fields, conflicts, coverage::text AS coverage FROM extractions
@@ -774,13 +815,13 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
         offer_id,
     )
     if latest is None:
-        raise HTTPException(status_code=422, detail="requires structured extraction with official snapshot evidence")
+        return ["requires structured extraction with official snapshot evidence"]
     try:
         extraction = ExtractionIn.model_validate({
             "fields": decode(latest["fields"]), "conflicts": decode(latest["conflicts"]),
         })
     except ValidationError:
-        raise HTTPException(status_code=422, detail="legacy or invalid extraction; recapture and re-extract") from None
+        return ["legacy or invalid extraction; recapture and re-extract"]
     # The contract is checked against the CURRENT offer type, not the one
     # stored with the proposal: re-typing an offer must invalidate the old
     # pack instead of letting a stale one be inherited.
@@ -796,6 +837,12 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
         problems = list(problems) + await _coverage_problems(
             pool, offer_id, extraction, latest["coverage"],
         )
+    return list(problems)
+
+
+async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
+    """Revalidate stored proposals, including legacy rows, never trust complete."""
+    problems = await _verified_problems(pool, offer_id)
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 

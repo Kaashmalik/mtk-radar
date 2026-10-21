@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** thirteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume and a recheck deadline capped by the offer's expiry. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md) and [slice 13](implementation-wp01-slice13-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** fourteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume, an expiry-capped recheck deadline and a read-only legacy audit. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md) and [slice 14](implementation-wp01-slice14-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -659,6 +659,11 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Set `recheck_at = LEAST(now() + policy, COALESCE(expires_at, 'infinity'))` on the transition to `verified`, so an offer expiring inside the policy window is never described as fresh past its own end; absent and distant expiries keep the two-day policy.
 - [x] Leave existing rows untouched (no backfill) and apply the rule at the next verification; an already-expired offer verified anyway receives a past deadline and is immediately stale at the slice-12 boundaries. 2 new tests; full suite **606 passed, zero skips**. See [thirteenth-slice checkpoint](implementation-wp01-slice13-2026-10-21.md).
 
+**Completed — fourteenth slice, read-only legacy audit:**
+
+- [x] Extract the promotion gate's checks into `_verified_problems()` and keep `_gate_verified` as a thin raising wrapper, so the report and a real promotion cannot drift; every existing 422 message is unchanged.
+- [x] Add `GET /offers/audit/verified`: bounded, oldest-first, read-only list of stored `verified` offers that would fail today's gate, with the exact problems and the active requirements. It never demotes, pauses or audits on its own — reclassification stays an explicit human transition. 2 new tests; full suite **608 passed, zero skips**. See [fourteenth-slice checkpoint](implementation-wp01-slice14-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
 - [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
@@ -667,7 +672,7 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
 - [ ] Make the freshness policy itself risk-based: `recheck_at` is still a fixed two-day interval for every offer (now capped by expiry, but not derived from offer type, provider trust or claim volatility), and a verification does not refuse an already-expired offer.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
-- [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary; no bulk production migration or legacy queue review has been performed.
+- [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary: the read-only audit now lists failing verified offers, but no bulk production migration or human reclassification has been performed, and the report does not yet show the schedules/posts derived from each failing offer.
 - [ ] Deploy migration/API/worker together with owner approval and prove live acquisition/release behavior through the remaining safety gates; local tests are not production deployment.
 
 **Touchpoints:** `services/api/{schemas,offers_api,schedules_api,scriptgen,offer_terms,verification_checks}.py`, `services/api/db/migrations/*`, `workers/verification/*`, `packages/source_adapters/*`; new snapshot/claim modules and next migration(s).
@@ -857,7 +862,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume and an expiry-capped recheck deadline implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume, an expiry-capped recheck deadline and a read-only legacy audit implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, downstream invalidation and human legacy reclassification remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1218,6 +1223,37 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   database was used; no network fetch was performed.
 - **Next smallest task:** report which stored `verified` offers would fail today's
   gate, as the inventory a legacy reclassification decision needs.
+
+#### 21 October 2026, 23:15 UTC — WP01 fourteenth slice: read-only legacy audit
+
+- **Status:** implemented; locally VERIFIED for the audit scope only. Whole WP01
+  stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `b8aa54c`).
+- **Changes:** the promotion gate's checks moved into `_verified_problems()`;
+  `_gate_verified` now raises on that list with identical messages, so an audit
+  cannot drift from a real promotion. `GET /offers/audit/verified` returns a
+  bounded, oldest-first, read-only inventory of stored `verified` offers that
+  would fail today's gate, with the exact problems and active requirements. It
+  never demotes, pauses or audits; reclassification stays a human transition. See
+  [fourteenth-slice checkpoint](implementation-wp01-slice14-2026-10-21.md).
+- **Failing first:** at `b8aa54c` the route does not exist (404) and the gate
+  logic exists only inside the raising function.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **608 passed, 26 warnings, zero skips**, exit 0 (was 606; +2 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The refactor kept every
+  existing gate/422 test green.
+- **Not closed, and deliberately not ticked:** the audit is manual and
+  point-in-time; it does not list the schedules, renders or published posts
+  derived from a failing offer; results are capped and use per-offer queries; no
+  production backlog has been reclassified; terms-change detection, claim-free
+  page coverage, non-symmetric acquisition identity, semantic applicable-terms
+  coverage and downstream invalidation remain open.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database was used; no network fetch was performed.
+- **Next smallest task:** include the blast radius in the audit — the schedules,
+  renders and posts derived from each failing verified offer — before an operator
+  reclassifies it.
 
 ## 13. Coding-model execution guide
 
