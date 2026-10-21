@@ -157,11 +157,14 @@ def test_verification_fetch_uses_the_egress_policy(monkeypatch):
 
 def test_page_adapter_retains_footer_and_final_url():
     class Fetcher:
-        def fetch(self, url):
+        def fetch(self, url, *, headers=None, params=None):
             return httpx.Response(
                 200, text="<p>" + "public text " * 300 + "</p><footer>Students only.</footer>",
                 request=httpx.Request("GET", URL + "/redirected"),
             )
+
+        def fetch_policy(self, url, *, headers=None, params=None, policy=None):
+            return self.fetch(url, headers=headers, params=params)
     full = fetch_page_snapshot(URL, fetcher=Fetcher(), max_text_chars=None)[0]
     excerpt = fetch_page_snapshot(URL, fetcher=Fetcher())[0]
     assert full.text.endswith("Students only.") and len(full.text) > 2000

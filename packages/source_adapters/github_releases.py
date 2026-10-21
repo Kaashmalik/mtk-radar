@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from .client import Fetcher
+from .client import EgressPolicy, Fetcher
 from .models import RawItem
 
 _API = "https://api.github.com"
@@ -20,6 +20,8 @@ def fetch_github_releases(
     fetcher: Optional[Fetcher] = None,
     token: Optional[str] = None,
     per_page: int = 15,
+    *,
+    policy: Optional[EgressPolicy] = None,
 ) -> list[RawItem]:
     if not _REPO_RE.match(repo):
         raise ValueError(f"invalid repo identifier: {repo!r}")
@@ -30,10 +32,11 @@ def fetch_github_releases(
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        resp = fetcher.fetch(
+        resp = fetcher.fetch_policy(
             f"{_API}/repos/{repo}/releases",
             headers=headers,
             params={"per_page": per_page},
+            policy=policy,
         )
         releases = resp.json()
         items: list[RawItem] = []

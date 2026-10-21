@@ -72,7 +72,9 @@ def fetch_page_snapshot(url: str, fetcher: Optional[Fetcher] = None,
             raw_content_b64 = base64.b64encode(result.body).decode("ascii")
             final_url = result.final_url
         else:
-            resp = fetcher.fetch(url)
+            # Collector path: same egress policy as verification, but without
+            # attaching provenance — discovery leads are not evidence.
+            resp = fetcher.fetch_policy(url, policy=EgressPolicy())
             html = resp.text
             final_url = str(resp.url)
 

@@ -215,12 +215,16 @@ def safe_fetch(
     resolver: Optional[Callable[[str, int], list[str]]] = None,
     clock: Optional[Callable[[], datetime]] = None,
     before_request: Optional[Callable[[str], None]] = None,
+    headers: Optional[dict] = None,
+    params: Optional[dict] = None,
 ) -> FetchResult:
     """Fetch one provider page through the egress policy.
 
     Redirects are followed manually so every hop is validated. A non-2xx final
     status is returned to the caller rather than raised. `before_request` runs
-    per hop so a caller can apply per-host politeness delays.
+    per hop so a caller can apply per-host politeness delays. `headers` are
+    merged onto every hop (the validated `Host` always wins) and `params` are
+    applied to the first hop only.
     """
     policy = policy or EgressPolicy()
     resolver = resolver or _default_resolver
@@ -242,6 +246,7 @@ def safe_fetch(
     current = requested
     redirects: list[str] = []
     try:
+        first_hop = True
         for _ in range(policy.max_redirects + 1):
             host, port = validate_url(current, policy)
             addresses = _resolve_public(
@@ -253,17 +258,25 @@ def safe_fetch(
                 # verification still refer to the provider, while a resolver
                 # that changes its answer at connect time has no effect.
                 target = _pinned_url(current, addresses[0])
-                request_headers = {
-                    "Host": _netloc(host, port, urlsplit(current).scheme),
-                }
+                request_headers = {"Host": _netloc(host, port, urlsplit(current).scheme)}
+                if headers:
+                    request_headers.update(headers)
                 extensions = {"sni_hostname": host}
             else:
-                target, request_headers, extensions = current, {}, {}
+                target, request_headers, extensions = current, headers or {}, {}
             if before_request is not None:
                 before_request(current)
 
-            with client.stream("GET", target, headers=request_headers,
-                               extensions=extensions) as response:
+            stream_kwargs: dict = {}
+            if first_hop:
+                first_hop = False
+                if params:
+                    stream_kwargs["params"] = params
+
+            with client.stream(
+                "GET", target, headers=request_headers,
+                extensions=extensions, **stream_kwargs,
+            ) as response:
                 status = response.status_code
                 if status in REDIRECT_STATUSES:
                     location = response.headers.get("location")
