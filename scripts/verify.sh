@@ -45,7 +45,9 @@ for candidate in range(start, start + 50):
 PY
 }
 PG_PORT="${MTK_VERIFY_PG_PORT:-$(pick_port 55499)}"
-PG_URL="postgresql://mtk:mtk@localhost:${PG_PORT}/mtk_verify"
+# 127.0.0.1, not localhost: some hosts resolve localhost to IPv6 ::1 first,
+# while Docker publishes the port on IPv4 only — that fails as a 60s timeout.
+PG_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/mtk_verify"
 VENV="${MTK_VERIFY_VENV:-/tmp/opencode/verify-venv}"
 
 step() { printf '\n\033[1;36m▸ %s\033[0m\n' "$1"; }
@@ -89,7 +91,8 @@ docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
   || { docker logs "$PG_NAME" | tail -5; fail "postgres did not start"; }
 
 MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest \
-  packages/object_storage/tests services/api/tests workers/verification/tests \
+  packages/object_storage/tests packages/source_adapters/tests \
+  services/api/tests workers/verification/tests \
   workers/render/tests workers/publishing/tests workers/metrics/tests \
   workers/batch/tests workers/monitor/tests -q || fail "pytest"
 ok "test suites green"
@@ -147,7 +150,7 @@ if [ "$RUN_E2E" = "1" ]; then
 
   E2E_DB="mtk_verify_e2e"
   docker exec "$PG_NAME" createdb -U mtk "$E2E_DB" > /dev/null 2>&1 || true
-  E2E_URL="postgresql://mtk:mtk@localhost:${PG_PORT}/${E2E_DB}"
+  E2E_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/${E2E_DB}"
 
   PY_BIN="$VENV/bin/python"
   [ -x "$PY_BIN" ] || PY_BIN="python"

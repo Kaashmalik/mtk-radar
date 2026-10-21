@@ -83,6 +83,56 @@ class TestGeneratedScript:
         assert card["unsafe_reasons"] == []
 
 
+class TestUnknownWording:
+    """An unknown fact never becomes a selling point (master plan §6 step 7, A13)."""
+
+    def _unknown_offer(self, **facts):
+        return {
+            "id": "o2", "title": "Free trial", "provider": "Acme", "state": "verified",
+            "eligibility": {}, "value": {}, "claim_steps": [],
+            "promo_code": None, "redemption_url": None, "expires_at": None,
+            "renewal": {}, "category": "ai_tools", "offer_type": "free_trial",
+            "fact_pack": facts,
+        }
+
+    def test_unknown_eligibility_is_not_open_eligibility(self):
+        markdown = generate(self._unknown_offer(
+            eligibility={"status": "unknown"},
+        ), EVIDENCE)["markdown"]
+        assert "Open eligibility" not in markdown
+        assert "Eligibility is not stated in the inspected terms" in markdown
+        assert "Do not present this offer as open to everyone" in markdown
+
+    def test_contradicted_eligibility_requires_review(self):
+        markdown = generate(self._unknown_offer(
+            eligibility={"status": "contradicted"},
+        ), EVIDENCE)["markdown"]
+        assert "contradict" in markdown.lower()
+        assert "manual review is required" in markdown
+
+    def test_absent_expiry_is_not_never_expires(self):
+        markdown = generate(self._unknown_offer(
+            expiry={"status": "unknown"},
+        ), EVIDENCE)["markdown"]
+        assert "no expiry stated in the inspected terms" in markdown
+        assert "not proof the offer never expires" in markdown
+
+    def test_unknown_renewal_is_not_free(self):
+        markdown = generate(self._unknown_offer(
+            renewal={"status": "unknown"},
+        ), EVIDENCE)["markdown"]
+        assert "Unknown renewal is not free" in markdown
+        # "none stated" reads as "no charge" and must not appear.
+        assert "none stated" not in markdown
+
+    def test_contradicted_renewal_requires_review(self):
+        markdown = generate(self._unknown_offer(
+            renewal={"status": "contradicted"},
+        ), EVIDENCE)["markdown"]
+        assert "contradict" in markdown.lower()
+        assert "manual review is required" in markdown
+
+
 class TestCommandCardSafety:
     def test_missing_source_flagged(self):
         cards = build_command_cards([{"kind": "command", "text": "rm -rf /"}])

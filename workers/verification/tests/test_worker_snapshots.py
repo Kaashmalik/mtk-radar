@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from allowlist import build_allowlist
+from source_adapters.egress import EgressPolicy
 from source_adapters.models import RawItem
 from source_adapters.page_watch import fetch_page_snapshot
 
@@ -28,13 +29,15 @@ SOURCE = {
 OFFER = {"id": "offer-1", "provider": "Acme", "state": "evidence_needed"}
 
 
-def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, sources=None):
+def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, sources=None,
+             extra=None):
     posts, fetched = [], []
     sources = sources or [SOURCE]
 
-    def fetch(url, fetcher=None, max_text_chars=2000):
+    def fetch(url, fetcher=None, max_text_chars=2000, policy=None, **kwargs):
         fetched.append((url, max_text_chars))
-        return [RawItem(external_item_id="snapshot-1", url=final_url, text=TEXT)]
+        return [RawItem(external_item_id="snapshot-1", url=final_url, text=TEXT,
+                        extra=extra or {})]
 
     def transport(request):
         if request.method == "GET":
@@ -58,6 +61,7 @@ def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, 
     worker = object.__new__(worker_main.Verifier)
     worker.api_url = "https://api.test"
     worker.fetcher = object()
+    worker.policy = EgressPolicy()
     with httpx.Client(transport=httpx.MockTransport(transport)) as worker.client:
         worker.verify_offer(OFFER, build_allowlist(sources))
     return fetched, posts
@@ -94,6 +98,63 @@ def test_disabled_source_is_not_fetched(monkeypatch):
     assert fetched == [] and posts == []
 
 
+def test_provenance_and_raw_bytes_are_forwarded_to_the_api(monkeypatch):
+    provenance = {
+        "requested_url": URL, "final_url": URL, "http_status": 200,
+        "content_type": "text/html", "fetched_at": "2026-10-21T12:00:00+00:00",
+        "redirects": [], "raw_sha256": "a" * 64, "byte_length": 10,
+        "encoding": "utf-8", "parser_version": "page_watch/1",
+    }
+    _, posts = exercise(monkeypatch, extra={
+        "provenance": provenance, "raw_content_b64": "PGh0bWw+",
+    })
+    evidence = next(payload for path, payload in posts if path.endswith("/evidence"))
+    assert evidence["raw_content_b64"] == "PGh0bWw+"
+    assert evidence["provenance"]["parser_version"] == "page_watch/1"
+    assert evidence["provenance"]["fetch_identity"] == worker_main.FETCH_IDENTITY
+
+
+def test_unavailable_page_is_not_stored_as_terms(monkeypatch):
+    """A 503/challenge body must never become official evidence."""
+    _, posts = exercise(monkeypatch, extra={
+        "provenance": {
+            "requested_url": URL, "final_url": URL, "http_status": 503,
+            "content_type": "text/html", "fetched_at": "2026-10-21T12:00:00+00:00",
+            "redirects": [], "raw_sha256": "a" * 64, "byte_length": 10,
+            "encoding": "utf-8", "parser_version": "page_watch/1",
+        },
+        "raw_content_b64": "PGh0bWw+",
+    })
+    assert not any(path.endswith("/evidence") for path, _ in posts)
+    assert not any(path.endswith("/extraction") for path, _ in posts)
+    assert not any(path.endswith("/transition") for path, _ in posts)
+
+
+def test_verification_fetch_uses_the_egress_policy(monkeypatch):
+    seen = {}
+
+    def fetch(url, fetcher=None, max_text_chars=2000, policy=None, **kwargs):
+        seen["policy"] = policy
+        return [RawItem(external_item_id="s", url=URL, text=TEXT)]
+
+    monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
+    monkeypatch.setattr(worker_main, "extract", lambda text, url: ({}, [], None))
+    posts = []
+
+    def post(path, json):
+        posts.append(path)
+        return httpx.Response(201, json={"id": "evidence-1", "complete": False},
+                              request=httpx.Request("POST", "https://api.test" + path))
+
+    worker = object.__new__(worker_main.Verifier)
+    worker.fetcher = object()
+    worker.policy = EgressPolicy()
+    worker._official_pages = lambda *args: [URL]
+    worker._post = post
+    worker.verify_offer(OFFER, build_allowlist([SOURCE]))
+    assert isinstance(seen["policy"], EgressPolicy)
+
+
 def test_page_adapter_retains_footer_and_final_url():
     class Fetcher:
         def fetch(self, url):
@@ -127,6 +188,7 @@ def test_conflict_is_retained_when_best_page_lacks_that_field(monkeypatch):
     monkeypatch.setattr(worker_main, "extract", lambda text, url: (proposals[pages.index(url)], [], None))
     worker = object.__new__(worker_main.Verifier)
     worker.fetcher = object()
+    worker.policy = EgressPolicy()
     worker._official_pages = lambda *args: pages
     worker._post = post
     worker.verify_offer(OFFER, build_allowlist([SOURCE]))

@@ -85,6 +85,74 @@ class TestRuleExtractor:
         assert is_complete(fields)
 
 
+class TestTypedRuleExtraction:
+    """Typed claims are classifications; the server still verifies the quote."""
+
+    def test_free_benefit_is_classified(self):
+        fields = extract_fields_rules(
+            "Students get a free trial for 30 days.", "https://x.example.com/terms"
+        )
+        assert fields["benefit_type"]["value"] == "free"
+
+    def test_free_shipping_is_not_a_free_benefit(self):
+        fields = extract_fields_rules(
+            "Members get free shipping on every order.", "https://x.example.com/terms"
+        )
+        assert "benefit_type" not in fields
+
+    def test_discount_is_classified(self):
+        fields = extract_fields_rules(
+            "Use this 40% off discount code.", "https://x.example.com/terms"
+        )
+        assert fields["benefit_type"]["value"] == "discounted"
+
+    def test_price_inside_a_renewal_clause_is_labelled_renewal(self):
+        fields = extract_fields_rules(
+            "The first year is free. Afterwards the domain renews at $49.99 per year.",
+            "https://x.example.com/terms",
+        )
+        assert fields["price"]["basis"] == "renewal"
+
+    def test_price_outside_a_renewal_clause_is_labelled_initial(self):
+        fields = extract_fields_rules(
+            "The first month costs $10 for new accounts.", "https://x.example.com/terms"
+        )
+        assert fields["price"]["basis"] == "initial"
+
+    def test_worldwide_claim_is_extracted(self):
+        fields = extract_fields_rules(
+            "This offer is available worldwide for verified students.",
+            "https://x.example.com/terms",
+        )
+        assert fields["regions"]["value"] == "worldwide"
+
+    def test_eligible_regions_are_extracted(self):
+        fields = extract_fields_rules(
+            "Offer available in the US and PK for students.", "https://x.example.com/terms"
+        )
+        assert fields["regions"]["value"] == "US, PK"
+        assert fields["regions"]["excluded_regions"] == []
+
+    def test_excluded_region_is_recorded(self):
+        fields = extract_fields_rules(
+            "Offer available in the US and PK, not available in Germany, for students.",
+            "https://x.example.com/terms",
+        )
+        assert fields["regions"]["value"] == "US, PK"
+        assert fields["regions"]["excluded_regions"] == ["Germany"]
+
+    def test_auto_renew_yes_and_no(self):
+        yes = extract_fields_rules(
+            "The plan renews automatically for students.", "https://x.example.com/terms"
+        )
+        assert yes["auto_renew"]["value"] == "yes"
+        no = extract_fields_rules(
+            "The plan does not auto-renew automatically for students.",
+            "https://x.example.com/terms",
+        )
+        assert no["auto_renew"]["value"] == "no"
+
+
 def test_model_reported_conflicts_are_not_discarded(monkeypatch):
     text = "Use code SAVE2026 at checkout for students."
     fields = extract_fields_rules(text, "https://example.com/terms")

@@ -34,16 +34,22 @@ def fields():
 class GatePool:
     """Small query boundary fake; real SQL is exercised by integration tests."""
 
-    def __init__(self):
+    def __init__(self, offer_type="coupon"):
+        self.offer_type = offer_type
         self.extraction = {"fields": json.dumps(fields()), "conflicts": "[]", "complete": True}
         self.evidence = [{
             "id": EVIDENCE_ID, "url": URL, "official": True, "domain_ok": True,
             "captured_content": TEXT,
             "content_hash": hashlib.sha256(TEXT.encode()).hexdigest(),
             "provider": "Acme", "source_id": None,
+            # WP01 slice 3: machine evidence must carry raw bytes + provenance.
+            "reviewer": None, "raw_preserved": True, "requested_url": URL,
+            "parser_version": "page_watch/1",
         }]
 
     async def fetchrow(self, query, *args):
+        if "FROM offers" in query:
+            return {"offer_type": self.offer_type}
         # The old gate reads these counts and blindly trusts complete=True.
         return {
             "official_ok": 1, "total_evidence": 1, "extraction_complete": True,
@@ -68,7 +74,7 @@ def test_valid_bound_quotes_pass():
     "empty_fields", "missing_context", "conflicts", "unrelated_url",
     "foreign_evidence", "invented_quote", "invented_value", "legacy_snapshot",
     "hash_mismatch", "unofficial", "malformed_legacy_fields", "no_extraction",
-    "malformed_conflicts", "numeric_substring",
+    "malformed_conflicts", "numeric_substring", "no_raw_provenance",
 ])
 def test_complete_flag_cannot_override_invalid_evidence(case):
     pool = GatePool()
@@ -104,8 +110,130 @@ def test_complete_flag_cannot_override_invalid_evidence(case):
         payload["promo_code"]["excerpt"] = "Promo code SAVE2026.99 for students."
         pool.evidence[0]["captured_content"] = payload["promo_code"]["excerpt"]
         pool.evidence[0]["content_hash"] = hashlib.sha256(pool.evidence[0]["captured_content"].encode()).hexdigest()
+    elif case == "no_raw_provenance":
+        pool.evidence[0].update(raw_preserved=False, requested_url=None, parser_version=None)
     if pool.extraction is not None:
         pool.extraction["fields"] = json.dumps(payload)
     with pytest.raises(HTTPException) as exc:
         gate(pool)
     assert exc.value.status_code == 422
+
+
+def _field(value, excerpt=TEXT, **extra):
+    payload = {
+        "value": value, "evidence_id": str(EVIDENCE_ID),
+        "evidence_url": URL, "excerpt": excerpt,
+    }
+    payload.update(extra)
+    return payload
+
+
+class TestOfferTypeContract:
+    """The offer-type checklist decides completeness, not the caller's flag."""
+
+    def run_gate(self, offer_type, payload, text=TEXT):
+        pool = GatePool(offer_type)
+        pool.extraction = {"fields": json.dumps(payload), "conflicts": "[]", "complete": True}
+        pool.evidence[0]["captured_content"] = text
+        pool.evidence[0]["content_hash"] = hashlib.sha256(text.encode()).hexdigest()
+        return gate(pool)
+
+    def test_free_trial_without_billing_terms_is_blocked(self):
+        """A free trial must prove its ongoing cost, not just a promo code."""
+        payload = {
+            "promo_code": _field("SAVE2026"),
+            "eligibility": _field("students"),
+        }
+        with pytest.raises(HTTPException) as exc:
+            self.run_gate("free_trial", payload)
+        assert exc.value.status_code == 422
+        assert "renewal" in exc.value.detail
+        assert "auto_renew" in exc.value.detail
+
+    def test_free_trial_with_every_required_claim_passes(self):
+        text = ("Free trial for students. Use promo code SAVE2026. "
+                "Valid until 31 December 2026. "
+                "The subscription renews automatically at $19 per month.")
+        payload = {
+            "value": _field("free trial", text),
+            "benefit_type": _field("free", text),
+            "eligibility": _field("students", text),
+            "expiry": _field("31 December 2026", text),
+            "renewal": _field("$19", text),
+            "auto_renew": _field("yes", text),
+        }
+        self.run_gate("free_trial", payload, text)
+
+    def test_negated_eligibility_contradicts_the_claim(self):
+        text = "Use promo code SAVE2026. Students are not eligible for this promotion."
+        payload = {
+            "promo_code": _field("SAVE2026", text),
+            "eligibility": _field("students", text),
+        }
+        with pytest.raises(HTTPException) as exc:
+            self.run_gate("coupon", payload, text)
+        assert exc.value.status_code == 422
+        assert "contradicted" in exc.value.detail
+
+    def test_renewal_price_never_passes_as_the_initial_price(self):
+        text = ("New customers only. The first year is free; afterwards the domain "
+                "renews at $49.99 per year.")
+        payload = {
+            "price": _field("$49.99", text, basis="initial"),
+            "eligibility": _field("New customers", text),
+        }
+        with pytest.raises(HTTPException) as exc:
+            self.run_gate("domain_discount", payload, text)
+        assert exc.value.status_code == 422
+        assert "renewal price" in exc.value.detail
+
+    def test_ambiguous_deadline_stays_unknown(self):
+        text = "No expiry is stated in the offer terms. Use promo code SAVE2026 for students."
+        payload = {
+            "promo_code": _field("SAVE2026", text),
+            "eligibility": _field("students", text),
+            "expiry": _field("no expiry", text),
+        }
+        with pytest.raises(HTTPException) as exc:
+            self.run_gate("credits", payload, text)
+        assert exc.value.status_code == 422
+        assert "expiry" in exc.value.detail
+
+    def test_unmapped_offer_type_keeps_the_baseline_core(self):
+        """An offer type with no published contract still needs incentive + context."""
+        payload = {"promo_code": _field("SAVE2026")}
+        with pytest.raises(HTTPException) as exc:
+            self.run_gate("coupon", payload)
+        assert exc.value.status_code == 422
+        assert "eligibility" in exc.value.detail
+
+
+class TestFetchProvenanceGate:
+    """WP01 slice 3: machine evidence must prove the bytes it came from."""
+
+    def test_missing_raw_bytes_blocks_promotion(self):
+        pool = GatePool()
+        pool.evidence[0].update(raw_preserved=False, requested_url=None, parser_version=None)
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "raw page bytes and fetch provenance" in exc.value.detail
+        assert "recapture" in exc.value.detail
+
+    def test_reviewer_attested_snapshot_is_exempt(self):
+        """A human attestation is recorded in the audit log; no fetch to prove."""
+        pool = GatePool()
+        pool.evidence[0].update(raw_preserved=False, requested_url=None,
+                                parser_version=None, reviewer="Kashi")
+        gate(pool)  # must not raise
+
+    def test_explicit_opt_out_disables_only_the_provenance_check(self, monkeypatch):
+        monkeypatch.setenv("MTK_REQUIRE_FETCH_PROVENANCE", "0")
+        pool = GatePool()
+        pool.evidence[0].update(raw_preserved=False, requested_url=None, parser_version=None)
+        gate(pool)  # must not raise while the deployment opts out
+
+    def test_provenance_requirement_is_on_by_default(self, monkeypatch):
+        monkeypatch.delenv("MTK_REQUIRE_FETCH_PROVENANCE", raising=False)
+        from offers_api import _require_fetch_provenance
+        assert _require_fetch_provenance() is True

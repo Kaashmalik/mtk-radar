@@ -105,15 +105,21 @@ def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[
         audience.append("new customers only")
 
     renewal = decode_mapping(offer.get("renewal"))
+    # Never assert a generic "genuine end-to-end claim": an account-specific
+    # walkthrough is not a promise that every viewer gets the same result (A13).
     lines: list[str] = [
-        f"Genuine end-to-end claim of {offer.get('title', 'this offer')} by {provider}.",
-        " · ".join(audience) if audience else "Check official terms for current eligibility.",
+        f"Official offer walkthrough: {offer.get('title', 'this offer')} by {provider}. "
+        "Results depend on your account and eligibility.",
+        " · ".join(audience) if audience else
+        "Eligibility not stated in the inspected terms — check the official terms for the current audience.",
     ]
     if renewal.get("regularPrice"):
         lines.append(
             f"After the free period this renews at {renewal['regularPrice']}"
             f"{' (auto-renew)' if renewal.get('autoRenew') else ''}."
         )
+    else:
+        lines.append("Ongoing cost not stated in the inspected terms — unknown renewal is not free.")
     if disclosure.get("synthetic_narration"):
         lines.append("Narration is AI-generated (disclosed per platform policy).")
     if correction_url:

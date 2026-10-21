@@ -113,6 +113,28 @@ class TestPlatformMetadata:
             platform_metadata("twitter", OEFFER, [], {})
 
 
+class TestPlatformMetadataUnknownWording:
+    """Metadata must not turn an unchecked fact into a promise (A13)."""
+
+    BARE = {"id": "o2", "title": "Free trial", "provider": "Acme",
+            "eligibility": {}, "renewal": {}}
+
+    def test_no_genuine_end_to_end_claim(self):
+        caption = platform_metadata("youtube", self.BARE, [], {})["caption"]
+        assert "Genuine end-to-end claim" not in caption
+        assert "Results depend on your account and eligibility" in caption
+
+    def test_unknown_eligibility_states_the_unknown(self):
+        caption = platform_metadata("youtube", self.BARE, [], {})["caption"]
+        assert "Eligibility not stated in the inspected terms" in caption
+        assert "Open to everyone" not in caption
+
+    def test_unknown_renewal_is_not_free(self):
+        caption = platform_metadata("youtube", self.BARE, [], {})["caption"]
+        assert "unknown renewal is not free" in caption.lower()
+        assert "no ongoing cost" not in caption.lower()
+
+
 class TestPublishWindow:
     def test_next_18_pk_slot(self):
         assert "T13:00" in default_publish_window()  # 13:00 UTC == 18:00 PKT

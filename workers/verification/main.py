@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from source_adapters import Fetcher, fetch_page_snapshot  # noqa: E402
+from source_adapters.egress import EgressPolicy  # noqa: E402
 
 from allowlist import build_allowlist  # noqa: E402
 from extractors import extract, is_complete  # noqa: E402
@@ -45,6 +46,8 @@ from allowlist import domain_ok  # noqa: E402
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 SWEEP_INTERVAL = 120  # seconds
 VERIFY_STATES = ("candidate", "evidence_needed")
+#: Recorded with every snapshot so a reviewer can see which process fetched it.
+FETCH_IDENTITY = os.environ.get("MTK_FETCH_IDENTITY", "verification-worker")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("verification")
@@ -55,6 +58,9 @@ class Verifier:
         self.api_url = api_url.rstrip("/")
         self.client = httpx.Client(timeout=30, headers=_api_auth_headers())
         self.fetcher = Fetcher(timeout=25.0, min_interval=3.0)
+        # Verification fetches are HTTPS-only, public-address-only, hop-validated
+        # and bounded (master plan §6 step 2, audit A19).
+        self.policy = EgressPolicy()
 
     # ------------------------------------------------------------- API I/O
 
@@ -124,24 +130,45 @@ class Verifier:
         conflicts: list = []
         model_used = None
         observed_values: dict[str, str] = {}
+        usable_pages = 0
         for url in official_urls:
-            snapshot = fetch_page_snapshot(url, fetcher=self.fetcher, max_text_chars=None)
+            snapshot = fetch_page_snapshot(
+                url, fetcher=self.fetcher, max_text_chars=None, policy=self.policy,
+            )
             if not snapshot or not snapshot[0].text:
                 continue
             item = snapshot[0]
             # Never certify a provider URL that redirected to a different owner.
             if not domain_ok(allowlist, provider, item.url):
                 raise ValueError("official page redirected outside the provider allowlist")
+            provenance = item.extra.get("provenance")
+            if provenance and not 200 <= provenance["http_status"] < 300:
+                # An outage or challenge means "unavailable", never proof the
+                # offer ended or is valid (§6 step 2). Do not store the error
+                # page as if it were the provider's terms.
+                log.warning(
+                    "offer %s: %s returned HTTP %s — treated as unavailable, not as terms",
+                    offer_id, item.url, provenance["http_status"],
+                )
+                continue
             if len(item.text) > 250_000:
                 raise ValueError("official snapshot too large; review rather than truncate terms")
             fields, page_conflicts, page_model = extract(item.text, item.url)
-            evidence = self._post(f"/offers/{offer_id}/evidence", json={
+            payload = {
                 "url": item.url, "captured_content": item.text,
                 "excerpt": item.title, "official": True,
                 "supported_fields": sorted(fields),
-            })
+            }
+            # Exact bytes + how they were fetched. The API re-hashes and
+            # re-checks every URL in the chain; it never trusts these.
+            if provenance:
+                provenance = {**provenance, "fetch_identity": FETCH_IDENTITY}
+                payload["raw_content_b64"] = item.extra["raw_content_b64"]
+                payload["provenance"] = provenance
+            evidence = self._post(f"/offers/{offer_id}/evidence", json=payload)
             evidence.raise_for_status()
             evidence_id = evidence.json()["id"]  # duplicates return the same identity
+            usable_pages += 1
             for field in fields.values():
                 field["evidence_id"] = evidence_id
             # Retain disagreement across official pages rather than picking the
@@ -156,6 +183,12 @@ class Verifier:
                 model_used = page_model
             if page_conflicts:
                 conflicts.extend(page_conflicts)
+
+        if usable_pages == 0:
+            # Nothing was actually read. Posting an empty extraction would
+            # overwrite a previous truthful proposal with silence.
+            log.warning("offer %s: no official page was readable; leaving evidence_needed", offer_id)
+            return
 
         response = self._post(f"/offers/{offer_id}/extraction", json={
             "fields": best_fields,
