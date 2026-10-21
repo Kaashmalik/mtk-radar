@@ -16,7 +16,9 @@ own audio is used — verification must never depend on TTS being available.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Final, Optional
+
+FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 _MARKDOWN_NOISE = ("```", "---", "> ", "# ", "- ", "  -")
 
@@ -106,6 +108,41 @@ def concat_paths(paths: list[str], out_path: Path) -> Optional[Path]:
     list_file = out_path.with_suffix(".txt")
     list_file.write_text("\n".join(f"file '{p}'" for p in paths), encoding="utf-8")
     return list_file
+
+
+def ffmpeg_concat_cmd(list_file: Path, out_path: Path) -> list[str]:
+    """Concat-demuxer command: stream-copy identical-codec segments (fast,
+    no re-encode). -safe 0 because segment paths are absolute."""
+    return [
+        FFMPEG, "-y", "-f", "concat", "-safe", "0",
+        "-i", str(list_file), "-c", "copy", str(out_path),
+    ]
+
+
+def mix_segments(paths: list[str], out_dir: Path) -> Optional[Path]:
+    """Per-segment TTS files → ONE narration track (v0.14).
+
+    Returns the mixed track path, or None on any failure — callers must treat
+    None as "no narration" so the disclosure metadata never claims synthetic
+    narration that isn't in the render (§5 authenticity).
+    """
+    if not paths:
+        return None
+    out = out_dir / "narration.mp3"
+    list_file = concat_paths(paths, out)
+    if list_file is None:
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ffmpeg_concat_cmd(list_file, out), capture_output=True, text=True, timeout=120
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        return None
+    return out
 
 
 def disclosure_record(used: bool, model: str | None = None) -> dict:

@@ -1,0 +1,10 @@
+# v0.14: the CI-enforced error class set. Broad style linting stays opt-in
+# locally (`ruff check` without --select adds rules as adopted) — these rules
+# are the ones that catch shipping bugs (undefined names, broken calls),
+# the class of defect that reached week-12 analytics.
+[lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[lint.per-file-ignores]
+# workers insert sys.path shims before imports by design
+"workers/**" = ["E402"]

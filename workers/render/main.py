@@ -131,7 +131,16 @@ class RenderJob:
                 narration_mod.narration_segments(sources["script"]["markdown"]),
                 self.project / "assets" / "narration",
             )
-            narration_used = narration["used"]
+            if narration["used"]:
+                # v0.14: mix per-segment files into ONE track and USE it in the
+                # renders. A failed mix downgrades to capture audio — disclosure
+                # metadata must never claim narration that is not in the video.
+                track = narration_mod.mix_segments(
+                    narration["paths"], self.project / "assets" / "narration"
+                )
+                if track is not None:
+                    narration_file = os.path.relpath(track, self.project)
+            narration_used = narration_file is not None
 
         # render every requested preset relative to the project dir
         video_rel = os.path.relpath(capture_video, self.project)
@@ -142,7 +151,7 @@ class RenderJob:
             cmd = render_mod.build_ffmpeg_cmd(
                 video_rel, output, preset,
                 captions="assets/captions.srt",
-                narration=None,  # concat of narration segments is applied in the next step when used
+                narration=narration_file,  # mixed track maps 1:a + -shortest
             )
             log.info("rendering %s :: %s", preset.key, render_mod.describe(cmd))
             proc = render_mod.run(cmd, self.project)

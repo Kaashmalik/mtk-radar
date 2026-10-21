@@ -30,6 +30,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Playwright artifacts
+test-results/
+playwright-report/
+
 # Backups (infra/backup.sh output) — sensitive, never commit
 backups/
 

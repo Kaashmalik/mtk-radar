@@ -145,11 +145,11 @@ measure (docs/first-offer-recipe.md drives the steps):
 - [ ] CI green on `main`; `python -m compileall services workers packages` clean
 
 ## 8. Known gaps (explicit, not hidden)
-
 - Object storage for capture/render files: local paths only — the publishing
   worker fails with "render file not on this host" when scaled out.
-- TTS narration is per-segment (`workers/render/narration.py`); a single mixed
-  narration track is still pending.
+- TTS narration segments are mixed into one track and mapped into renders
+  (v0.14: disclosure metadata now matches the actual audio); stream-copy concat
+  assumes homogenous codec output from the TTS provider.
 - Reviewer identity is an operator string (no session/SSO yet) — fine for the
   single-operator deployment. Transport-level protection exists: set
   `MTK_API_TOKEN` and every route except `/health` requires
@@ -157,3 +157,25 @@ measure (docs/first-offer-recipe.md drives the steps):
   dashboard and workers attach the token automatically when the env is set;
   compose forwards it. Leave it unset only for throwaway local dev.
 - Analytics counts runs on one Postgres instance; no replication/HA.
+
+## 10. Test & automation layers (v0.14)
+
+CI (`.github/workflows/ci.yml`) runs four levels on every push/PR:
+
+1. **Lint** — `ruff --select E9,F63,F7,F82` (see ruff.toml) catches undefined
+   names and broken call shapes — the class of defect behind the week-12
+   analytics 500s.
+2. **Unit tests** — pure logic: state machine, redaction, scriptgen,
+   migration policy, narration assembly.
+3. **Integration tests** — `services/api/tests/test_integration.py` runs the
+   REAL migration runner against a disposable Postgres service, then drives
+   the full review pipeline over HTTP: ingest dedup → promote → evidence
+   domain checks → extraction → state-machine gates → analytics. Locally:
+   `MTK_TEST_DATABASE_URL=postgresql://... pytest services/api/tests/test_integration.py`
+   (point it at a DISPOSABLE database — the schema is wiped at start).
+4. **E2E smoke** — `apps/dashboard/e2e/smoke.spec.ts` runs the production
+   dashboard build against the real API + DB (health dot, routes, live data).
+
+Dependency updates are automated via Dependabot (weekly grouped for npm/pip,
+monthly for actions/docker; postgres major bumps are deliberately excluded —
+they need a migration runbook, not a bot).

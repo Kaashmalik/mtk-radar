@@ -5,10 +5,32 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
   python:
-    name: Python (API + collectors)
+    name: Python (lint, units, integration)
     runs-on: ubuntu-latest
+
+    # v0.14: integration tests run against a REAL Postgres — the same major
+    # version the compose stack uses — with migrations applied by the real
+    # runner. This is the layer that catches SQL/enum/trigger drift.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mtk
+          POSTGRES_PASSWORD: mtk
+          POSTGRES_DB: mtk_radar_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mtk -d mtk_radar_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +48,10 @@ jobs:
         run: python -m compileall services workers packages
       - name: Unit tests
         run: pytest services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
+      - name: Integration tests (real Postgres, real migrations, full pipeline)
+        env:
+          MTK_TEST_DATABASE_URL: postgresql://mtk:mtk@localhost:5432/mtk_radar_ci
+        run: pytest services/api/tests/test_integration.py -v
 
   node:
     name: Node (offer-schema + dashboard types)
@@ -45,3 +71,72 @@ jobs:
         run: pnpm exec tsc --noEmit -p apps/dashboard
       - name: Dashboard production build
         run: pnpm --dir apps/dashboard build
+
+  e2e:
+    name: E2E (full stack: Postgres + API + dashboard + browser)
+    runs-on: ubuntu-latest
+    needs: [python, node]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mtk
+          POSTGRES_PASSWORD: mtk
+          POSTGRES_DB: mtk_radar_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mtk -d mtk_radar_e2e"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://mtk:mtk@localhost:5432/mtk_radar_e2e
+      API_URL: http://localhost:8000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install workspace
+        run: pnpm install
+      - name: Install API dependencies
+        run: pip install -r services/api/requirements.txt
+      - name: Apply migrations (the real runner)
+        run: python services/api/db_migrate.py
+      - name: Start API
+        run: |
+          nohup python -m uvicorn main:app --app-dir services/api --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health > /dev/null && echo "api up" && break
+            sleep 1
+          done
+          curl -sf http://localhost:8000/health > /dev/null || { cat api.log; exit 1; }
+      - name: Build dashboard
+        run: pnpm --dir apps/dashboard build
+      - name: Start dashboard
+        run: |
+          nohup pnpm --dir apps/dashboard exec next start -p 3000 > dashboard.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3000/ > /dev/null && echo "dashboard up" && break
+            sleep 1
+          done
+      - name: Install Playwright browser
+        run: pnpm --dir apps/dashboard exec playwright install --with-deps chromium
+      - name: Run E2E smoke
+        run: pnpm --dir apps/dashboard exec playwright test
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: apps/dashboard/test-results/
+          if-no-files-found: ignore
