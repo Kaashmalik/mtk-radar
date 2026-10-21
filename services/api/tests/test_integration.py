@@ -22,6 +22,7 @@ import os
 import sys as _sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit as url_split
 
 import pytest
 
@@ -326,9 +327,18 @@ SNAPSHOT_TEXT = "Use promo code SAVE2026 for verified students only."
 SNAPSHOT_URL = "https://example.com/wp01-terms"
 
 
-def _procured(url, text, *, fetched_at=None, redirects=()):
+def _procured(url, text, *, fetched_at=None, redirects=(), robots=None):
     """Raw bytes + fetch provenance, as the acquisition worker sends them."""
     raw = text.encode("utf-8")
+    fetched = fetched_at or datetime.now(timezone.utc)
+    host = url_split(url).hostname
+    if robots is None:
+        robots = {
+            "robots_url": f"https://{host}/robots.txt",
+            "checked_at": (fetched - timedelta(minutes=1)).isoformat(),
+            "allowed": True,
+            "status": 200,
+        }
     return {
         "raw_content_b64": base64.b64encode(raw).decode("ascii"),
         "provenance": {
@@ -336,12 +346,13 @@ def _procured(url, text, *, fetched_at=None, redirects=()):
             "final_url": url,
             "http_status": 200,
             "content_type": "text/html",
-            "fetched_at": (fetched_at or datetime.now(timezone.utc)).isoformat(),
+            "fetched_at": fetched.isoformat(),
             "redirects": list(redirects),
             "raw_sha256": hashlib.sha256(raw).hexdigest(),
             "parser_version": "page_watch/1",
             "fetch_identity": "integration-test",
             "encoding": "utf-8",
+            "robots": robots,
         },
     }
 
@@ -504,7 +515,8 @@ def test_raw_bytes_and_provenance_are_preserved(client):
     oid, _, eid, _, _ = _verification_fixture(client)
     row = _run(
         "SELECT raw_content, raw_hash, requested_url, fetch_status, fetched_at, "
-        "parser_version, fetch_identity, fetch_redirects::text AS fetch_redirects "
+        "parser_version, fetch_identity, fetch_redirects::text AS fetch_redirects, "
+        "robots_url, robots_checked_at, robots_allowed, robots_status "
         "FROM evidence WHERE id = $1",
         uuid.UUID(eid),
     )[0]
@@ -517,11 +529,16 @@ def test_raw_bytes_and_provenance_are_preserved(client):
     assert row["parser_version"] == "page_watch/1"
     assert row["fetch_identity"] == "integration-test"
     assert json.loads(row["fetch_redirects"]) == []
+    assert row["robots_url"] == "https://example.com/robots.txt"
+    assert row["robots_checked_at"] is not None
+    assert row["robots_allowed"] is True
+    assert row["robots_status"] == 200
 
     shown = client.get(f"/offers/{oid}").json()["evidence"][0]
     assert shown["raw_preserved"] is True
     assert shown["raw_hash"] == row["raw_hash"]
     assert shown["parser_version"] == "page_watch/1"
+    assert shown["robots_allowed"] is True
     # Raw bytes stay out of the general workspace response.
     assert "raw_content" not in shown
 
@@ -554,6 +571,52 @@ def test_evidence_url_must_be_the_final_fetched_url(client):
     response = client.post(f"/offers/{oid}/evidence", json=mismatched)
     assert response.status_code == 422
     assert "final fetched URL" in response.json()["detail"]
+
+
+def test_evidence_without_a_robots_decision_is_rejected(client):
+    """Permission is part of the provenance, not an optional extra (slice 6)."""
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-no-robots-" + uuid.uuid4().hex
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT)}
+    broken["provenance"] = {
+        key: value for key, value in broken["provenance"].items() if key != "robots"
+    }
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 422
+    assert "robots.txt" in response.json()["detail"]
+
+
+def test_evidence_from_a_disallowing_robots_policy_is_rejected(client):
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-denied-" + uuid.uuid4().hex
+    robots = {
+        "robots_url": "https://example.com/robots.txt",
+        "checked_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        "allowed": False,
+        "status": 403,
+    }
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT, robots=robots)}
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 422
+    assert "did not permit" in response.json()["detail"]
+
+
+def test_robots_decision_must_come_from_the_fetched_host(client):
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-robots-host-" + uuid.uuid4().hex
+    robots = {
+        "robots_url": "https://elsewhere.test/robots.txt",
+        "checked_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        "allowed": True,
+        "status": 200,
+    }
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT, robots=robots)}
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 422
+    assert "fetched host" in response.json()["detail"]
 
 
 def test_future_fetch_time_is_rejected(client):
@@ -597,7 +660,8 @@ def test_verification_requires_raw_provenance_on_real_database(client):
     assert extracted.json()["complete"] is True  # the terms are satisfied ...
     blocked = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
     assert blocked.status_code == 422            # ... but the bytes are not proven
-    assert "raw page bytes and fetch provenance" in blocked.json()["detail"]
+    assert "raw page bytes" in blocked.json()["detail"]
+    assert "robots.txt" in blocked.json()["detail"]
 
 
 def test_raw_snapshot_database_check_rejects_alteration(client):
@@ -703,6 +767,62 @@ def test_fetch_provenance_migration_preserves_legacy_and_checks_raw_hash(client)
                         "requested_url, fetched_at, parser_version) "
                         "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1')",
                         oid, SNAPSHOT_URL + "/bad", digest, raw, "0" * 64, SNAPSHOT_URL)
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
+
+
+def test_robots_permission_migration_never_invents_permission(client):
+    """Upgrade 014→015: legacy bytes keep no permission record; new rows need one."""
+    import hashlib
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_robots_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            for path in paths[:14]:
+                await conn.execute(path.read_text(encoding="utf-8"))
+            oid = await conn.fetchval(
+                "INSERT INTO offers (title, provider, category, offer_type) "
+                "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
+            raw = SNAPSHOT_TEXT.encode()
+            digest = hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest()
+            eid = await conn.fetchval(
+                "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                "requested_url, fetched_at, parser_version) "
+                "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1') RETURNING id",
+                oid, SNAPSHOT_URL, digest, raw,
+                hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL)
+            await conn.execute(paths[14].read_text(encoding="utf-8"))
+            row = await conn.fetchrow(
+                "SELECT robots_url, robots_checked_at, robots_allowed, robots_status "
+                "FROM evidence WHERE id = $1", eid)
+            assert row["robots_url"] is None and row["robots_checked_at"] is None
+            assert row["robots_allowed"] is None and row["robots_status"] is None
+            # New rows must carry a permitted decision alongside raw bytes.
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                        "requested_url, fetched_at, parser_version) "
+                        "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1')",
+                        oid, SNAPSHOT_URL + "/new", digest, raw,
+                        hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL)
+            await conn.execute(
+                "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                "requested_url, fetched_at, parser_version, robots_url, robots_checked_at, "
+                "robots_allowed, robots_status) "
+                "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1', $7, now(), TRUE, 200)",
+                oid, SNAPSHOT_URL + "/ok", digest, raw,
+                hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL,
+                "https://example.com/robots.txt")
         finally:
             await tx.rollback()
             await conn.close()

@@ -28,6 +28,12 @@ def provenance(**overrides):
         "raw_sha256": RAW_SHA,
         "parser_version": "page_watch/1",
         "fetch_identity": "verification-worker",
+        "robots": {
+            "robots_url": "https://example.com/robots.txt",
+            "checked_at": "2026-10-21T11:59:00+00:00",
+            "allowed": True,
+            "status": 200,
+        },
     }
     base.update(overrides)
     return base
@@ -99,3 +105,64 @@ class TestProvenance:
             raw_content_b64=None, provenance=None,
         ))
         assert parsed.provenance is None
+
+
+class TestRobotsDecision:
+    """WP01 slice 6: permission travels with the fetch it allowed."""
+
+    def test_allowed_robots_decision_parsed(self):
+        parsed = EvidenceIn.model_validate(evidence())
+        assert parsed.provenance.robots.allowed is True
+        assert parsed.provenance.robots.status == 200
+        assert str(parsed.provenance.robots.robots_url) == "https://example.com/robots.txt"
+
+    def test_robots_without_raw_bytes_rejected(self):
+        with pytest.raises(ValidationError, match="provenance requires raw_content_b64"):
+            EvidenceIn.model_validate(evidence(raw_content_b64=None))
+
+    def test_allowed_decision_cannot_hide_a_server_error(self):
+        with pytest.raises(ValidationError, match="readable robots.txt"):
+            EvidenceIn.model_validate(evidence(provenance=provenance(robots={
+                "robots_url": "https://example.com/robots.txt",
+                "checked_at": "2026-10-21T11:59:00+00:00",
+                "allowed": True,
+                "status": 503,
+            })))
+
+    def test_allowed_decision_cannot_be_auth_wall_or_ratelimit(self):
+        for status in (401, 403, 429):
+            with pytest.raises(ValidationError, match="readable robots.txt"):
+                EvidenceIn.model_validate(evidence(provenance=provenance(robots={
+                    "robots_url": "https://example.com/robots.txt",
+                    "checked_at": "2026-10-21T11:59:00+00:00",
+                    "allowed": True,
+                    "status": status,
+                })))
+
+    def test_allowed_decision_requires_a_status(self):
+        with pytest.raises(ValidationError, match="readable robots.txt"):
+            EvidenceIn.model_validate(evidence(provenance=provenance(robots={
+                "robots_url": "https://example.com/robots.txt",
+                "checked_at": "2026-10-21T11:59:00+00:00",
+                "allowed": True,
+                "status": None,
+            })))
+
+    def test_disallowed_decision_remains_representable(self):
+        """A refusal is a valid record; the API rejects it as evidence later."""
+        parsed = EvidenceIn.model_validate(evidence(provenance=provenance(robots={
+            "robots_url": "https://example.com/robots.txt",
+            "checked_at": "2026-10-21T11:59:00+00:00",
+            "allowed": False,
+            "status": 403,
+        })))
+        assert parsed.provenance.robots.allowed is False
+
+    def test_robots_url_must_be_a_url(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(robots={
+                "robots_url": "not a url",
+                "checked_at": "2026-10-21T11:59:00+00:00",
+                "allowed": True,
+                "status": 200,
+            })))

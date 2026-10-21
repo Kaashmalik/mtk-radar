@@ -184,6 +184,7 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
                e.raw_hash, e.requested_url, e.fetch_status, e.fetch_content_type,
                e.fetched_at, e.fetch_redirects::text AS fetch_redirects,
                e.parser_version, e.fetch_identity,
+               e.robots_url, e.robots_checked_at, e.robots_allowed, e.robots_status,
                (e.raw_content IS NOT NULL) AS raw_preserved,
                s.provider AS source_provider, s.trust_tier::text AS trust_tier
         FROM evidence e LEFT JOIN sources s ON s.id = e.source_id
@@ -307,9 +308,11 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
                               screenshot_path, supported_fields, official, domain_ok, reviewer,
                               captured_content, raw_content, raw_hash, requested_url,
                               fetch_status, fetch_content_type, fetched_at, fetch_redirects,
-                              parser_version, fetch_identity)
+                              parser_version, fetch_identity,
+                              robots_url, robots_checked_at, robots_allowed, robots_status)
         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20)
+                $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20,
+                $21, $22, $23, $24)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
@@ -324,6 +327,10 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
         _json(provenance["redirects"]) if provenance else None,
         provenance["parser_version"] if provenance else None,
         provenance["fetch_identity"] if provenance else None,
+        provenance["robots_url"] if provenance else None,
+        provenance["robots_checked_at"] if provenance else None,
+        provenance["robots_allowed"] if provenance else None,
+        provenance["robots_status"] if provenance else None,
     )
     created = row is not None
     if row is None:
@@ -834,6 +841,41 @@ async def _validate_provenance(pool, provider: str, evidence: EvidenceIn,
     if provenance.fetched_at > datetime.now(timezone.utc) + PROVENANCE_FUTURE_SKEW:
         raise HTTPException(status_code=422, detail="fetched_at is in the future")
 
+    # Permission is part of the record: a page may only become official
+    # evidence when the host's robots policy was readable and permitted the
+    # read *before* it happened (master plan §3, §6 step 2).
+    robots = provenance.robots
+    if robots is None:
+        raise HTTPException(
+            status_code=422,
+            detail="provenance requires the robots.txt decision recorded with the fetch",
+        )
+    if not robots.allowed:
+        raise HTTPException(
+            status_code=422,
+            detail="robots.txt did not permit reading this page; it cannot become evidence",
+        )
+    if robots.checked_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="robots checked_at must include a timezone")
+    if robots.checked_at > datetime.now(timezone.utc) + PROVENANCE_FUTURE_SKEW:
+        raise HTTPException(status_code=422, detail="robots checked_at is in the future")
+    if robots.checked_at > provenance.fetched_at:
+        raise HTTPException(
+            status_code=422,
+            detail="the robots check must not postdate the page fetch",
+        )
+    robots_url = str(robots.robots_url)
+    robots_parts = urlsplit(robots_url)
+    final_parts = urlsplit(str(provenance.final_url))
+    if robots_parts.scheme.lower() != "https":
+        raise HTTPException(status_code=422, detail="robots URL must be https")
+    if (robots_parts.hostname or "") != (final_parts.hostname or "") \
+            or robots_parts.path != "/robots.txt":
+        raise HTTPException(
+            status_code=422,
+            detail="robots decision must come from the fetched host's /robots.txt",
+        )
+
     chain = [str(provenance.requested_url), *redirects, str(provenance.final_url)]
     for url in chain:
         if urlsplit(url).scheme.lower() != "https":
@@ -851,6 +893,10 @@ async def _validate_provenance(pool, provider: str, evidence: EvidenceIn,
         "redirects": redirects,
         "parser_version": provenance.parser_version,
         "fetch_identity": provenance.fetch_identity,
+        "robots_url": robots_url,
+        "robots_checked_at": robots.checked_at,
+        "robots_allowed": robots.allowed,
+        "robots_status": robots.status,
     }
 
 
@@ -867,22 +913,26 @@ async def _provenance_problems(pool, offer_id: uuid.UUID,
     ids = list({field.evidence_id for field in extraction.fields.values()})
     rows = await pool.fetch(
         "SELECT e.id, e.reviewer, e.raw_content IS NOT NULL AS raw_preserved, "
-        "e.requested_url, e.parser_version FROM evidence e "
+        "e.requested_url, e.parser_version, e.robots_url, e.robots_allowed "
+        "FROM evidence e "
         "WHERE e.offer_id = $1 AND e.id = ANY($2::uuid[]) AND e.official AND e.domain_ok",
         offer_id, ids,
     )
     missing = [
         str(row["id"]) for row in rows
         # A reviewer-attested snapshot is a human action recorded in the audit
-        # log; machine-collected evidence must carry the bytes it was parsed from.
+        # log; machine-collected evidence must carry the bytes it was parsed from
+        # and the permission decision that allowed the read.
         if row["reviewer"] is None
-        and (not row["raw_preserved"] or not row["requested_url"] or not row["parser_version"])
+        and (not row["raw_preserved"] or not row["requested_url"]
+             or not row["parser_version"] or not row["robots_url"]
+             or row["robots_allowed"] is not True)
     ]
     if missing:
         return [
-            "verified requires preserved raw page bytes and fetch provenance for "
-            f"official evidence ({len(missing)} snapshot(s) missing); recapture with "
-            "the acquisition worker"
+            "verified requires preserved raw page bytes, fetch provenance and a "
+            "permitted robots.txt check for official evidence "
+            f"({len(missing)} snapshot(s) missing); recapture with the acquisition worker"
         ]
     return []
 
