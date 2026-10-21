@@ -128,7 +128,7 @@ async def main() -> None:
             """
             INSERT INTO sources (provider, canonical_domain, category, adapter,
                                  config, polling_cadence, trust_tier)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::interval, $7::trust_tier)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::text::interval, $7::trust_tier)
             """,
             src["provider"],
             src.get("canonical_domain"),

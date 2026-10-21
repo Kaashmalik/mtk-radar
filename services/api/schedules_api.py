@@ -237,7 +237,6 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn) -> dict
         params.append(offer_ok)
         sets.append(f"offer_evidence_ok = ${len(params)}")
 
-    params.append(schedule_id)
     row = await pool.fetchrow(
         f"UPDATE schedules SET {', '.join(sets)}, updated_at = now() "
         f"WHERE id = $1 RETURNING state::text AS state, version_hash",

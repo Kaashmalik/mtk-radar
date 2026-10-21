@@ -14,6 +14,8 @@ Rules enforced:
 from datetime import datetime, timezone
 from typing import Any, Final
 
+from jsonb import decode_mapping
+
 SCHEDULE_STATES: Final[tuple[str, ...]] = (
     "draft", "needs_approval", "approved", "scheduled",
     "published", "failed", "paused",
@@ -91,7 +93,7 @@ def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[
     title_base = f"{offer.get('title', 'Offer walkthrough')} — real claim walkthrough"
     title = title_base[: limits["title"]] if limits["title"] else ""
 
-    eligibility = offer.get("eligibility") or {}
+    eligibility = decode_mapping(offer.get("eligibility"))
     audience = []
     if eligibility.get("countries"):
         audience.append(f"Region: {', '.join(eligibility['countries'])}")
@@ -100,7 +102,7 @@ def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[
     if eligibility.get("newCustomerOnly"):
         audience.append("new customers only")
 
-    renewal = offer.get("renewal") or {}
+    renewal = decode_mapping(offer.get("renewal"))
     lines: list[str] = [
         f"Genuine end-to-end claim of {offer.get('title', 'this offer')} by {provider}.",
         " · ".join(audience) if audience else "Check official terms for current eligibility.",

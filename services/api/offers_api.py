@@ -356,7 +356,7 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
     params: list = [offer_id, target]
     if target == "verified":
         params.append(RECHECK_INTERVAL)
-        recheck_clause = f", recheck_at = now() + ${len(params)}::interval"
+        recheck_clause = f", recheck_at = now() + ${len(params)}::text::interval"
 
     row = await pool.fetchrow(
         f"UPDATE offers SET state = ${2}::offer_state{recheck_clause}, updated_at = now() "

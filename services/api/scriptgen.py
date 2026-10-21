@@ -16,6 +16,8 @@ Every factual statement cites its evidence URL.
 from datetime import datetime
 from typing import Any, Final
 
+from jsonb import decode_list, decode_mapping
+
 VIDEO_STATES: Final = frozenset({"verified", "approved_for_video", "published"})
 
 
@@ -41,7 +43,7 @@ def assert_video_allowed(state: str) -> None:
 
 def build_checklist(offer: dict) -> list[dict]:
     """Ordered pre-flight + claim steps the operator physically checks off."""
-    eligibility = offer.get("eligibility") or {}
+    eligibility = decode_mapping(offer.get("eligibility"))
     steps: list[dict] = [
         {"order": 0, "kind": "manual_check", "text": "Recheck offer freshness: official terms page unchanged, not expired (recheck_at)." },
         {"order": 1, "kind": "manual_check", "text": "Confirm operator eligibility on own account before recording (no staged successes)."},
@@ -59,7 +61,7 @@ def build_checklist(offer: dict) -> list[dict]:
             "text": "Verification document/proof ready (enrollment or startup status).",
         })
 
-    for claim_step in offer.get("claim_steps") or []:
+    for claim_step in decode_list(offer.get("claim_steps")):
         step = dict(claim_step)
         step["order"] = len(steps)  # sequential; never trust caller-provided order
         steps.append(step)
@@ -117,7 +119,7 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
     provider = offer.get("provider", "the provider")
     title = offer.get("title", "Offer walkthrough")
     expires = _fmt_date(offer.get("expires_at"))
-    renewal = offer.get("renewal") or {}
+    renewal = decode_mapping(offer.get("renewal"))
     promo_code = offer.get("promo_code")
 
     lines: list[str] = []
@@ -172,7 +174,7 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
 
 
 def _eligibility_line(offer: dict) -> str:
-    eligibility = offer.get("eligibility") or {}
+    eligibility = decode_mapping(offer.get("eligibility"))
     parts = []
     if eligibility.get("countries"):
         parts.append(f"Region: {', '.join(eligibility['countries'])}")
@@ -191,7 +193,7 @@ def generate(offer: dict, evidence: list[dict]) -> dict:
     """Full generation pipeline. Raises ScriptGateError for unverified offers."""
     assert_video_allowed(offer.get("state", ""))
     checklist = build_checklist(offer)
-    command_cards = build_command_cards(offer.get("claim_steps") or [])
+    command_cards = build_command_cards(decode_list(offer.get("claim_steps")))
     markdown = render_script_md(offer, checklist, command_cards, evidence)
     return {
         "markdown": markdown,

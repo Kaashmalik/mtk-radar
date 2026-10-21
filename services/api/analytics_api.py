@@ -28,7 +28,7 @@ async def analytics() -> dict:
 
     funnel = await _rows(pool, "SELECT COUNT(*) AS n FROM items")
     offers_by_state = await _rows(
-        "SELECT state::text AS state, COUNT(*) AS n FROM offers GROUP BY state ORDER BY n DESC"
+        pool, "SELECT state::text AS state, COUNT(*) AS n FROM offers GROUP BY state ORDER BY n DESC"
     )
     verification = await pool.fetchrow(
         """
@@ -44,9 +44,10 @@ async def analytics() -> dict:
         """
     )
     schedules_by_state = await _rows(
-        "SELECT state::text AS state, COUNT(*) AS n FROM schedules GROUP BY state ORDER BY n DESC"
+        pool, "SELECT state::text AS state, COUNT(*) AS n FROM schedules GROUP BY state ORDER BY n DESC"
     )
     schedules_by_platform = await _rows(
+        pool,
         """
         SELECT platform, state::text AS state, COUNT(*) AS n
         FROM schedules GROUP BY platform, state ORDER BY platform, state
@@ -63,16 +64,19 @@ async def analytics() -> dict:
         """
     )
     source_freshness = await _rows(
+        pool,
         """
-        SELECT s.id, s.name, s.provider, s.enabled,
+        SELECT s.id, COALESCE(s.canonical_domain, s.provider) AS name, s.provider, s.enabled,
                s.last_checked_at,
-               EXTRACT(EPOCH FROM (now() - s.last_checked_at))/3600.0 AS hours_since_poll,
+               (EXTRACT(EPOCH FROM (now() - s.last_checked_at)) / 3600.0)::double precision
+                 AS hours_since_poll,
                (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id) AS item_count
         FROM sources s
         ORDER BY s.enabled DESC, hours_since_poll NULLS FIRST
         """
     )
     account_health = await _rows(
+        pool,
         "SELECT platform, status, expires_at, last_error FROM platform_accounts "
         "ORDER BY platform, status"
     )

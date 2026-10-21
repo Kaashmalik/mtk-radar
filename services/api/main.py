@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import db
 from captures_api import router as captures_router
+from jsonb import decode_mapping
 from normalize import canonicalize_url, hash_parts
 from offers_api import router as offers_router
 from platforms_api import router as platforms_router
@@ -89,7 +90,14 @@ async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
         """,
         enabled,
     )
-    return [dict(r) for r in rows]
+    # `config` is jsonb — asyncpg hands it over as serialized JSON, so decode
+    # it into a real object for API consumers (collectors read config.* keys).
+    result = []
+    for row in rows:
+        source = dict(row)
+        source["config"] = decode_mapping(source.get("config"))
+        result.append(source)
+    return result
 
 
 @app.post("/sources", status_code=201)
@@ -108,7 +116,7 @@ async def create_source(source: SourceIn) -> dict:
         """
         INSERT INTO sources (provider, canonical_domain, account_handle, category,
                              adapter, config, polling_cadence, country_scope, trust_tier, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::interval, $8, $9::trust_tier, $10)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::text::interval, $8, $9::trust_tier, $10)
         RETURNING id
         """,
         source.provider,
