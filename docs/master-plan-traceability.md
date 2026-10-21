@@ -1,5 +1,10 @@
 # Master-plan traceability
 
+> **21 October 2026 audit:** this is historical feature-to-code traceability,
+> not proof all documented gates are fully enforced or all integrations work
+> live. See the [dated automation master plan](automation-master-plan-2026-10-21.md)
+> for code-level gaps, checks actually executed, and the new implementation ledger.
+
 Which master-plan item lives where, and how it is proven. Use this to audit
 the build without reading the whole repository; use
 [`go-live-checklist.md`](go-live-checklist.md) for the operator procedure.

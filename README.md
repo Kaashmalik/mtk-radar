@@ -183,6 +183,8 @@ browser step.
 
 ## Documentation
 
+- [`docs/automation-master-plan-2026-10-21.md`](docs/automation-master-plan-2026-10-21.md) — **dated 2026–2027 enhancement roadmap and code audit**: actual test results, implemented/remaining checklist, safety gaps, trend radar, premium video, light editor, local-model controls and ordered work packages. Use this for new enhancement work; historical completion claims below are not production certification.
+- [`docs/coding-model-handoff-2026-10-21.md`](docs/coding-model-handoff-2026-10-21.md) — compact implementation instructions and acceptance/report rules for GLM, MiniMax or other coding assistants.
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
 - [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
 - [`docs/first-offer-recipe.md`](docs/first-offer-recipe.md) — the pilot case-study recipe: pre-flight, script, guided capture, redaction review, hard no's.

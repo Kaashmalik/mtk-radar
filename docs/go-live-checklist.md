@@ -2,9 +2,11 @@
 
 Master plan §18 week 12 ("deployment, backup/restore, credential and source
 hygiene") and §6 (official platform APIs). This file is the operator's
-runbook for the **only** things that cannot be automated: secrets and
-account consent. Everything else in this repository is already automated and
-verified by the test suite.
+runbook for deployment, secrets, account consent and operator checkpoints.
+Code and mocked tests do not establish full end-to-end or production readiness.
+See the [21 October 2026 audit and enhancement plan](automation-master-plan-2026-10-21.md)
+for current gaps, actual checks run and release-blocking safety work. The
+historical verification counts below must be re-proven for each release.
 
 **Rule zero:** secrets live in the deploy environment (or a vault), never in
 the database, never in the browser, never in git. The database only records
