@@ -25,10 +25,12 @@ from pydantic import BaseModel, Field, ValidationError
 import db
 from jsonb import decode
 from api_hardening import effective_reviewer
+from fetch_attestation import verify_provenance
 from redact import scan as scan_secrets
 from schedules_state import script_version_hash
 from schemas import (
     EvidenceIn,
+    EvidenceProvenance,
     ExtractionIn,
     OfferIn,
     OfferUpdate,
@@ -185,6 +187,7 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
                e.fetched_at, e.fetch_redirects::text AS fetch_redirects,
                e.parser_version, e.fetch_identity,
                e.robots_url, e.robots_checked_at, e.robots_allowed, e.robots_status,
+               e.fetch_signature,
                (e.raw_content IS NOT NULL) AS raw_preserved,
                s.provider AS source_provider, s.trust_tier::text AS trust_tier
         FROM evidence e LEFT JOIN sources s ON s.id = e.source_id
@@ -309,10 +312,11 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
                               captured_content, raw_content, raw_hash, requested_url,
                               fetch_status, fetch_content_type, fetched_at, fetch_redirects,
                               parser_version, fetch_identity,
-                              robots_url, robots_checked_at, robots_allowed, robots_status)
+                              robots_url, robots_checked_at, robots_allowed, robots_status,
+                              fetch_signature)
         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
                 $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20,
-                $21, $22, $23, $24)
+                $21, $22, $23, $24, $25)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
@@ -331,6 +335,7 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
         provenance["robots_checked_at"] if provenance else None,
         provenance["robots_allowed"] if provenance else None,
         provenance["robots_status"] if provenance else None,
+        provenance["fetch_signature"] if provenance else None,
     )
     created = row is not None
     if row is None:
@@ -885,6 +890,12 @@ async def _validate_provenance(pool, provider: str, evidence: EvidenceIn,
                 status_code=422,
                 detail=f"provenance URL {url} is not on the provider's registered domains",
             )
+
+    # Who says so? A signature binds the record to the deployment's acquisition
+    # key; without it `fetch_identity` is only a string the caller chose. Checked
+    # last so an off-provider chain is still reported as what it is.
+    signature = _verified_signature(provenance)
+
     return {
         "requested_url": str(provenance.requested_url),
         "fetch_status": provenance.http_status,
@@ -897,6 +908,7 @@ async def _validate_provenance(pool, provider: str, evidence: EvidenceIn,
         "robots_checked_at": robots.checked_at,
         "robots_allowed": robots.allowed,
         "robots_status": robots.status,
+        "fetch_signature": signature,
     }
 
 
@@ -907,32 +919,73 @@ def _require_fetch_provenance() -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _fetch_signing_key() -> str:
+    return os.environ.get("MTK_FETCH_SIGNING_KEY", "").strip()
+
+
+def _require_fetch_signature() -> bool:
+    """Signed provenance is required by default for the same reason."""
+    value = os.environ.get("MTK_REQUIRE_FETCH_SIGNATURE", "1")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _verified_signature(provenance: EvidenceProvenance) -> Optional[str]:
+    """Re-check that the acquisition identity really produced this record."""
+    if not _require_fetch_signature():
+        return provenance.signature
+    key = _fetch_signing_key()
+    if len(key) < 32:
+        # A server misconfiguration, not a bad request: refuse to accept
+        # machine evidence rather than silently downgrade to an unsigned claim.
+        raise HTTPException(
+            status_code=503,
+            detail="fetch provenance signing is not configured "
+                   "(MTK_FETCH_SIGNING_KEY); machine evidence cannot be accepted",
+        )
+    if not provenance.signature:
+        raise HTTPException(
+            status_code=422,
+            detail="provenance is not signed by a trusted acquisition identity",
+        )
+    if not verify_provenance(provenance, provenance.signature, key):
+        raise HTTPException(
+            status_code=422,
+            detail="provenance signature does not match its contents",
+        )
+    return provenance.signature
+
+
 async def _provenance_problems(pool, offer_id: uuid.UUID,
                                extraction: ExtractionIn) -> list[str]:
     """Official machine evidence must prove the bytes it was derived from."""
     ids = list({field.evidence_id for field in extraction.fields.values()})
     rows = await pool.fetch(
         "SELECT e.id, e.reviewer, e.raw_content IS NOT NULL AS raw_preserved, "
-        "e.requested_url, e.parser_version, e.robots_url, e.robots_allowed "
+        "e.requested_url, e.parser_version, e.robots_url, e.robots_allowed, "
+        "e.fetch_signature "
         "FROM evidence e "
         "WHERE e.offer_id = $1 AND e.id = ANY($2::uuid[]) AND e.official AND e.domain_ok",
         offer_id, ids,
     )
+    require_signature = _require_fetch_signature()
     missing = [
         str(row["id"]) for row in rows
         # A reviewer-attested snapshot is a human action recorded in the audit
-        # log; machine-collected evidence must carry the bytes it was parsed from
-        # and the permission decision that allowed the read.
+        # log; machine-collected evidence must carry the bytes it was parsed from,
+        # the permission decision that allowed the read and the signature that
+        # attributes the record to the acquisition identity.
         if row["reviewer"] is None
         and (not row["raw_preserved"] or not row["requested_url"]
              or not row["parser_version"] or not row["robots_url"]
-             or row["robots_allowed"] is not True)
+             or row["robots_allowed"] is not True
+             or (require_signature and not row["fetch_signature"]))
     ]
     if missing:
         return [
-            "verified requires preserved raw page bytes, fetch provenance and a "
-            "permitted robots.txt check for official evidence "
-            f"({len(missing)} snapshot(s) missing); recapture with the acquisition worker"
+            "verified requires preserved raw page bytes, fetch provenance, a "
+            "permitted robots.txt check and a signed acquisition record for "
+            f"official evidence ({len(missing)} snapshot(s) missing); recapture "
+            "with the acquisition worker"
         ]
     return []
 

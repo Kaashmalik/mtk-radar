@@ -162,6 +162,9 @@ class EvidenceProvenance(BaseModel):
     fetch_identity: Optional[str] = Field(default=None, max_length=120)
     encoding: Optional[str] = Field(default=None, max_length=40)
     robots: Optional[RobotsPermission] = None
+    #: HMAC-SHA256 over the canonical provenance, produced by the acquisition
+    #: worker with the deployment key. Shape only here; the API verifies it.
+    signature: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class EvidenceIn(BaseModel):
