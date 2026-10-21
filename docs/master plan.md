@@ -179,7 +179,7 @@ workers/collectors/
 workers/verification/
 workers/video/
 workers/publishing/
-packages/source-adapters/
+packages/source_adapters/                     
 packages/offer-schema/
 packages/video-templates/
 infra/docker/

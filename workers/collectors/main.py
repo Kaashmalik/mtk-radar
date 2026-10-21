@@ -15,6 +15,7 @@ Design:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -25,7 +26,7 @@ from typing import Optional
 import httpx
 
 # Make the shared adapters package importable (monorepo layout).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "packages", "source-adapters")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "packages")))
 
 from source_adapters import (  # noqa: E402
     Fetcher,
@@ -63,6 +64,14 @@ def collect(source: dict, fetcher: Fetcher) -> list[dict]:
     """Run the source's adapter. Returns raw item payloads (API dedups)."""
     adapter = source["adapter"]
     config = source.get("config") or {}
+    if isinstance(config, str):
+        # jsonb columns reach the worker as serialized JSON in some API versions.
+        try:
+            config = json.loads(config)
+        except ValueError:
+            config = {}
+    if not isinstance(config, dict):
+        config = {}
 
     if adapter == "rss":
         feed_url = config.get("feed_url")

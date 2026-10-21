@@ -79,7 +79,7 @@ workers/verification/      # Extraction & evidence jobs
 workers/video/             # Rendering jobs
 workers/publishing/        # Platform upload jobs
 packages/offer-schema/     # Shared offer life-cycle + validation schemas
-packages/source-adapters/  # Per-source collection adapters (planned)
+packages/source_adapters/  # Per-source collection adapters (planned)
 packages/video-templates/  # Templated video configs (planned)
 infra/docker/              # Docker Compose dev environment
 docs/                      # Master plan, source registry, security, notices
