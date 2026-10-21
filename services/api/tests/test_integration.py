@@ -421,6 +421,67 @@ def _verification_fixture(client):
     return oid, source.json()["id"], evidence.json()["id"], fields, payload
 
 
+def _verified_offer(client):
+    """A fresh verified offer: complete fact pack, recheck deadline set."""
+    oid, _, eid, fields, _ = _verification_fixture(client)
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    })
+    assert response.status_code == 201, response.text
+    promoted = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert promoted.status_code == 200, promoted.text
+    return oid
+
+
+def test_capture_refuses_expired_or_overdue_offers(client):
+    """Recording footage acts on the claims; stale claims block it (slice 12)."""
+    import uuid
+    oid = _verified_offer(client)
+    fresh = client.post(f"/offers/{oid}/captures",
+                        json={"step_log": [{"action": "open terms"}]})
+    assert fresh.status_code == 201, fresh.text
+
+    _run("UPDATE offers SET recheck_at = now() - interval '1 hour' "
+         "WHERE id = $1", uuid.UUID(oid))
+    overdue = client.post(f"/offers/{oid}/captures",
+                          json={"step_log": [{"action": "open terms"}]})
+    assert overdue.status_code == 409, overdue.text
+    assert "recheck" in overdue.json()["detail"]
+    assert "§11 freshness" in overdue.json()["detail"]
+
+    _run("UPDATE offers SET recheck_at = now() + interval '1 day', "
+         "expires_at = now() - interval '1 hour' WHERE id = $1", uuid.UUID(oid))
+    expired = client.post(f"/offers/{oid}/captures",
+                          json={"step_log": [{"action": "open terms"}]})
+    assert expired.status_code == 409, expired.text
+    assert "expired" in expired.json()["detail"]
+    assert "§11 freshness" in expired.json()["detail"]
+
+
+def test_resume_refuses_an_offer_whose_freshness_lapsed(client):
+    import uuid
+    oid = _verified_offer(client)
+    sid = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, "
+        "idempotency_key) VALUES ($1, 'youtube', 'paused', now(), 'private', $2) "
+        "RETURNING id",
+        uuid.UUID(oid), f"fresh-{uuid.uuid4()}",
+    )[0]["id"]
+
+    _run("UPDATE offers SET recheck_at = now() - interval '1 hour' "
+         "WHERE id = $1", uuid.UUID(oid))
+    blocked = client.post(f"/schedules/{sid}/resume", params={"reviewer": "pytest"})
+    assert blocked.status_code == 409, blocked.text
+    assert "recheck" in blocked.json()["detail"]
+    assert "§11 freshness" in blocked.json()["detail"]
+
+    _run("UPDATE offers SET recheck_at = now() + interval '1 day' "
+         "WHERE id = $1", uuid.UUID(oid))
+    resumed = client.post(f"/schedules/{sid}/resume", params={"reviewer": "pytest"})
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["state"] == "scheduled"
+
+
 def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
     import hashlib
     import uuid
