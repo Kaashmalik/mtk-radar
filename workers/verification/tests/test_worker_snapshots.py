@@ -126,6 +126,12 @@ def test_source_without_a_tos_review_is_not_read():
     assert worker._official_pages("Acme", build_allowlist([SOURCE])) == []
 
 
+def test_expired_tos_review_is_not_read():
+    worker = object.__new__(worker_main.Verifier)
+    worker._get = lambda path: [{**SOURCE, "tos_valid": False}]
+    assert worker._official_pages("Acme", build_allowlist([SOURCE])) == []
+
+
 def test_attested_source_yields_its_url_and_identity():
     worker = object.__new__(worker_main.Verifier)
     worker._get = lambda path: [SOURCE]

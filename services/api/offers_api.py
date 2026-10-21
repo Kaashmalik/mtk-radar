@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, ValidationError
 import db
 from jsonb import decode
 from api_hardening import effective_reviewer
+import tos_review
 from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
 from fetch_attestation import verify_provenance
 from redact import scan as scan_secrets
@@ -1024,6 +1025,15 @@ async def _require_source_tos_attestation(pool, evidence: EvidenceIn) -> None:
             detail=(
                 "machine collection of this source requires a recorded "
                 "terms-of-service review; a reviewer must record one at "
+                "POST /sources/{id}/tos-review before evidence is stored"
+            ),
+        )
+    if not tos_review.is_valid(row["tos_reviewed_at"]):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "the recorded terms-of-service review for this source has "
+                "expired; a reviewer must record a current review at "
                 "POST /sources/{id}/tos-review before evidence is stored"
             ),
         )

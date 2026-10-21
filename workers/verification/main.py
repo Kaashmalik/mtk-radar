@@ -307,9 +307,14 @@ class Verifier:
                 continue
             if (s.get("provider") or "").strip().lower() != provider.strip().lower():
                 continue
-            if TOS_ATTESTATION_REQUIRED and not s.get("tos_reviewed_at"):
+            attested = s.get("tos_valid")
+            if attested is None:
+                # Older API: a timestamp with no expiry is still better than
+                # reading without any recorded review.
+                attested = bool(s.get("tos_reviewed_at"))
+            if TOS_ATTESTATION_REQUIRED and not attested:
                 log.warning(
-                    "source %s (%s) has no recorded terms-of-service review — "
+                    "source %s (%s) has no current terms-of-service review — "
                     "not fetching", s.get("id"), s.get("provider"),
                 )
                 continue

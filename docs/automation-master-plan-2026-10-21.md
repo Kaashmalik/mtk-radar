@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** ten WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate and per-source terms-of-service review attestation. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md) and [slice 10](implementation-wp01-slice10-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** eleven WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation and bounded review validity with revocation. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md) and [slice 11](implementation-wp01-slice11-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -642,11 +642,17 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Refuse new machine-collected evidence (raw bytes + provenance) for a source with no recorded review, or with no named source at all; reviewer-attested snapshots remain exempt. `MTK_REQUIRE_TOS_ATTESTATION` defaults on with a documented legacy opt-out.
 - [x] Make the verification worker skip unattested sources with a log entry instead of fetching bytes it may not keep, and send `source_id` with every evidence record. 8 new tests; full suite **599 passed, zero skips**. See [tenth-slice checkpoint](implementation-wp01-slice10-2026-10-21.md).
 
+**Completed — eleventh slice, bounded ToS review validity and revocation:**
+
+- [x] Bound a review's validity with one documented deployment policy (`MTK_TOS_REVIEW_TTL_DAYS`, default 180 days, clamped 1..3650) derived from the recorded timestamp, so expiry cannot drift from the attestation it belongs to.
+- [x] Refuse new machine-collected evidence when the review has expired, and expose the computed `tos_expires_at`/`tos_valid` on `GET /sources`; the worker consumes `tos_valid` instead of trusting a bare timestamp.
+- [x] Add `DELETE /sources/{id}/tos-review`: a recorded reviewer withdraws the permission (403 without one, 404 for an unknown source, audit-logged), the three attestation columns clear together, and new machine evidence is refused while already stored evidence and reviewer-attested snapshots are untouched. 3 new tests; full suite **602 passed, zero skips**. See [eleventh-slice checkpoint](implementation-wp01-slice11-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
 - [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
 - [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
-- [ ] Give the ToS attestation a bounded validity and a revocation/re-attestation path; today a review never expires and changed terms are invisible to the system.
+- [ ] Detect terms that changed inside a review's validity window and re-read the attested reference; today only the clock is checked, not the document.
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
@@ -840,7 +846,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate and per-source terms-of-service attestation implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md). Non-symmetric acquisition identity, attestation expiry/revocation, semantic applicable-terms proof, coverage for claim-free pages, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation and bounded review validity/revocation implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md). Non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1103,6 +1109,43 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   database received migrations; no network fetch was performed.
 - **Next smallest task:** bound the attestation's validity and re-check it at
   collection time, so a stale review stops authorising new reads.
+
+#### 21 October 2026, 21:20 UTC — WP01 eleventh slice: bounded ToS validity and revocation
+
+- **Status:** implemented; locally VERIFIED for the attestation-validity scope
+  only. Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `f33efa6`).
+- **Changes:** `services/api/tos_review.py` derives an expiry from the recorded
+  review timestamp under `MTK_TOS_REVIEW_TTL_DAYS` (default 180, clamped
+  1..3650), so there is no second timestamp to drift; evidence ingest refuses
+  machine provenance once the review has expired; `GET /sources` exposes
+  `tos_expires_at` and `tos_valid`; `DELETE /sources/{id}/tos-review` lets a
+  recorded reviewer withdraw the permission (403 without identity, 404 unknown,
+  audit-logged) and clears all three columns; the worker reads `tos_valid` and
+  falls back to the timestamp only for an older API. See
+  [eleventh-slice checkpoint](implementation-wp01-slice11-2026-10-21.md).
+- **Failing first:** at `f33efa6` the ingest helper only checks `IS NULL`, there
+  is no `DELETE` route, `/sources` has no validity fields, and the worker skips
+  only a missing timestamp — an expired or revoked review still authorises
+  collection.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **602 passed, 26 warnings, zero skips**, exit 0 (was 599; +3 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The expiry test sets a
+  one-day policy and backdates a review, proving the bound is enforced rather
+  than decorative.
+- **Not closed, and deliberately not ticked:** a change to the provider's terms
+  inside the validity window is not detected; withdrawal does not invalidate
+  already stored evidence, verified offers or published artifacts; the TTL is
+  deployment-wide, not per source or contract; the reviewer's judgment is not
+  machine-checkable; coverage cannot see claim-free pages; non-symmetric
+  acquisition identity; semantic applicable-terms coverage; freshness;
+  downstream invalidation; legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database was used; no network fetch was performed.
+- **Next smallest task:** freshness — refuse scheduling, capture and upload for a
+  fact pack whose evidence has passed its recheck window, instead of trusting
+  `verified` indefinitely.
 
 ## 13. Coding-model execution guide
 

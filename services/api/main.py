@@ -23,6 +23,7 @@ import health_api
 from health_api import router as health_router
 from locks_api import router as locks_router
 from jsonb import decode_mapping
+import tos_review
 from normalize import canonicalize_url, hash_parts
 from offers_api import router as offers_router
 from platforms_api import router as platforms_router
@@ -122,6 +123,9 @@ async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
     for row in rows:
         source = dict(row)
         source["config"] = decode_mapping(source.get("config"))
+        # A review is a statement about terms at a point in time (slice 11).
+        source["tos_expires_at"] = tos_review.expires_at(source.get("tos_reviewed_at"))
+        source["tos_valid"] = tos_review.is_valid(source.get("tos_reviewed_at"))
         result.append(source)
     return result
 
@@ -189,6 +193,36 @@ async def record_tos_review(source_id: uuid.UUID, review: TosReviewIn,
         _json({"reference": review.reference}),
     )
     return dict(row)
+
+
+@app.delete("/sources/{source_id}/tos-review")
+async def revoke_tos_review(source_id: uuid.UUID, request: Request,
+                            reviewer: Optional[str] = Query(default=None)) -> dict:
+    """Withdraw the permission to read a source (WP01 slice 11).
+
+    Clearing the record stops new machine-collected evidence immediately; it does
+    not rewrite evidence already stored, and reviewer-attested snapshots remain
+    possible. The audit log records who withdrew it.
+    """
+    actor = api_hardening.effective_reviewer(request, reviewer, require=True)
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        UPDATE sources
+        SET tos_reviewed_at = NULL, tos_reviewer = NULL, tos_reference = NULL
+        WHERE id = $1
+        RETURNING id
+        """,
+        source_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="source not found")
+    await pool.execute(
+        "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
+        "VALUES ($1, $2, 'sources', $3, $4::jsonb)",
+        actor, "tos_review:revoked", source_id, _json({}),
+    )
+    return {"id": row["id"], "revoked": True}
 
 
 @app.post("/sources/{source_id}/poll-result")
