@@ -1,0 +1,101 @@
+"""Raw-byte and fetch-provenance contracts (WP01 slice 3).
+
+These are pure schema checks: no database, no network.
+"""
+
+import base64
+import hashlib
+import uuid
+
+import pytest
+from pydantic import ValidationError
+
+from schemas import EvidenceIn
+
+BODY = b"<html><title>Terms</title><p>Free for students.</p></html>"
+RAW_B64 = base64.b64encode(BODY).decode("ascii")
+RAW_SHA = hashlib.sha256(BODY).hexdigest()
+
+
+def provenance(**overrides):
+    base = {
+        "requested_url": "https://example.com/terms",
+        "final_url": "https://example.com/terms",
+        "http_status": 200,
+        "content_type": "text/html",
+        "fetched_at": "2026-10-21T12:00:00+00:00",
+        "redirects": [],
+        "raw_sha256": RAW_SHA,
+        "parser_version": "page_watch/1",
+        "fetch_identity": "verification-worker",
+    }
+    base.update(overrides)
+    return base
+
+
+def evidence(**overrides):
+    base = {
+        "url": "https://example.com/terms",
+        "source_id": str(uuid.uuid4()),
+        "captured_content": "Free for students.",
+        "official": True,
+        "raw_content_b64": RAW_B64,
+        "provenance": provenance(),
+    }
+    base.update(overrides)
+    return base
+
+
+class TestRawSnapshot:
+    def test_valid_raw_snapshot_accepted(self):
+        parsed = EvidenceIn.model_validate(evidence())
+        assert parsed.raw_content_b64 == RAW_B64
+
+    def test_invalid_base64_rejected(self):
+        with pytest.raises(ValidationError, match="valid base64"):
+            EvidenceIn.model_validate(evidence(raw_content_b64="not base64!!"))
+
+    def test_empty_raw_snapshot_rejected(self):
+        with pytest.raises(ValidationError, match="must not be empty"):
+            EvidenceIn.model_validate(evidence(raw_content_b64=""))
+
+    def test_oversized_raw_snapshot_rejected(self):
+        too_big = base64.b64encode(b"x" * 2_000_001).decode("ascii")
+        with pytest.raises(ValidationError, match="2,000,000-byte"):
+            EvidenceIn.model_validate(evidence(raw_content_b64=too_big))
+
+    def test_provenance_without_raw_bytes_rejected(self):
+        with pytest.raises(ValidationError, match="provenance requires raw_content_b64"):
+            EvidenceIn.model_validate(evidence(raw_content_b64=None))
+
+
+class TestProvenance:
+    def test_valid_provenance_accepted(self):
+        parsed = EvidenceIn.model_validate(evidence())
+        assert parsed.provenance.parser_version == "page_watch/1"
+        assert parsed.provenance.redirects == []
+
+    def test_bad_hash_shape_rejected(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(raw_sha256="abc")))
+
+    def test_http_status_bounds_enforced(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(http_status=42)))
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(http_status=600)))
+
+    def test_redirect_chain_is_bounded(self):
+        chain = [f"https://example.com/r{i}" for i in range(11)]
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(redirects=chain)))
+
+    def test_parser_version_required(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(parser_version="")))
+
+    def test_legacy_evidence_without_provenance_still_valid(self):
+        parsed = EvidenceIn.model_validate(evidence(
+            raw_content_b64=None, provenance=None,
+        ))
+        assert parsed.provenance is None

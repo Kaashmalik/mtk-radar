@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** the first WP01 snapshot-bound verification slice is now implemented; WP01 remains in progress. See [the checkpoint, rollout requirements and remaining limitations](implementation-wp01-2026-10-21.md). The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** three WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, and safe egress with raw-byte fetch provenance. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md) and [slice 3](implementation-wp01-slice3-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -556,7 +556,7 @@ For each package: add targeted failing tests → implement the smallest vertical
 
 **Completed — first integrity slice, commit [`0dbd7df`](https://github.com/Kaashmalik/mtk-radar/commit/0dbd7df):**
 
-- [x] Reproduce the old gate failures before implementation: 12 failing regression cases and one passing valid case.
+- [x] Reproduce the old gate failures before implementation: 14 failing regression cases and one passing valid case (re-verified against `0dbd7df^`).
 - [x] Add API/regression tests for forged `complete`, unknown/foreign evidence IDs, unrelated URLs, invented quotes/values, unresolved conflicts, and disabled/downgraded/mismatched source ownership.
 - [x] Retain the exact bounded extraction text with SHA-256 validation through append-only migration 012; preserve historical hash-only rows without fabricating text.
 - [x] Fetch each verification page once, extract and persist the same untruncated text, record its final URL, and reject an off-provider final destination. Collector excerpts keep their existing default.
@@ -569,19 +569,45 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Test fresh database installation, upgrade from migrations 001–011, legacy preservation, database hash constraints, API round trips and concurrent replacement/promotion on isolated PostgreSQL 16.15.
 - [x] Pass the combined suite: **325 tests, zero skips**; Python lint/compilation and TypeScript typecheck also pass. See [checkpoint and rollout notes](implementation-wp01-2026-10-21.md).
 
+**Completed — second slice, offer-type terms contract:**
+
+- [x] Add semantic/type-specific terms tests, including negation, renewal versus initial price, excluded regions, ambiguous deadlines and missing critical restrictions.
+- [x] Implement server-derived offer-type completeness and explicit unknown/conflict statuses; remove invented eligibility/zero-cost wording and synchronize approved facts with script/metadata fields.
+- [x] Derive a per-claim fact pack on the server with exactly four statuses — `supported` / `contradicted` / `unknown` / `not_applicable` — and stop treating any caller `complete` hint as authority.
+- [x] Replace the char-window negation check with sentence-scoped detection so an unrelated sentence cannot contradict a claim; decimal points are not sentence boundaries.
+- [x] Require a price `basis` (`initial`/`renewal`) and contradict a price that quotes the renewal figure as the initial cost.
+- [x] Record `regions` with `excluded_regions`; a `worldwide` claim with any exclusion is contradicted, an unrecorded exclusion is unknown.
+- [x] Keep non-specific deadlines (`no expiry`, `never expires`, `ongoing`, `TBD`) unknown with wording that says *not proof of permanence*.
+- [x] Stop treating an incidental `free` (free shipping) as a free benefit.
+- [x] Derive completeness from a published offer-type checklist, additively — unmapped types keep the baseline core so no existing gate is loosened.
+- [x] Persist the pack in append-only migration 013 with an object-only constraint; re-derive it at promotion against the *current* offer type and demote re-typed offers.
+- [x] Replace invented `Open eligibility`, `— see terms`, `none stated` and `Genuine end-to-end claim` wording with explicit unknown/limitation text in `scriptgen.py` and `schedules_state.py`.
+- [x] Emit the typed claims (`benefit_type`, `regions`, `excluded_regions`, `auto_renew`, price `basis`) from the rule extractor; the server still verifies every one.
+- [x] Add the semantic/type-specific tests (negation, renewal versus initial price, excluded regions, ambiguous deadlines, missing critical restrictions) and prove they fail before the implementation: **13 failed / 30 passed** plus one collection error.
+- [x] Add regression tests for the wording itself: unknown eligibility is never "open", an absent expiry is never "never expires", unknown renewal is never "none"/free, and metadata never claims a "genuine end-to-end claim".
+- [x] Pass the combined suite on isolated PostgreSQL 16.15: **394 tests, zero skips**; lint, compilation and typecheck exit 0. See [second-slice checkpoint](implementation-wp01-slice2-2026-10-21.md).
+
+**Completed — third slice, safe egress + raw-byte provenance:**
+
+- [x] Preserve the original HTTP/HTML bytes and redirect/fetch provenance in append-only migration 014, with separate raw and canonical hashes and a parser version.
+- [x] Add an egress choke point for verification fetches: HTTPS only, permitted ports, no URL credentials, public-address-only DNS answers, bounded body, text content types only.
+- [x] Validate **every** redirect hop against the same policy and record the chain; an HTTP error is returned as unavailable, never as proof the offer ended.
+- [x] Re-hash and re-check provenance server-side on upload: hash mismatch, URL/final-URL disagreement, off-provider hops and future timestamps are 422s.
+- [x] Require raw bytes + provenance at promotion for machine-collected official evidence, while exempting reviewer-attested snapshots; legacy text-only evidence stays storable but cannot earn `verified`.
+- [x] Prove the new tests fail before implementation: **14 failing slice cases + 2 collection errors** at `fe4764e`. Full suite on isolated PostgreSQL 16.15: **476 tests, zero skips**; lint, compilation and typecheck exit 0. See [third-slice checkpoint](implementation-wp01-slice3-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Add semantic/type-specific terms tests, including negation, renewal versus initial price, excluded regions, ambiguous deadlines and missing critical restrictions.
-- [ ] Implement server-derived offer-type completeness and explicit unknown/conflict statuses; remove invented eligibility/zero-cost wording and synchronize approved facts with script/metadata fields.
-- [ ] Preserve original HTTP/HTML bytes and redirect/fetch provenance; implement trusted acquisition identities and full SSRF/egress protections. Retained extraction text alone is not proof a provider served it.
+- [ ] Close the DNS-rebinding window by pinning the validated address in the transport, and apply the egress policy to the collector adapters (only verification uses it today).
+- [ ] Implement trusted acquisition identities: the API cannot yet prove which process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
+- [ ] Record a per-source robots/terms permission decision alongside each fetch.
 - [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
 - [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary; no bulk production migration or legacy queue review has been performed.
 - [ ] Deploy migration/API/worker together with owner approval and prove live acquisition/release behavior through the remaining safety gates; local tests are not production deployment.
 
-**Touchpoints:** `services/api/{schemas,offers_api,schedules_api,scriptgen}.py`, `workers/verification/*`, `packages/source_adapters/*`; new snapshot/claim modules and next migration(s).
-
+**Touchpoints:** `services/api/{schemas,offers_api,schedules_api,scriptgen,offer_terms,verification_checks}.py`, `services/api/db/migrations/*`, `workers/verification/*`, `packages/source_adapters/*`; new snapshot/claim modules and next migration(s).
 **Done when:** direct API bypass requests fail; valid evidence succeeds; byte/quote/hash replay works; current supported tests plus real DB upgrade tests pass. No stale legacy evidence silently earns autopilot.
 
 ### WP02 — P0: publishing ownership, permissions and immutable packages
@@ -768,7 +794,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | First snapshot/quote/ownership integrity slice implemented; [proof and limitations](implementation-wp01-2026-10-21.md). Type-specific semantic completeness, fetch provenance, freshness and downstream invalidation remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, and safe egress + raw-byte fetch provenance implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md). DNS-rebinding pinning, trusted acquisition identity, collector-path egress, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -796,6 +822,33 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Safety:** no real `.env`, existing application database, live offer/model/OAuth service or publishing account touched. Only the isolated test database received migrations; remote Git publication is separate from application deployment.
 - **Remaining:** offer-type semantic completeness and unknown states, original-byte/trusted-fetch provenance and full SSRF protection, long-document extraction, freshness checks, legacy release review, approved fact-pack propagation, service/reviewer separation and publication integrity. Browser/media/live-posting acceptance not run.
 - **Next smallest task:** add type-specific negative/region/deadline/renewal fixtures and server rules; do not expand unattended publishing based on literal text checks alone.
+
+#### 21 October 2026, 15:27 UTC — WP01 second slice: offer-type fact pack and explicit statuses
+
+- **Status:** implemented; locally VERIFIED for the offer-type completeness and unknown/conflict scope only. Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** uncommitted working-tree change on `main` at the time of writing; commit hash to be recorded when it lands. No other work package is marked complete.
+- **Changes:** new `services/api/offer_terms.py` (four statuses, sentence-scoped negation/exclusion, price basis, region exclusions, deadline specificity, offer-type checklists); extended `schemas.py` field vocabulary (9 claims, typed `basis`/`excluded_regions`); append-only migration `013_extraction_fact_pack.sql`; `offers_api.py` derives/persists/returns the pack, re-derives it at promotion against the current offer type and treats `offer_type` as material; `verification_checks.py` exposes per-field established/unestablished claims; unknown-safe wording in `scriptgen.py` and `schedules_state.py`; typed rule extraction in `workers/verification/extractors.py`. See [second-slice checkpoint](implementation-wp01-slice2-2026-10-21.md).
+- **Failing first:** in a throwaway worktree at `fe4764e` with only the new test files copied in, `pytest services/api/tests/test_verification_gate.py workers/verification/tests/test_verification.py -q` gave **13 failed / 30 passed**, and `test_offer_terms.py` failed collection because `offer_terms` did not exist. The 13 failures map to missing billing terms, negated eligibility, renewal-as-initial price, ambiguous deadline, typed classification, price basis and region/auto-renew extraction.
+- **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q` against a newly created isolated PostgreSQL 16.15 database (`postgres:16-alpine`, `127.0.0.1:55499`): **394 passed, 26 warnings, zero skips**, exit 0. Historical FastAPI/Starlette/UTC deprecation warnings remain.
+- **Additional checks:** `ruff check services workers packages scripts` exit 0; `compileall -q services workers packages` exit 0; `pnpm typecheck` exit 0.
+- **Wording regression tests:** `TestUnknownWording` and `TestPlatformMetadataUnknownWording` lock in that unknown eligibility is never "open", an absent expiry is never "never expires", unknown renewal is never "none"/free, contradicted terms force manual review, and metadata never claims a "genuine end-to-end claim".
+- **New integration cases (real DB):** fact pack persisted and returned; object-only `CHECK` on `fact_pack`; unknown required claim blocks promotion; a fully typed free trial promotes; a contradicted claim blocks promotion; re-typing `coupon → free_trial` demotes and fails the new checklist.
+- **Corrections to earlier records:** the first slice's pre-implementation count is **14 failures / 1 pass**, not 12 (reproduced against `0dbd7df^`); `scripts/verify.sh` now uses `127.0.0.1` instead of `localhost` for its disposable Postgres DSNs, because a host that resolves `localhost` to IPv6 `::1` first times out against Docker's IPv4-only published port.
+- **Safety:** no real `.env`, existing application database, live offer/model/OAuth service or publishing account touched. Only the isolated test database received migrations; local tests are not a deployment.
+- **Remaining:** original-byte/trusted-fetch provenance and full SSRF/egress protection, long-document section extraction, risk-based freshness and downstream invalidation, legacy release review, service/reviewer separation, publication integrity. Semantic detection is cue-based and abstains; unmapped offer types still use the baseline core. Browser/media/live-posting acceptance not run.
+- **Next smallest task:** preserve original HTTP/HTML bytes and fetch provenance with trusted acquisition identities and full SSRF/egress defences — every status above is only as trustworthy as the bytes it was derived from.
+
+#### 21 October 2026, 17:07 UTC — WP01 third slice: safe egress, raw bytes and fetch provenance
+
+- **Status:** implemented; locally VERIFIED for the egress/raw-byte/provenance scope only. Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** uncommitted working-tree change on `main` at the time of writing; commit hash to be recorded when it lands.
+- **Changes:** new `packages/source_adapters/egress.py` (HTTPS-only, permitted ports, no URL credentials, public-address-only DNS answers with all-answers checking, per-hop redirect validation, bounded streaming body, text-only content types); `Fetcher.safe_fetch` with a dedicated non-redirecting client; `fetch_page_snapshot(policy=...)` returns exact bytes plus provenance; append-only migration `014_evidence_fetch_provenance.sql` (`raw_content BYTEA`, `raw_hash`, `requested_url`, `fetch_status`, `fetch_content_type`, `fetched_at`, `fetch_redirects`, `parser_version`, `fetch_identity`); `schemas.EvidenceProvenance` + server-side re-hashing and URL-chain re-checks; `_gate_verified` requires raw bytes and provenance for machine-collected official evidence (reviewer attestations exempt, `MTK_REQUIRE_FETCH_PROVENANCE` opt-out); worker forwards bytes and provenance, and skips a non-2xx page instead of storing an error page as terms. See [third-slice checkpoint](implementation-wp01-slice3-2026-10-21.md).
+- **Failing first:** throwaway worktree at `fe4764e` → **14 failing slice cases + 18 passing** for the schema/gate files, plus **2 collection errors** (`source_adapters.egress` and `EgressPolicy` did not exist). The remaining 5 failures in that run are slice-2 offer-type tests carried in the same modified file.
+- **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests packages/source_adapters/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q` against a newly created isolated PostgreSQL 16.15 database (`postgres:16-alpine`, `127.0.0.1:55499`): **476 passed, 26 warnings, zero skips**, exit 0.
+- **Additional checks:** `ruff check services workers packages scripts` exit 0; `compileall -q services workers packages` exit 0; `pnpm typecheck` exit 0. `packages/source_adapters/tests` added to the `scripts/verify.sh` pytest list.
+- **Not closed, and deliberately not ticked:** DNS rebinding (the connection is not pinned to the validated address, so a hostile resolver can still answer differently at connect time); trusted acquisition identity (`fetch_identity` is recorded, not cryptographically attested — a compromised worker could still submit bytes it never fetched); collector adapters still bypass the policy; no robots/terms permission record.
+- **Safety:** no real `.env`, existing application database, live provider, model/OAuth service or publishing account touched. Only the isolated test database received migrations.
+- **Next smallest task:** pin the validated address in the transport to close DNS rebinding, then route collector adapters through the same egress policy.
 
 ## 13. Coding-model execution guide
 

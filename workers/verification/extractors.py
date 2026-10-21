@@ -38,7 +38,61 @@ RENEWAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-ALL_RULE_FIELDS = ("promo_code", "price", "expiry", "eligibility", "renewal")
+# --- typed claims -----------------------------------------------------------
+# These are classifications, not quoted text: the server verifies the quote
+# carries the matching cue, so a wrong guess becomes `unknown`, not a claim.
+BENEFIT_TYPE_RULES = (
+    ("free", re.compile(
+        r"\bfree (?:trial|tier|plan|month|credits?|access|of charge|for)\b"
+        r"|\bat no cost\b|\bcomplimentary\b|\$\s?0\b",
+        re.IGNORECASE,
+    )),
+    ("discounted", re.compile(
+        r"\b\d{1,3}\s*%\s*off\b|\bdiscount(?:ed)?\b|\breduced (?:price|rate)\b",
+        re.IGNORECASE,
+    )),
+    ("application_based", re.compile(
+        r"\bapply\b|\bapplication\b|\bupon approval\b|\baward(?:ed)?\b",
+        re.IGNORECASE,
+    )),
+)
+
+WORLDWIDE_RE = re.compile(
+    r"\b(?:available|open|valid|offered)\s+worldwide\b|\ball countries\b", re.IGNORECASE
+)
+REGION_LIST_RE = re.compile(
+    r"\b(?:available|eligible|open|valid|offered)\s+(?:only\s+)?in\s+"
+    r"((?:the\s+)?[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?"
+    r"(?:\s*(?:,|and|or)\s*(?:the\s+)?[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?)*)"
+)
+EXCLUDED_REGION_RE = re.compile(
+    r"\b(?:not available|unavailable|excluded?|except)\s+(?:in|for)\s+"
+    r"((?:the\s+)?[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?"
+    r"(?:\s*(?:,|and|or)\s*(?:the\s+)?[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?)*)"
+)
+
+AUTO_RENEW_NO_RE = re.compile(
+    r"\b(?:does not|do not|will not|won't|no)\s+auto-?renew"
+    r"|\bauto-?renew(?:al)?\s+is\s+(?:off|disabled)"
+    r"|\bmanual renewal\b",
+    re.IGNORECASE,
+)
+AUTO_RENEW_YES_RE = re.compile(
+    r"\bauto-?renew(?:s|al|ing)?\b|\brenews automatically\b|\bautomatic renewal\b",
+    re.IGNORECASE,
+)
+
+#: Renewal/initial cues used to label a price's basis.
+_RENEWAL_CLAUSE_RE = re.compile(
+    r"renew|after the (?:free|first|trial)|thereafter|afterwards|subsequent|auto-?renew",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<!\d)\.(?!\d)|[!?\n]")
+
+ALL_RULE_FIELDS = (
+    "promo_code", "price", "expiry", "eligibility", "renewal",
+    "benefit_type", "regions", "auto_renew",
+)
 
 
 def _excerpt(text: str, start: int, width: int = 90) -> str:
@@ -46,17 +100,51 @@ def _excerpt(text: str, start: int, width: int = 90) -> str:
     return text[lo:hi].strip()
 
 
+def _sentence_at(text: str, position: int) -> str:
+    """The sentence containing `position`; decimal points do not split."""
+    low = 0
+    high = len(text)
+    for match in _SENTENCE_BOUNDARY_RE.finditer(text):
+        if match.end() <= position:
+            low = match.end()
+        elif match.end() >= position and high == len(text):
+            high = match.end()
+            break
+    return text[low:high].strip()
+
+
+def _region_items(raw: str) -> list[str]:
+    items = re.split(r"\s*(?:,|and|or)\s*", raw.strip())
+    cleaned = []
+    for item in items:
+        item = re.sub(r"^the\s+", "", item.strip(), flags=re.IGNORECASE).strip()
+        if item:
+            cleaned.append(item)
+    return cleaned
+
+
+def price_basis(text: str, start: int) -> str:
+    """Label a price as `initial` or `renewal` from its own sentence.
+
+    A renewal price must never be presented as the price a viewer pays first,
+    so this only says `initial` when no renewal clause shares the sentence.
+    """
+    return "renewal" if _RENEWAL_CLAUSE_RE.search(_sentence_at(text, start)) else "initial"
+
+
 def extract_fields_rules(text: str, evidence_url: str) -> dict[str, dict[str, Any]]:
     """Deterministic extraction. Every field carries its evidence link (§18:
     every verified field links to evidence)."""
     fields: dict[str, dict[str, Any]] = {}
 
-    def add(name: str, matched: str, start: int, confidence: float = 0.55) -> None:
+    def add(name: str, matched: str, start: int, confidence: float = 0.55,
+            **extra: Any) -> None:
         fields[name] = {
             "value": matched,
             "evidence_url": evidence_url,
             "excerpt": _excerpt(text, start),
             "confidence": confidence,
+            **extra,
         }
 
     match = PROMO_RE.search(text)
@@ -65,7 +153,8 @@ def extract_fields_rules(text: str, evidence_url: str) -> dict[str, dict[str, An
 
     match = PRICE_RE.search(text)
     if match:
-        add("price", "".join(g for g in match.groups() if g), match.start())
+        add("price", "".join(g for g in match.groups() if g), match.start(),
+            basis=price_basis(text, match.start()))
 
     match = EXPIRY_RE.search(text)
     if match:
@@ -78,6 +167,29 @@ def extract_fields_rules(text: str, evidence_url: str) -> dict[str, dict[str, An
     match = RENEWAL_RE.search(text)
     if match:
         add("renewal", match.group(0).strip()[:80], match.start())
+
+    for benefit_type, pattern in BENEFIT_TYPE_RULES:
+        match = pattern.search(text)
+        if match:
+            add("benefit_type", benefit_type, match.start(), confidence=0.5)
+            break
+
+    worldwide = WORLDWIDE_RE.search(text)
+    regions = REGION_LIST_RE.search(text)
+    if worldwide or regions:
+        excluded = EXCLUDED_REGION_RE.search(text)
+        start = worldwide.start() if worldwide else regions.start()
+        value = "worldwide" if worldwide else ", ".join(_region_items(regions.group(1)))
+        add(
+            "regions", value, start, confidence=0.5,
+            excluded_regions=_region_items(excluded.group(1)) if excluded else [],
+        )
+
+    # `no` is checked first: \"does not auto-renew\" also matches the yes rule.
+    if AUTO_RENEW_NO_RE.search(text):
+        add("auto_renew", "no", AUTO_RENEW_NO_RE.search(text).start(), confidence=0.5)
+    elif AUTO_RENEW_YES_RE.search(text):
+        add("auto_renew", "yes", AUTO_RENEW_YES_RE.search(text).start(), confidence=0.5)
 
     return fields
 
@@ -122,7 +234,9 @@ def extract_fields_llm(
         "value, evidence_url, excerpt (the exact supporting quote), confidence (0-1). "
         'Respond ONLY as JSON: {"fields": {...}, "conflicts": [...]}. '
         f"Use this evidence_url for every field: {evidence_url}. "
-        f"Known field names: {', '.join(ALL_RULE_FIELDS)}. Quote must be verbatim."
+        f"Known field names: {', '.join(ALL_RULE_FIELDS)}. Quote must be verbatim. "
+        "A price claim also needs basis=initial or basis=renewal; a regions claim "
+        "may add excluded_regions. Never report an expiry you cannot quote."
     )
     body = {
         "model": model_id,

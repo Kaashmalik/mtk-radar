@@ -3,12 +3,19 @@
 Best practice (master plan §7): rate-limit, respect robots/terms, log failures.
 One client instance is reused across adapters; a small per-host minimum interval
 is enforced so polite collection is the default, not an afterthought.
+
+Verification fetches go through :meth:`Fetcher.safe_fetch` instead of
+``fetch``: that path applies the egress policy (HTTPS-only, public addresses,
+validated redirects, bounded body). It uses a separate non-redirecting client
+so every hop is checked by :mod:`source_adapters.egress`.
 """
 
 import time
 from typing import Optional
 
 import httpx
+
+from .egress import EgressPolicy, FetchResult, safe_fetch
 
 USER_AGENT = "MTKRadarCollector/0.2 (+https://github.com/Kaashmalik/mtk-radar)"
 DEFAULT_MIN_INTERVAL = 2.0  # seconds between requests to the same host
@@ -22,15 +29,16 @@ class Fetcher:
             timeout=timeout,
             follow_redirects=True,
         )
+        # Verification must validate each redirect hop itself, so it needs a
+        # client that never follows automatically.
+        self._safe_client = httpx.Client(
+            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
         self._last_hit: dict[str, float] = {}
 
-    def fetch(
-        self,
-        url: str,
-        *,
-        headers: Optional[dict] = None,
-        params: Optional[dict] = None,
-    ) -> httpx.Response:
+    def _throttle(self, url: str) -> None:
         host = httpx.URL(url).host
         wait = 0.0
         last = self._last_hit.get(host)
@@ -40,11 +48,38 @@ class Fetcher:
                 wait = self._min_interval - elapsed
         if wait:
             time.sleep(wait)
-
-        resp = self._client.get(url, headers=headers, params=params)
         self._last_hit[host] = time.monotonic()
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+    ) -> httpx.Response:
+        self._throttle(url)
+        resp = self._client.get(url, headers=headers, params=params)
         resp.raise_for_status()
         return resp
 
+    def safe_fetch(
+        self,
+        url: str,
+        *,
+        policy: Optional[EgressPolicy] = None,
+        resolver=None,
+        clock=None,
+    ) -> FetchResult:
+        """Verification-grade fetch: bounded, public-only, hop-validated."""
+        return safe_fetch(
+            url,
+            policy=policy or EgressPolicy(),
+            client=self._safe_client,
+            resolver=resolver,
+            clock=clock,
+            before_request=self._throttle,
+        )
+
     def close(self) -> None:
         self._client.close()
+        self._safe_client.close()

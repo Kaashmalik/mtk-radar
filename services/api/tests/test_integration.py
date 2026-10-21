@@ -14,10 +14,13 @@ care about. Skipped automatically when the env var is absent.
 """
 
 import asyncio
+import base64
+import hashlib
 import importlib.util
 import json
 import os
 import sys as _sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -157,6 +160,10 @@ def test_full_review_pipeline(client, source):
         "excerpt": "Twelve months free, then standard renewal. New accounts only.",
         "captured_content": "Twelve months free, then standard renewal. New accounts only.",
         "supported_fields": ["value", "eligibility"],
+        **_procured(
+            "https://example.com/terms/free-domain",
+            "Twelve months free, then standard renewal. New accounts only.",
+        ),
     })
     assert ev.status_code == 201, ev.text
     assert ev.json()["domain_ok"] is True and ev.json()["created"] is True
@@ -319,6 +326,26 @@ SNAPSHOT_TEXT = "Use promo code SAVE2026 for verified students only."
 SNAPSHOT_URL = "https://example.com/wp01-terms"
 
 
+def _procured(url, text, *, fetched_at=None, redirects=()):
+    """Raw bytes + fetch provenance, as the acquisition worker sends them."""
+    raw = text.encode("utf-8")
+    return {
+        "raw_content_b64": base64.b64encode(raw).decode("ascii"),
+        "provenance": {
+            "requested_url": url,
+            "final_url": url,
+            "http_status": 200,
+            "content_type": "text/html",
+            "fetched_at": (fetched_at or datetime.now(timezone.utc)).isoformat(),
+            "redirects": list(redirects),
+            "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "parser_version": "page_watch/1",
+            "fetch_identity": "integration-test",
+            "encoding": "utf-8",
+        },
+    }
+
+
 def _verification_fixture(client):
     import uuid
     provider = f"WP01 {uuid.uuid4()}"
@@ -337,6 +364,7 @@ def _verification_fixture(client):
     payload = {
         "url": SNAPSHOT_URL, "source_id": source.json()["id"],
         "official": True, "captured_content": SNAPSHOT_TEXT,
+        **_procured(SNAPSHOT_URL, SNAPSHOT_TEXT),
     }
     evidence = client.post(f"/offers/{oid}/evidence", json=payload)
     assert evidence.status_code == 201, evidence.text
@@ -458,13 +486,128 @@ def test_hash_only_legacy_snapshot_cannot_support_new_verification(client):
 
 def test_evidence_identity_includes_url_and_authority(client):
     oid, _, eid, _, payload = _verification_fixture(client)
-    different_url = client.post(f"/offers/{oid}/evidence", json={**payload, "url": SNAPSHOT_URL + "/other"})
+    other_url = SNAPSHOT_URL + "/other"
+    different_url = client.post(f"/offers/{oid}/evidence", json={
+        **payload, "url": other_url, **_procured(other_url, SNAPSHOT_TEXT),
+    })
     assert different_url.status_code == 201 and different_url.json()["id"] != eid
     unofficial = client.post(f"/offers/{oid}/evidence", json={**payload, "official": False})
     assert unofficial.status_code == 201 and unofficial.json()["id"] != eid
     # Equal bytes do not silently inherit a different evidence row's authority.
     again = client.post(f"/offers/{oid}/evidence", json=payload)
     assert again.json()["id"] == eid and again.json()["created"] is False
+
+
+def test_raw_bytes_and_provenance_are_preserved(client):
+    """The exact bytes the provider served are stored, hashed and auditable."""
+    import uuid
+    oid, _, eid, _, _ = _verification_fixture(client)
+    row = _run(
+        "SELECT raw_content, raw_hash, requested_url, fetch_status, fetched_at, "
+        "parser_version, fetch_identity, fetch_redirects::text AS fetch_redirects "
+        "FROM evidence WHERE id = $1",
+        uuid.UUID(eid),
+    )[0]
+    raw = bytes(row["raw_content"])
+    assert raw == SNAPSHOT_TEXT.encode("utf-8")
+    assert row["raw_hash"] == hashlib.sha256(raw).hexdigest()
+    assert row["requested_url"] == SNAPSHOT_URL
+    assert row["fetch_status"] == 200
+    assert row["fetched_at"] is not None
+    assert row["parser_version"] == "page_watch/1"
+    assert row["fetch_identity"] == "integration-test"
+    assert json.loads(row["fetch_redirects"]) == []
+
+    shown = client.get(f"/offers/{oid}").json()["evidence"][0]
+    assert shown["raw_preserved"] is True
+    assert shown["raw_hash"] == row["raw_hash"]
+    assert shown["parser_version"] == "page_watch/1"
+    # Raw bytes stay out of the general workspace response.
+    assert "raw_content" not in shown
+
+
+def test_tampered_raw_hash_is_rejected(client):
+    oid, _, _, _, payload = _verification_fixture(client)
+    tampered = {**payload, "provenance": {**payload["provenance"], "raw_sha256": "0" * 64}}
+    response = client.post(f"/offers/{oid}/evidence", json=tampered)
+    assert response.status_code == 422
+    assert "hash does not match" in response.json()["detail"]
+
+
+def test_off_provider_redirect_chain_is_rejected(client):
+    oid, _, _, _, payload = _verification_fixture(client)
+    poisoned = {
+        **payload,
+        "provenance": {
+            **payload["provenance"],
+            "redirects": ["https://evil.test/promo", payload["provenance"]["final_url"]],
+        },
+    }
+    response = client.post(f"/offers/{oid}/evidence", json=poisoned)
+    assert response.status_code == 422
+    assert "evil.test" in response.json()["detail"]
+
+
+def test_evidence_url_must_be_the_final_fetched_url(client):
+    oid, _, _, _, payload = _verification_fixture(client)
+    mismatched = {**payload, "url": SNAPSHOT_URL + "/elsewhere"}
+    response = client.post(f"/offers/{oid}/evidence", json=mismatched)
+    assert response.status_code == 422
+    assert "final fetched URL" in response.json()["detail"]
+
+
+def test_future_fetch_time_is_rejected(client):
+    oid, _, _, _, payload = _verification_fixture(client)
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    response = client.post(f"/offers/{oid}/evidence", json={
+        **payload, **_procured(SNAPSHOT_URL, SNAPSHOT_TEXT, fetched_at=future),
+    })
+    assert response.status_code == 422
+    assert "future" in response.json()["detail"]
+
+
+def test_verification_requires_raw_provenance_on_real_database(client):
+    """Text-only evidence can be stored but can never earn verified."""
+    import uuid
+    text = "Use promo code SAVE2026 for verified students only."
+    provider = f"WP01P {uuid.uuid4()}"
+    source = client.post("/sources", json={
+        "provider": provider, "canonical_domain": "example.com",
+        "category": "student_programs", "adapter": "manual",
+        "trust_tier": "A_provider_owned",
+    })
+    offer = client.post("/offers", json={
+        "provider": provider, "category": "student_programs", "offer_type": "coupon",
+    })
+    oid = offer.json()["id"]
+    client.post(f"/offers/{oid}/transition", json={"to": "evidence_needed"})
+    evidence = client.post(f"/offers/{oid}/evidence", json={
+        "url": SNAPSHOT_URL, "source_id": source.json()["id"],
+        "official": True, "captured_content": text,   # no raw bytes, no provenance
+    })
+    assert evidence.status_code == 201, evidence.text
+    assert evidence.json()["raw_preserved"] is False
+    eid = evidence.json()["id"]
+    fields = {name: {
+        "value": value, "excerpt": text, "evidence_url": SNAPSHOT_URL,
+        "evidence_id": eid, "confidence": 0.8,
+    } for name, value in (("promo_code", "SAVE2026"), ("eligibility", "students"))}
+    extracted = client.post(f"/offers/{oid}/extraction", json={"fields": fields})
+    assert extracted.status_code == 201
+    assert extracted.json()["complete"] is True  # the terms are satisfied ...
+    blocked = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert blocked.status_code == 422            # ... but the bytes are not proven
+    assert "raw page bytes and fetch provenance" in blocked.json()["detail"]
+
+
+def test_raw_snapshot_database_check_rejects_alteration(client):
+    import uuid
+    oid, _, eid, _, _ = _verification_fixture(client)
+    with pytest.raises(asyncpg.CheckViolationError):
+        _run(
+            "UPDATE evidence SET raw_content = $2 WHERE id = $1",
+            uuid.UUID(eid), b"tampered bytes",
+        )
 
 
 def test_simultaneous_proposal_and_promotion_cannot_leave_verified(client):
@@ -518,9 +661,207 @@ def test_snapshot_migration_preserves_legacy_and_checks_new_text(client):
     asyncio.run(check())
 
 
+def test_fetch_provenance_migration_preserves_legacy_and_checks_raw_hash(client):
+    """Upgrade 001..013 in a rollback-only schema; legacy rows get no provenance."""
+    import hashlib
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_fetch_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            for path in paths[:13]:
+                await conn.execute(path.read_text(encoding="utf-8"))
+            oid = await conn.fetchval(
+                "INSERT INTO offers (title, provider, category, offer_type) "
+                "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
+            digest = hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest()
+            eid = await conn.fetchval(
+                "INSERT INTO evidence (offer_id, url, content_hash) VALUES ($1,$2,$3) RETURNING id",
+                oid, SNAPSHOT_URL, digest)
+            await conn.execute(paths[13].read_text(encoding="utf-8"))
+            row = await conn.fetchrow(
+                "SELECT raw_content, raw_hash, requested_url FROM evidence WHERE id = $1", eid)
+            assert row["raw_content"] is None and row["raw_hash"] is None
+            assert row["requested_url"] is None
+            raw = SNAPSHOT_TEXT.encode()
+            await conn.execute(
+                "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                "requested_url, fetched_at, parser_version) "
+                "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1')",
+                oid, SNAPSHOT_URL + "/ok", digest, raw,
+                hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL)
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                        "requested_url, fetched_at, parser_version) "
+                        "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1')",
+                        oid, SNAPSHOT_URL + "/bad", digest, raw, "0" * 64, SNAPSHOT_URL)
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
+
+
+# ------------------------------ WP01 slice 2: offer-type fact pack + statuses
+
+FACT_PACK_TEXT = (
+    "Free trial for students. Use promo code SAVE2026. "
+    "Valid until 31 December 2026. "
+    "The subscription renews automatically at $19 per month."
+)
+
+
+def _typed_fixture(client, offer_type, text=FACT_PACK_TEXT):
+    """An offer with one official snapshot carrying the typed claims."""
+    import uuid
+    provider = f"WP01T {uuid.uuid4()}"
+    source = client.post("/sources", json={
+        "provider": provider, "canonical_domain": "example.com",
+        "category": "student_programs", "adapter": "manual",
+        "trust_tier": "A_provider_owned",
+    })
+    assert source.status_code == 201, source.text
+    offer = client.post("/offers", json={
+        "provider": provider, "category": "student_programs", "offer_type": offer_type,
+    })
+    assert offer.status_code == 201, offer.text
+    oid = offer.json()["id"]
+    assert client.post(f"/offers/{oid}/transition", json={"to": "evidence_needed"}).status_code == 200
+    url = "https://example.com/typed-terms"
+    evidence = client.post(f"/offers/{oid}/evidence", json={
+        "url": url, "source_id": source.json()["id"],
+        "official": True, "captured_content": text,
+        **_procured(url, text),
+    })
+    assert evidence.status_code == 201, evidence.text
+    eid = evidence.json()["id"]
+
+    def field(value, **extra):
+        return {
+            "value": value, "excerpt": text, "evidence_url": url,
+            "evidence_id": eid, "confidence": 0.8, **extra,
+        }
+
+    return oid, field
+
+
+def test_fact_pack_is_persisted_and_returned(client):
+    import uuid
+    oid, field = _typed_fixture(client, "coupon")
+    response = client.post(f"/offers/{oid}/extraction", json={"fields": {
+        "promo_code": field("SAVE2026"),
+        "eligibility": field("students"),
+    }})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    pack = body["fact_pack"]
+    assert pack["promo_code"]["status"] == "supported"
+    assert pack["eligibility"]["status"] == "supported"
+    # An unrequired, unsubmitted field is recorded as not applicable, not absent.
+    assert pack["renewal"]["status"] == "not_applicable"
+
+    stored = _run(
+        "SELECT fact_pack::text AS fact_pack, offer_type FROM extractions WHERE id = $1",
+        uuid.UUID(body["id"]),
+    )[0]
+    assert json.loads(stored["fact_pack"])["promo_code"]["status"] == "supported"
+    assert stored["offer_type"] == "coupon"
+
+    # The reviewer-facing offer response carries the same server-derived pack.
+    shown = client.get(f"/offers/{oid}").json()["extraction"]["fact_pack"]
+    assert json.loads(shown)["eligibility"]["status"] == "supported"
+
+
+def test_fact_pack_column_accepts_only_a_json_object(client):
+    import uuid
+    oid, _ = _typed_fixture(client, "coupon")
+    with pytest.raises(asyncpg.CheckViolationError):
+        _run(
+            "INSERT INTO extractions (offer_id, fields, fact_pack) VALUES ($1, '{}', '[]'::jsonb)",
+            uuid.UUID(oid),
+        )
+
+
+def test_unknown_required_claim_blocks_promotion(client):
+    """A free trial must prove billing terms; a missing one stays unknown."""
+    import uuid
+    oid, field = _typed_fixture(client, "free_trial")
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": {"promo_code": field("SAVE2026"), "eligibility": field("students")},
+        "complete": True,
+    })
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["complete"] is False
+    for missing in ("value", "benefit_type", "expiry", "renewal", "auto_renew"):
+        assert body["fact_pack"][missing]["status"] == "unknown", missing
+    assert any("renewal" in error for error in body["validation_errors"])
+    stored = _run("SELECT complete FROM extractions WHERE id = $1", uuid.UUID(body["id"]))[0]
+    assert stored["complete"] is False
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
+
+
+def test_complete_typed_offer_promotes(client):
+    oid, field = _typed_fixture(client, "free_trial")
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": {
+            "value": field("free trial"),
+            "benefit_type": field("free"),
+            "eligibility": field("students"),
+            "expiry": field("31 December 2026"),
+            "renewal": field("$19"),
+            "auto_renew": field("yes"),
+        },
+        "complete": False,
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["complete"] is True, response.json()["validation_errors"]
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 200
+
+
+def test_contradicted_claim_blocks_promotion(client):
+    text = "Use promo code SAVE2026. Students are not eligible for this promotion."
+    oid, field = _typed_fixture(client, "coupon", text)
+    response = client.post(f"/offers/{oid}/extraction", json={"fields": {
+        "promo_code": field("SAVE2026"),
+        "eligibility": field("students"),
+    }})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["complete"] is False
+    assert body["fact_pack"]["eligibility"]["status"] == "contradicted"
+    assert any("contradicted" in error for error in body["validation_errors"])
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
+
+
+def test_retyping_an_offer_rechecks_against_the_new_contract(client):
+    """The gate re-derives against the CURRENT offer type, never the stored one."""
+    oid, field = _typed_fixture(client, "coupon")
+    extracted = client.post(f"/offers/{oid}/extraction", json={"fields": {
+        "promo_code": field("SAVE2026"),
+        "eligibility": field("students"),
+    }})
+    assert extracted.json()["complete"] is True
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 200
+
+    patched = client.patch(f"/offers/{oid}", json={"offer_type": "free_trial"})
+    assert patched.status_code == 200, patched.text
+    assert client.get(f"/offers/{oid}").json()["state"] == "evidence_needed"
+
+    result = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert result.status_code == 422, result.text
+    assert "renewal" in result.json()["detail"]
+
+
 AUTH = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 SVC = {"Authorization": "Bearer svc-token"}
-
 
 def test_whoami_distinguishes_reviewer_service_and_anonymous(auth_client):
     r = auth_client.get("/whoami")

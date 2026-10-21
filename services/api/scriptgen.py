@@ -17,12 +17,22 @@ from datetime import datetime
 from typing import Any, Final
 
 from jsonb import decode_list, decode_mapping
+from offer_terms import CONTRADICTED, SUPPORTED, UNKNOWN
 
 VIDEO_STATES: Final = frozenset({"verified", "approved_for_video", "published"})
 
 
 class ScriptGateError(PermissionError):
     """Raised when script generation is attempted for an unverified offer."""
+
+
+def _fact_pack(offer: dict) -> dict:
+    """The server-derived fact pack for this offer's latest extraction."""
+    return decode_mapping(offer.get("fact_pack"))
+
+
+def _fact(name: str, offer: dict) -> dict:
+    return _fact_pack(offer).get(name) or {}
 
 
 def _fmt_date(value: Any) -> str:
@@ -138,12 +148,29 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
     lines.append(f"- Read the official terms: {offer.get('redemption_url') or 'link in evidence below'}.")
     if expires:
         lines.append(f"- ⏰ Expires: **{expires}** — check it is still valid before you attempt this.")
-    if renewal.get("autoRenew") or renewal.get("regularPrice"):
+    else:
+        # "No expiry stated" is not "never expires" (§6 step 7).
+        expiry_status = _fact("expiry", offer).get("status")
+        if expiry_status == SUPPORTED:
+            lines.append(f"- ⏰ {NO_EXPIRY_STATED.capitalize()} in the checked evidence, "
+                         "but the offer is currently verified — recheck before filming.")
+        else:
+            lines.append(f"- ⏰ {NO_EXPIRY_STATED.capitalize()} — this is not proof the offer "
+                         "never expires. Confirm the deadline on the official page.")
+    if renewal.get("regularPrice"):
         lines.append(
-            f"- ⚠️ After the free period this renews at **{renewal.get('regularPrice', 'the regular price')}** "
+            f"- ⚠️ After the free period this renews at **{renewal.get('regularPrice')}** "
             f"(auto-renew: {'on' if renewal.get('autoRenew') else 'off by default'}). "
             "Show the renewal price and auto-renew setting before finalizing."
         )
+    else:
+        renewal_status = _fact("renewal", offer).get("status")
+        if renewal_status == CONTRADICTED:
+            lines.append("- ⚠️ The quoted official terms contradict this offer's renewal claim — "
+                         "manual review is required before filming or recommending it.")
+        else:
+            lines.append(f"- ⚠️ Ongoing cost {ONGOING_COST_UNKNOWN}. Unknown renewal is not free — "
+                         "state the cost on camera or confirm the terms before recommending the offer.")
     lines.append("")
     lines.append("## Claim steps (perform in real time; pause on irreversible/paid decisions)")
     for step in checklist:
@@ -163,14 +190,30 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
                  "(plan, quota, domain panel) — no staged success screens.")
     lines.append("")
     lines.append("## Wrap-up summary card")
-    lines.append(f"- Steps recap: {len(checklist)} checks above; expiry {expires or '— see terms'}; "
-                 f"ongoing cost: {renewal.get('regularPrice', 'none stated')} (auto-renew).")
+    lines.append(f"- Steps recap: {len(checklist)} checks above; "
+                 f"deadline: {expires or NO_EXPIRY_STATED}; "
+                 f"ongoing cost: {renewal.get('regularPrice') or ONGOING_COST_UNKNOWN}"
+                 + (" (" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                 + ("auto-renew on" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                 + (")" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                 + ("" if renewal.get("regularPrice") else " — unknown renewal is not free")
+                 + ".")
     lines.append("- Sources (also in video description):")
     for ev in evidence:
         lines.append(f"  - {ev.get('url')} — captured {_fmt_date(ev.get('captured_at'))}")
     lines.append("")
     lines.append("> Never imply a universal result: state region and eligibility limits again at the end.")
     return "\n".join(lines)
+
+
+#: Truthful unknown wording (§6 step 7, A13). An unknown fact never becomes
+#: "open eligibility", "free", "worldwide" or "never expires".
+NO_EXPIRY_STATED: Final = "no expiry stated in the inspected terms"
+ELIGIBILITY_UNKNOWN: Final = (
+    "Eligibility is not stated in the inspected terms — confirm the current "
+    "audience on the official page. Do not present this offer as open to everyone."
+)
+ONGOING_COST_UNKNOWN: Final = "not stated in the inspected terms"
 
 
 def _eligibility_line(offer: dict) -> str:
@@ -185,7 +228,15 @@ def _eligibility_line(offer: dict) -> str:
     if eligibility.get("newCustomerOnly"):
         parts.append("new customers only")
     if not parts:
-        return "Open eligibility — but confirm current terms on the official page before claiming."
+        status = _fact("eligibility", offer).get("status")
+        if status == CONTRADICTED:
+            return ("The quoted official terms contradict this offer's eligibility — "
+                    "manual review is required before filming.")
+        if status == UNKNOWN:
+            return ELIGIBILITY_UNKNOWN
+        return ("No audience limit is recorded in the official evidence "
+                "(not proof that the offer is open to everyone) — confirm current terms."
+                if status == SUPPORTED else ELIGIBILITY_UNKNOWN)
     return " · ".join(parts) + "."
 
 

@@ -9,11 +9,14 @@ Rules enforced here, not trusted from callers:
 - Every state change writes an audit_log row (actor, action, entity, note).
 """
 
+import base64
 import hashlib
 import json
+import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlsplit
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -40,13 +43,17 @@ from state import (
     can_transition,
     requires_review,
 )
-from verification_checks import core_complete, domain_matches, extraction_problems
+from verification_checks import domain_matches, established_fields, extraction_problems, field_problems
+from offer_terms import build_fact_pack, derive_completeness
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
 MATERIAL_FIELDS = {
     "eligibility", "value", "claim_steps", "promo_code", "redemption_url",
     "expires_at", "renewal",
+    # Re-typing an offer changes which terms are required (offer-type contract),
+    # so it must demote a verified offer instead of inheriting its old check.
+    "offer_type",
 }
 RECHECK_INTERVAL = "2 days"  # verified offers must be rechecked before this elapses
 
@@ -174,6 +181,10 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
         SELECT e.id, e.url, e.captured_at, e.content_hash, e.excerpt, e.screenshot_path,
                e.supported_fields::text AS supported_fields,
                e.official, e.domain_ok, e.reviewer,
+               e.raw_hash, e.requested_url, e.fetch_status, e.fetch_content_type,
+               e.fetched_at, e.fetch_redirects::text AS fetch_redirects,
+               e.parser_version, e.fetch_identity,
+               (e.raw_content IS NOT NULL) AS raw_preserved,
                s.provider AS source_provider, s.trust_tier::text AS trust_tier
         FROM evidence e LEFT JOIN sources s ON s.id = e.source_id
         WHERE e.offer_id = $1 ORDER BY e.captured_at DESC
@@ -182,7 +193,8 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
     )
     extraction = await pool.fetchrow(
         """
-        SELECT fields::text AS fields, conflicts::text AS conflicts, complete, model, created_at
+        SELECT fields::text AS fields, conflicts::text AS conflicts, complete, model, created_at,
+               fact_pack::text AS fact_pack, offer_type
         FROM extractions WHERE offer_id = $1 ORDER BY created_at DESC LIMIT 1
         """,
         offer_id,
@@ -280,19 +292,38 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
                    "(register the official source in the source registry first)",
         )
 
+    # Raw bytes + fetch provenance (WP01 slice 3). Nothing here is trusted:
+    # the server decodes, re-hashes and re-checks every URL in the chain.
+    raw = base64.b64decode(evidence.raw_content_b64) if evidence.raw_content_b64 else None
+    raw_hash = hashlib.sha256(raw).hexdigest() if raw is not None else None
+    provenance = await _validate_provenance(
+        pool, offer["provider"], evidence, raw_hash,
+    )
+
     evidence_reviewer = effective_reviewer(request, evidence.reviewer)
     row = await pool.fetchrow(
         """
         INSERT INTO evidence (offer_id, source_id, url, content_hash, excerpt,
                               screenshot_path, supported_fields, official, domain_ok, reviewer,
-                              captured_content)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+                              captured_content, raw_content, raw_hash, requested_url,
+                              fetch_status, fetch_content_type, fetched_at, fetch_redirects,
+                              parser_version, fetch_identity)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
         offer_id, evidence.source_id, str(evidence.url), content_hash,
         evidence.excerpt, evidence.screenshot_path, _json(evidence.supported_fields),
         evidence.official, domain_ok, evidence_reviewer, evidence.captured_content,
+        raw, raw_hash,
+        provenance["requested_url"] if provenance else None,
+        provenance["fetch_status"] if provenance else None,
+        provenance["fetch_content_type"] if provenance else None,
+        provenance["fetched_at"] if provenance else None,
+        _json(provenance["redirects"]) if provenance else None,
+        provenance["parser_version"] if provenance else None,
+        provenance["fetch_identity"] if provenance else None,
     )
     created = row is not None
     if row is None:
@@ -308,7 +339,9 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
                  detail={"offer_id": str(offer_id), "official": evidence.official,
                          "domain_ok": domain_ok, "content_hash": content_hash})
     return {"id": row["id"], "created": created, "duplicate": not created,
-            "content_hash": content_hash, "domain_ok": domain_ok}
+            "content_hash": content_hash, "domain_ok": domain_ok,
+            "raw_preserved": raw is not None, "raw_hash": raw_hash,
+            "provenance": provenance}
 
 
 # ---------------------------------------------------------------- extraction
@@ -325,23 +358,29 @@ async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
 async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
     # Serialize new proposals with verification transitions for this offer.
     offer = await pool.fetchrow(
-        "SELECT id, state::text AS state FROM offers WHERE id = $1 FOR UPDATE", offer_id,
+        "SELECT id, state::text AS state, offer_type FROM offers WHERE id = $1 FOR UPDATE", offer_id,
     )
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
-    problems = await _extraction_problems(pool, offer_id, extraction)
-    if not core_complete(extraction):
-        problems.append("requires incentive and eligibility/expiry context")
-    complete = core_complete(extraction) and not problems
+    offer_type = offer["offer_type"] or ""
+    per_field, problems, established = await _extraction_problems(pool, offer_id, extraction)
+    # The server derives a per-claim fact pack and checks it against the
+    # offer-type terms contract. A required claim that is unknown or
+    # contradicted blocks verification instead of becoming marketing copy.
+    fact_pack = build_fact_pack(offer_type, extraction.fields, established=established)
+    complete, type_problems = derive_completeness(offer_type, fact_pack)
+    problems = list(problems) + type_problems
+    complete = complete and not problems
     serialized = extraction.model_dump(mode="json")
     row = await pool.fetchrow(
         """
-        INSERT INTO extractions (offer_id, fields, conflicts, complete, model, created_at)
-        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp())
+        INSERT INTO extractions (offer_id, fields, conflicts, complete, model, created_at,
+                                   fact_pack, offer_type)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp(), $6::jsonb, $7)
         RETURNING id
         """,
         offer_id, _json(serialized["fields"]), _json(extraction.conflicts),
-        complete, extraction.model,
+        complete, extraction.model, _json(fact_pack), offer_type,
     )
     if extraction.conflicts:
         await pool.execute(
@@ -364,7 +403,8 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -
     await _audit(pool, actor="worker", action="add_extraction", entity="extractions",
                   entity_id=row["id"], detail={"complete": complete,
                                                "conflicts": len(extraction.conflicts)})
-    return {"id": row["id"], "complete": complete, "validation_errors": problems}
+    return {"id": row["id"], "complete": complete, "validation_errors": problems,
+            "fact_pack": fact_pack}
 
 
 # ---------------------------------------------------------------- transitions
@@ -596,7 +636,19 @@ async def create_script(offer_id: uuid.UUID, request: Request,
         """,
         offer_id,
     )
-    payload = generate_script_payload(dict(offer), [dict(r) for r in evidence])
+    # The fact pack is derived server-side per claim field. The script must
+    # use it so an unknown fact is written as unknown, never as "free",
+    # "open eligibility" or "never expires" (master plan §6 step 7, A13).
+    fact_pack = await pool.fetchrow(
+        """
+        SELECT fact_pack::text AS fact_pack FROM extractions
+        WHERE offer_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        offer_id,
+    )
+    offer_row = dict(offer)
+    offer_row["fact_pack"] = decode(fact_pack["fact_pack"]) if fact_pack else {}
+    payload = generate_script_payload(offer_row, [dict(r) for r in evidence])
 
     unsafe = [c for c in payload["command_cards"] if c["unsafe_reasons"]]
     version_row = await pool.fetchrow(
@@ -700,14 +752,23 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
         })
     except ValidationError:
         raise HTTPException(status_code=422, detail="legacy or invalid extraction; recapture and re-extract") from None
-    problems = await _extraction_problems(pool, offer_id, extraction)
-    if not core_complete(extraction):
-        problems.append("requires a complete structured extraction: incentive and eligibility/expiry context")
+    # The contract is checked against the CURRENT offer type, not the one
+    # stored with the proposal: re-typing an offer must invalidate the old
+    # pack instead of letting a stale one be inherited.
+    row = await pool.fetchrow("SELECT offer_type FROM offers WHERE id = $1", offer_id)
+    offer_type = (row["offer_type"] if row else "") or ""
+    per_field, problems, established = await _extraction_problems(pool, offer_id, extraction)
+    fact_pack = build_fact_pack(offer_type, extraction.fields, established=established)
+    _, type_problems = derive_completeness(offer_type, fact_pack)
+    problems = list(problems) + type_problems
+    if _require_fetch_provenance():
+        problems = list(problems) + await _provenance_problems(pool, offer_id, extraction)
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 
 
-async def _extraction_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> list[str]:
+async def _extraction_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> tuple[dict[str, list[str]], list[str], set[str]]:
+    """Per-field problems, the flat problem list, and the established field names."""
     ids = list({field.evidence_id for field in extraction.fields.values()})
     evidence = await pool.fetch(
         "SELECT e.id, e.url, e.official, e.domain_ok, e.captured_content, e.content_hash, "
@@ -719,7 +780,111 @@ async def _extraction_problems(pool, offer_id: uuid.UUID, extraction: Extraction
     for row in evidence:
         if await _provider_domain_ok(pool, row["provider"], row["url"], row["source_id"]):
             authorized.append(row)
-    return extraction_problems(extraction, authorized)
+    per_field = field_problems(extraction, authorized)
+    return per_field, extraction_problems(extraction, authorized), established_fields(extraction, authorized)
+
+
+def _same_url(left: str, right: str) -> bool:
+    """Compare URLs for identity, tolerating default ports and case."""
+
+    def parts(value: str):
+        split = urlsplit(value)
+        scheme = split.scheme.lower()
+        return (
+            scheme,
+            (split.hostname or "").lower().rstrip("."),
+            split.port or (443 if scheme == "https" else 80),
+            split.path or "/",
+            split.query,
+        )
+
+    return parts(left) == parts(right)
+
+
+#: Small allowance for worker/host clock skew, never a reason to trust the future.
+PROVENANCE_FUTURE_SKEW = timedelta(minutes=5)
+
+
+async def _validate_provenance(pool, provider: str, evidence: EvidenceIn,
+                               raw_hash: Optional[str]) -> Optional[dict]:
+    """Re-check fetch provenance server-side. Every URL in the chain is gated."""
+    provenance = evidence.provenance
+    if provenance is None:
+        return None
+    if raw_hash is None:
+        raise HTTPException(status_code=422, detail="provenance requires the raw snapshot bytes")
+    if provenance.raw_sha256 != raw_hash:
+        raise HTTPException(
+            status_code=422,
+            detail="raw snapshot hash does not match the supplied provenance",
+        )
+    if not _same_url(str(evidence.url), str(provenance.final_url)):
+        raise HTTPException(
+            status_code=422,
+            detail="evidence url must be the final fetched URL",
+        )
+    redirects = [str(url) for url in provenance.redirects]
+    if redirects and not _same_url(redirects[-1], str(provenance.final_url)):
+        raise HTTPException(
+            status_code=422,
+            detail="redirect chain must end at the final fetched URL",
+        )
+    if provenance.fetched_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="fetched_at must include a timezone")
+    if provenance.fetched_at > datetime.now(timezone.utc) + PROVENANCE_FUTURE_SKEW:
+        raise HTTPException(status_code=422, detail="fetched_at is in the future")
+
+    chain = [str(provenance.requested_url), *redirects, str(provenance.final_url)]
+    for url in chain:
+        if urlsplit(url).scheme.lower() != "https":
+            raise HTTPException(status_code=422, detail="provenance URLs must be https")
+        if not await _provider_domain_ok(pool, provider, url, evidence.source_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"provenance URL {url} is not on the provider's registered domains",
+            )
+    return {
+        "requested_url": str(provenance.requested_url),
+        "fetch_status": provenance.http_status,
+        "fetch_content_type": provenance.content_type,
+        "fetched_at": provenance.fetched_at,
+        "redirects": redirects,
+        "parser_version": provenance.parser_version,
+        "fetch_identity": provenance.fetch_identity,
+    }
+
+
+def _require_fetch_provenance() -> bool:
+    """Raw-byte provenance is required by default; only an explicit opt-out
+    (migration of a legacy deployment) disables it."""
+    value = os.environ.get("MTK_REQUIRE_FETCH_PROVENANCE", "1")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+async def _provenance_problems(pool, offer_id: uuid.UUID,
+                               extraction: ExtractionIn) -> list[str]:
+    """Official machine evidence must prove the bytes it was derived from."""
+    ids = list({field.evidence_id for field in extraction.fields.values()})
+    rows = await pool.fetch(
+        "SELECT e.id, e.reviewer, e.raw_content IS NOT NULL AS raw_preserved, "
+        "e.requested_url, e.parser_version FROM evidence e "
+        "WHERE e.offer_id = $1 AND e.id = ANY($2::uuid[]) AND e.official AND e.domain_ok",
+        offer_id, ids,
+    )
+    missing = [
+        str(row["id"]) for row in rows
+        # A reviewer-attested snapshot is a human action recorded in the audit
+        # log; machine-collected evidence must carry the bytes it was parsed from.
+        if row["reviewer"] is None
+        and (not row["raw_preserved"] or not row["requested_url"] or not row["parser_version"])
+    ]
+    if missing:
+        return [
+            "verified requires preserved raw page bytes and fetch provenance for "
+            f"official evidence ({len(missing)} snapshot(s) missing); recapture with "
+            "the acquisition worker"
+        ]
+    return []
 
 
 async def _provider_domain_ok(pool: asyncpg.Pool, provider: str, url: str,
