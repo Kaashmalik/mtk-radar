@@ -605,8 +605,11 @@ For each package: add targeted failing tests → implement the smallest vertical
 
 **Remaining — WP01 is not complete:**
 
-- [ ] Apply the egress policy to the collector adapters (`fetch_rss`, `fetch_github_releases`, collector `page_watch`); only the verification path is protected today.
-- [ ] Implement trusted acquisition identities: the API cannot yet prove which process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
+- [x] Apply the egress policy to the collector adapters (`fetch_rss`,
+  `fetch_github_releases`, collector `page_watch`) via `Fetcher.fetch_policy`;
+  RSS/feed content itself is still unexamined — parsing trust is a later slice.
+- [ ] Implement trusted acquisition identities: the API cannot yet prove which
+  process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
 - [ ] Record a per-source robots/terms permission decision alongside each fetch.
 - [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
@@ -801,7 +804,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, and DNS-rebinding-resistant pinning implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md). Trusted acquisition identity, collector-path egress, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, and collector-path egress implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md). Trusted acquisition identity, robots/terms permission record, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -856,6 +859,36 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Not closed, and deliberately not ticked:** DNS rebinding (the connection is not pinned to the validated address, so a hostile resolver can still answer differently at connect time); trusted acquisition identity (`fetch_identity` is recorded, not cryptographically attested — a compromised worker could still submit bytes it never fetched); collector adapters still bypass the policy; no robots/terms permission record.
 - **Safety:** no real `.env`, existing application database, live provider, model/OAuth service or publishing account touched. Only the isolated test database received migrations.
 - **Next smallest task:** pin the validated address in the transport to close DNS rebinding, then route collector adapters through the same egress policy.
+
+
+#### 21 October 2026, 17:37 UTC — WP01 fifth slice: collector adapters through the egress policy
+
+- **Status:** implemented; locally VERIFIED for the collector-path egress scope only. Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** `f56bb9e` (plus this slice's changes uncommitted at the time of writing).
+- **Changes:** `Fetcher.fetch_policy(url, *, headers, params, policy)` reuses `safe_fetch`
+  (HTTPS-only, public-address-only DNS, per-hop redirect validation, bounded
+  body, pinned connection) and reconstructs an `httpx.Response` for collectors;
+  `fetch_rss` and `fetch_github_releases` take an optional `policy` parameter
+  (default `EgressPolicy()`); the collector `page_watch` path uses `fetch_policy`
+  without attaching provenance; callers may pass an explicit permissive policy
+  for fixtures, but never for production. See [fifth-slice checkpoint](implementation-wp01-slice5-2026-10-21.md).
+- **Failing first:** at `f56bb9e`, the adapter/collector suite failed where the
+  `Fetcher` fakes lacked `fetch_policy` and where no `fetch_policy` coverage
+  existed; after implementation, **103 passed** across
+  `packages/source_adapters/tests` + `workers/verification/tests`.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **492 passed, 26 warnings, zero skips**, exit 0; `ruff check`, `compileall`,
+  `pnpm typecheck` all exit 0.
+- **Not closed, and deliberately not ticked:** trusted acquisition identity
+  (`fetch_identity` is a claim, not an attestation); per-source robots/terms
+  permission record; RSS/feed content parsing trust (feedparser/GitHub JSON are
+  consumed as-is); long-document extraction; risk-based freshness; downstream
+  invalidation; legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database received migrations.
+- **Next smallest task:** the per-source robots/terms permission record, or
+  trusted acquisition identity.
 
 ## 13. Coding-model execution guide
 

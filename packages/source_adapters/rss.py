@@ -5,15 +5,24 @@ from typing import Optional
 
 import feedparser
 
-from .client import Fetcher
+from .client import EgressPolicy, Fetcher
 from .models import RawItem
 
 
-def fetch_rss(feed_url: str, fetcher: Optional[Fetcher] = None) -> list[RawItem]:
+def fetch_rss(
+    feed_url: str,
+    fetcher: Optional[Fetcher] = None,
+    *,
+    policy: Optional[EgressPolicy] = None,
+) -> list[RawItem]:
     own_fetcher = fetcher is None
     fetcher = fetcher or Fetcher()
     try:
-        resp = fetcher.fetch(feed_url, headers={"Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, */*;q=0.8"})
+        resp = fetcher.fetch_policy(
+            feed_url,
+            headers={"Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.9, */*;q=0.8"},
+            policy=policy,
+        )
         parsed = feedparser.parse(resp.content)
         items: list[RawItem] = []
         for entry in parsed.entries[:30]:

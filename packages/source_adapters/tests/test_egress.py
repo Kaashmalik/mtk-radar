@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # packages/
 
+from source_adapters import Fetcher  # noqa: E402
 from source_adapters.egress import (  # noqa: E402
     EgressError,
     EgressPolicy,
@@ -51,7 +52,9 @@ def client_for(routes):
     def handler(request):
         scheme = request.url.scheme
         host = request.headers.get("host", "")
-        target = f"{scheme}://{host}{request.url.raw_path.decode('ascii')}"
+        # Match on scheme://host+path; query strings are part of the request,
+        # not the route identity.
+        target = f"{scheme}://{host}{request.url.path}"
         client.seen.append(request)
         result = routes.get(target)
         if result is None:
@@ -465,11 +468,79 @@ class TestPageSnapshotProvenance:
         from source_adapters.page_watch import fetch_page_snapshot
 
         class Fetcher:
-            def fetch(self, url):
+            def fetch(self, url, *, headers=None, params=None):
                 return httpx.Response(
                     200, text="<p>collector excerpt</p>",
                     request=httpx.Request("GET", url),
                 )
 
+            def fetch_policy(self, url, *, headers=None, params=None, policy=None):
+                return self.fetch(url, headers=headers, params=params)
+
         item = fetch_page_snapshot("https://example.com/t", fetcher=Fetcher())[0]
         assert item.extra == {}
+
+
+class TestFetchPolicy:
+    """Collectors go through the same egress policy as verification."""
+
+    @staticmethod
+    def fetcher_for(routes):
+        f = Fetcher()
+        f._safe_client = client_for(routes)
+        return f
+
+    def test_returns_final_response_for_collector_code(self):
+        url = "https://example.com/feed"
+        f = self.fetcher_for({url: (200, {"content-type": "text/html"}, b"<p>ok</p>")})
+        resp = f.fetch_policy(url, policy=policy())
+        assert resp.status_code == 200
+        assert resp.content == b"<p>ok</p>"
+        # The URL reported is the logical one, never the pinned address.
+        assert resp.url.host == "example.com"
+
+    def test_private_redirect_is_refused_for_collectors_too(self):
+        first = "https://example.com/feed"
+        f = self.fetcher_for({first: (302, {"location": "https://127.0.0.1/secret"}, b"")})
+        with pytest.raises(EgressError, match="public"):
+            f.fetch_policy(first, policy=policy())
+
+    def test_non_2xx_final_raises_like_fetch(self):
+        url = "https://example.com/missing"
+        f = self.fetcher_for({url: (404, {"content-type": "text/html"}, b"gone")})
+        with pytest.raises(httpx.HTTPStatusError):
+            f.fetch_policy(url, policy=policy())
+
+    def test_params_reach_the_first_hop_only(self):
+        url = "https://example.com/search"
+        f = self.fetcher_for({url: (200, {"content-type": "text/html"}, b"<p>q=1</p>")})
+        resp = f.fetch_policy(url, params={"q": "1"}, policy=policy())
+        assert resp.url.host == "example.com"
+        assert b"q=1" in resp.content
+
+    def test_custom_headers_reach_the_request(self):
+        url = "https://example.com/feed"
+        f = self.fetcher_for({
+            url: (200, {"content-type": "application/xml"}, b"<?xml version='1.0'?>"),
+        })
+        resp = f.fetch_policy(
+            url, headers={"Accept": "application/rss+xml"}, policy=policy(),
+        )
+        # Request headers merge with the client defaults; user headers win.
+        sent = f._safe_client.seen[0] if hasattr(f._safe_client, "seen") else None
+        assert sent is not None and sent.headers.get("accept") == "application/rss+xml"
+
+    def test_http_is_refused_by_default(self):
+        f = self.fetcher_for({"http://example.com/feed": (200, {}, b"")})
+        with pytest.raises(EgressError, match="scheme"):
+            f.fetch_policy("http://example.com/feed", policy=policy())
+
+    def test_http_allowed_with_explicit_permissive_policy(self):
+        url = "http://example.com/feed"
+        f = self.fetcher_for({url: (200, {"content-type": "text/html"}, b"<p>ok</p>")})
+        resp = f.fetch_policy(
+            url,
+            policy=EgressPolicy(allow_plain_http=True, allow_private=True,
+                                allowed_ports=frozenset({80})),
+        )
+        assert resp.status_code == 200

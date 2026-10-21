@@ -71,6 +71,7 @@ class Fetcher:
         url: str,
         *,
         policy: Optional[EgressPolicy] = None,
+        headers: Optional[dict] = None,
         resolver=None,
         clock=None,
     ) -> FetchResult:
@@ -78,11 +79,45 @@ class Fetcher:
         return safe_fetch(
             url,
             policy=policy or EgressPolicy(),
+            headers=headers,
             client=self._safe_client,
             resolver=resolver,
             clock=clock,
             before_request=self._throttle,
         )
+
+    def fetch_policy(
+        self,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """Policy-bound fetch for collectors.
+
+        Every hop passes the egress policy (HTTPS, public addresses, bounded
+        body, pinned connection) and is reconstructed as an httpx.Response, so
+        existing collection code (``.content``, ``.json()``) keeps working. A
+        non-2xx final status raises, mirroring :meth:`fetch`.
+        """
+        result = safe_fetch(
+            url,
+            policy=policy or EgressPolicy(),
+            headers=headers,
+            params=params,
+            client=self._safe_client,
+            before_request=self._throttle,
+        )
+        request = httpx.Request("GET", result.final_url, headers=headers or {})
+        response = httpx.Response(
+            result.status,
+            headers={"content-type": result.content_type},
+            content=result.body,
+            request=request,
+        )
+        response.raise_for_status()
+        return response
 
     def close(self) -> None:
         self._client.close()
