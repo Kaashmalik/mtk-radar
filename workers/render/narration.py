@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Final, Optional
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
+FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
 
 _MARKDOWN_NOISE = ("```", "---", "> ", "# ", "- ", "  -")
 
@@ -111,20 +112,45 @@ def concat_paths(paths: list[str], out_path: Path) -> Optional[Path]:
 
 
 def ffmpeg_concat_cmd(list_file: Path, out_path: Path) -> list[str]:
-    """Concat-demuxer command: stream-copy identical-codec segments (fast,
-    no re-encode). -safe 0 because segment paths are absolute."""
+    """Concat-demuxer command that RE-ENCODES to a canonical audio format
+    (libmp3lame, 44.1 kHz stereo, v0.17). The v0.14 stream-copy (-c copy)
+    silently produced corrupt output whenever segments differed in codec
+    parameters (sample rate/channels/bitrate — e.g. a TTS provider or model
+    change between retry batches). Re-encoding makes the concat codec-agnostic
+    at the cost of one TTS-track encode (~seconds).
+    -safe 0 because segment paths are absolute; -t tolerance via later probe.
+    """
     return [
         FFMPEG, "-y", "-f", "concat", "-safe", "0",
-        "-i", str(list_file), "-c", "copy", str(out_path),
+        "-i", str(list_file),
+        "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        str(out_path),
     ]
 
 
+def probe_duration_seconds(path: Path) -> float | None:
+    """ffprobe duration in seconds, or None when unreadable/undecodable."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(proc.stdout.strip()) if proc.returncode == 0 else None
+    except Exception:  # noqa: BLE001 — probe failure = treat as unverifiable
+        return None
+
+
 def mix_segments(paths: list[str], out_dir: Path) -> Optional[Path]:
-    """Per-segment TTS files → ONE narration track (v0.14).
+    """Per-segment TTS files → ONE narration track (v0.14, hardened v0.17).
 
     Returns the mixed track path, or None on any failure — callers must treat
     None as "no narration" so the disclosure metadata never claims synthetic
-    narration that isn't in the render (§5 authenticity).
+    narration that isn't in the render (§5 authenticity). A duration check
+    (output must decode and cover ≥85% of the summed segment length) converts
+    the old silent-at-boundaries corruption into an explicit refusal.
     """
     if not paths:
         return None
@@ -136,13 +162,24 @@ def mix_segments(paths: list[str], out_dir: Path) -> Optional[Path]:
 
     try:
         proc = subprocess.run(
-            ffmpeg_concat_cmd(list_file, out), capture_output=True, text=True, timeout=120
+            ffmpeg_concat_cmd(list_file, out), capture_output=True, text=True, timeout=300
         )
     except Exception:  # noqa: BLE001
         return None
     if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
         return None
+
+    expected = sum(_seg_duration(p) for p in paths)
+    actual = probe_duration_seconds(out)
+    if actual is None or actual <= 0:
+        return None
+    if expected and actual < expected * 0.85:
+        return None  # truncated/corrupt track — prefer capture-audio fallback
     return out
+
+
+def _seg_duration(path: str) -> float:
+    return probe_duration_seconds(Path(path)) or 0.0
 
 
 def disclosure_record(used: bool, model: str | None = None) -> dict:

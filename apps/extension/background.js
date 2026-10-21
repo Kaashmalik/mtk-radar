@@ -1,11 +1,18 @@
 /**
- * MTK RADAR AI — save-current-page extension (Manifest V3, week 2).
- * Captures URL, title, and selected text; the user confirms before sending.
+ * MTK RADAR AI — save-current-page extension (Manifest V3, week 2 / v0.17).
+ * Captures URL, title, and selected text; sends it to the configured API.
+ *
+ * Config (options page → chrome.storage.local):
+ *   apiBase — API origin, default http://localhost:8000
+ *   token   — bearer credential; REQUIRED when the API has MTK_API_TOKEN set
+ *   handle  — optional account/collection handle for the discovery inbox
+ *
+ * Identity: the extension sends the shared worker token (never a personal one).
+ * The review inbox remains the human confirmation gate for saved links.
  */
 
-const API = "http://localhost:8000"; // TODO: move to chrome.storage config UI
+const DEFAULTS = { apiBase: "http://localhost:8000", token: "", handle: "" };
 
-// Message badge so the user knows it's watching for confirmation only.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.action.setBadgeText({ text: "RADAR" });
   chrome.contextMenus.create({
@@ -14,6 +21,11 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["page", "selection", "link"],
   });
 });
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "mtk-radar-save" && tab) void captureAndSend(tab);
+});
+chrome.action.onClicked.addListener((tab) => void captureAndSend(tab));
 
 async function captureSelection(tabId) {
   try {
@@ -27,47 +39,48 @@ async function captureSelection(tabId) {
   }
 }
 
-/**
- * Confirmation step: the user always confirms before anything is sent.
- * (Master plan §7 — "user confirms before sending".)
- */
-async function confirmAndSend(tab, selection) {
-  const message =
-    `Save this page to MTK RADAR?\n\n` +
-    `Title: ${tab.title ?? "(untitled)"}\nURL: ${tab.url}\n` +
-    (selection ? `Selection: ${selection.slice(0, 120)}…\n` : "");
-  const ok = window.confirm ? true : await chrome.tabs.sendMessage; // MV3 SW has no confirm; send directly
-  // In MV3 there is no window.confirm in the service worker → send immediately,
-  // the dashboard review inbox acts as the human confirmation gate.
-  chrome.storage.local.get({ handle: "" }, ({ handle }) => {
-    fetch(`${API}/items`, {
+async function captureAndSend(tab) {
+  const selection = await captureSelection(tab.id);
+  const cfg = await chrome.storage.local.get(DEFAULTS);
+  const base = (cfg.apiBase || DEFAULTS.apiBase).replace(/\/+$/, "");
+
+  /** Confirmation gate: the dashboard review inbox reviews every saved link
+   * before it can become an offer (MV3 service workers have no window.confirm). */
+  const headers = { "Content-Type": "application/json" };
+  if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
+
+  try {
+    const res = await fetch(`${base}/items`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         url: tab.url,
         title: tab.title,
         selection,
-        account_handle: handle,
+        account_handle: cfg.handle || undefined,
         observed_at: new Date().toISOString(),
       }),
-    })
-      .then((res) => setBadge(res.ok))
-      .catch(() => setBadge(false));
-  });
+    });
+    setBadge(res.ok);
+    if (!res.ok && res.status === 401) setHint("token");
+  } catch {
+    setBadge(false);
+    setHint("connection");
+  }
 }
 
 function setBadge(ok) {
   chrome.action.setBadgeText({ text: ok ? "✓" : "!" });
-  setTimeout(() => chrome.action.setBadgeText({ text: "RADAR" }), 3000);
+  if (ok) chrome.action.setBadgeBackgroundColor({ color: "#2ea043" });
+  else chrome.action.setBadgeBackgroundColor({ color: "#f85149" });
 }
 
-chrome.action.onClicked.addListener(async (tab) => {
-  const selection = await captureSelection(tab.id);
-  await confirmAndSend(tab, selection);
-});
-
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== "mtk-radar-save") return;
-  const selection = info.selectionText ?? (await captureSelection(tab.id));
-  await confirmAndSend(tab, selection);
-});
+/** Silent failure is the enemy of awareness — surface auth/config problems. */
+function setHint(kind) {
+  const title =
+    kind === "token"
+      ? "Saved failed (401): open the extension options and set your API token"
+      : "Save failed: check the API URL in the extension options";
+  chrome.action.setTitle({ title });
+  console.warn(`[mtk-radar] ${title}`);
+}

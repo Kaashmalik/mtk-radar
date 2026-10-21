@@ -69,6 +69,11 @@ jobs:
         run: pnpm exec tsc --noEmit -p packages/offer-schema
       - name: Typecheck dashboard
         run: pnpm exec tsc --noEmit -p apps/dashboard
+      - name: Extension syntax check
+        run: |
+          node --check apps/extension/background.js
+          node --check apps/extension/options.js
+          python3 -c "import json; json.load(open('apps/extension/manifest.json'))"
       - name: Dashboard production build
         run: pnpm --dir apps/dashboard build
 

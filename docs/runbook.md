@@ -131,6 +131,15 @@ python workers/monitor/main.py --once
 python workers/publishing/main.py --once
 ```
 
+Failed posts auto-retry with exponential backoff (base × 2^attempts, cap
+`MTK_PUBLISH_MAX_RETRIES`, default 3). Posts still failed after the cap — or
+refused because the script changed post-approval (409) — need operator review
+on the calendar (resume/approve or cancel).
+
+Save-link extension (v0.17): configure API URL + worker token via its options
+page (right-click icon → Options). The page gesture sends `POST /items` with
+the Bearer token; 401s surface on the toolbar badge with a hint.
+
 ## 6. Retention policy (§13)
 
 - `schema_migrations`: forever (it *is* the schema history).
@@ -196,9 +205,10 @@ before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
 rows to refs.
 
 ## 9. Known gaps (explicit, not hidden)
-- TTS narration segments are mixed into one track and mapped into renders
-  (v0.14: disclosure metadata now matches the actual audio); stream-copy concat
-  assumes homogenous codec output from the TTS provider.
+- TTS narration mixing: v0.17 replaced the homogeneous-codec stream-copy with
+  a re-encode (libmp3lame 44.1 kHz) plus an ffprobe duration gate (≥85% of
+  summed segments, else capture-audio fallback) — a provider/model change
+  between batches can no longer silently corrupt boundaries.
 - Reviewer identity: personal hashed tokens (v0.16) bind every dashboard/API
   action to a named reviewer — audit_log.actor comes from the token, not the
   request body, and the shared `MTK_API_TOKEN` no longer reaches the browser.
@@ -206,10 +216,23 @@ rows to refs.
   browser sessions. Fine for the single-operator deployment; revisit if a
   second operator needs self-serve access (`MTK_API_TOKEN` gates workers and
   the extension exactly as in v0.13; leave it unset only for throwaway dev).
-- Publishing safe-guards in place since v0.16: post upload re-verifies the
-  offer (state + expiry/recheck timestamps, §11) and the render↔approval hash
-  binding (§17) — anything else auto-pauses the post. Remaining exposure: the
-  schedule-host clock is trusted for the "due" check.
+- Publishing safe-guards: post upload re-verifies the offer (state +
+  expiry/recheck timestamps, §11) and the render↔approval hash binding (§17);
+  failed posts auto-retry with exponential backoff (v0.17, cap
+  `MTK_PUBLISH_MAX_RETRIES`) — past the cap, or on 409 (hash changed), the
+  post waits for operator review. Remaining exposure: the worker-host clock is
+  trusted for due/retry timing.
+- Corrections: recordable from the dashboard offer page (v0.17), affected
+  posts listed with live post IDs; scheduled captions carry a correction
+  permalink when `MTK_PUBLIC_BASE_URL` is set (§11). Not yet possible:
+  updating an ALREADY-published description (needs platform write scopes —
+  YouTube `videos.update` etc.); treat as manual follow-up for now.
+- Extension (v0.17): configured via its options page (API URL + worker token);
+  the save action surfaces 401/connection problems on the badge. Not yet:
+  packaging/store hardening (icons, CSP review, MV3 store listing).
+- Analytics: pipeline metrics only (items, offers, schedules, source
+  freshness, token health). Audience metrics (views/retention/clicks per
+  video) need platform Analytics/API ingestion — planned as its own phase.
 - Analytics counts runs on one Postgres instance; no replication/HA.
 
 ## 10. Test & automation layers (v0.14)

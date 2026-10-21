@@ -82,9 +82,11 @@ def validate_transition(from_state: str, to_state: str, *, reviewer: str | None,
 
 
 def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[str],
-                      disclosure: dict[str, Any]) -> dict[str, str]:
+                      disclosure: dict[str, Any], correction_url: str | None = None) -> dict[str, str]:
     """Platform-specific copy template (§6) with hard limits, disclosures, and
-    source links in the description (§11)."""
+    source links in the description (§11). `correction_url` (v0.17) adds the
+    §11 correction/takedown permalink — set MTK_PUBLIC_BASE_URL in deployments
+    with a reachable dashboard."""
     if platform not in PLATFORMS:
         raise ValueError(f"unsupported platform '{platform}' — known: {', '.join(PLATFORMS)}")
 
@@ -114,6 +116,8 @@ def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[
         )
     if disclosure.get("synthetic_narration"):
         lines.append("Narration is AI-generated (disclosed per platform policy).")
+    if correction_url:
+        lines.append(f"Corrections & updates: {correction_url}")
     if evidence_urls:
         lines.append("Sources & terms (may change):")
         lines.extend(f"- {u}" for u in evidence_urls[:3])

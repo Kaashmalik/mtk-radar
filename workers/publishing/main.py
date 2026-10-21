@@ -15,6 +15,8 @@ Sweep (every tick, or once with --once):
   5. Approval + validity gates (v0.16): the render's script hash must match
      the schedule's approved version hash (§17), and the offer must not be
      expired / recheck-overdue (§11) — otherwise the post is auto-paused.
+  6. Auto-retry (v0.17, §17): failed posts requeue with exponential backoff
+     (max MTK_PUBLISH_MAX_RETRIES); refusals stay failed for operator review.
 
 Usage:
     pip install -r workers/publishing/requirements.txt
@@ -27,7 +29,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -147,7 +149,62 @@ class Publisher:
             except Exception as exc:  # noqa: BLE001
                 log.exception("publish failed for schedule %s", post["id"])
                 self._report(post["id"], ok=False, detail=f"unexpected: {exc}")
+
+        self.retry_failed(now)
         return published
+
+    # ------------------------------------------------- auto-retry (§17, v0.17)
+
+    MAX_RETRIES = int(os.environ.get("MTK_PUBLISH_MAX_RETRIES", "3"))
+    RETRY_BASE_S = int(os.environ.get("MTK_PUBLISH_RETRY_BASE_S", "300"))
+
+    def retry_failed(self, now: datetime | None = None) -> int:
+        """§17: "Schedule retries with idempotency keys, backoff…" — failed
+        posts requeue automatically with exponential backoff
+        (base × 2^retry_count), up to MAX_RETRIES. Terminal conditions stay
+        terminal: posts past the cap wait for a human, and a 409 (script
+        changed since approval) leaves the post failed for operator review.
+        """
+        now = now or datetime.now(timezone.utc)
+        try:
+            failed = self.api.get("/schedules", params={"state": "failed", "limit": 500}).json()
+        except httpx.HTTPError as exc:
+            log.warning("retry sweep skipped (API unreachable): %s", exc)
+            return 0
+
+        requeued = 0
+        for post in failed:
+            attempts = post.get("retry_count", 0) or 0
+            if attempts >= self.MAX_RETRIES:
+                log.info("schedule %s: giving up auto-retry after %d attempts — operator review",
+                         post["id"], attempts)
+                continue
+            delay = self.RETRY_BASE_S * (2 ** attempts)
+            updated = post.get("updated_at")
+            if updated:
+                tried = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+                if tried.tzinfo is None:
+                    tried = tried.replace(tzinfo=timezone.utc)
+                if now - tried < timedelta(seconds=delay):
+                    continue
+            try:
+                resp = self.api.post(
+                    f"/schedules/{post['id']}/transition",
+                    json={"to": "scheduled",
+                          "note": f"auto-retry {attempts + 1}/{self.MAX_RETRIES} "
+                                  f"(backoff {delay}s)"},
+                )
+                if resp.status_code == 200:
+                    requeued += 1
+                    log.info("schedule %s: auto-retry %d/%d requeued",
+                             post["id"], attempts + 1, self.MAX_RETRIES)
+                else:
+                    # 409 = script hash changed / illegal transition → human review
+                    log.warning("schedule %s: auto-retry refused (%s) — operator review",
+                                post["id"], resp.status_code)
+            except httpx.HTTPError as exc:
+                log.warning("schedule %s: auto-retry transition failed: %s", post["id"], exc)
+        return requeued
 
     def _publish(self, post: dict, adapters: dict) -> None:
         platform = post["platform"]

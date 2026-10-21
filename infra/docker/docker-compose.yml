@@ -84,6 +84,9 @@ services:
       DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
       REDIS_URL: redis://redis:6379/0
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      # public origin of the dashboard — enables §11 correction links in
+      # scheduled captions (schedules_state.platform_metadata)
+      MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -137,6 +140,8 @@ services:
       MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
       MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
       MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+      MTK_PUBLISH_MAX_RETRIES: ${MTK_PUBLISH_MAX_RETRIES:-3}
+      MTK_PUBLISH_RETRY_BASE_S: ${MTK_PUBLISH_RETRY_BASE_S:-300}
       YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
       YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:-}

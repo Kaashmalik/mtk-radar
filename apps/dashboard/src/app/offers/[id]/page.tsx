@@ -1,4 +1,5 @@
 import "./styles.css";
+import CorrectionForm from "./CorrectionForm";
 import GenerateScriptButton from "./GenerateScriptButton";
 import ScheduleForm from "./ScheduleForm";
 import { apiFetch } from "@/lib/api";
@@ -283,6 +284,8 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
 
       <section className="card">
         <h2>Corrections &amp; affected posts ({corrections.length})</h2>
+        <CorrectionForm offerId={offer.id} />
+        <div style={{ height: "0.8rem" }} />
         {corrections.length === 0 && !offer.correction_note ? (
           <p className="muted small">
             No corrections logged. Corrections pause affected scheduled posts

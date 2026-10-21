@@ -12,6 +12,7 @@ master plan §17). Gates enforced server-side:
 """
 
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -118,9 +119,11 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         "SELECT url FROM evidence WHERE offer_id = $1 AND official AND domain_ok",
         offer_id,
     )
+    correction_base = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
     metadata = platform_metadata(
         body.platform, dict(offer), [r["url"] for r in evidence],
         json.loads(render["disclosure"]) if render["disclosure"] else {},
+        correction_url=f"{correction_base}/offers/{offer_id}" if correction_base else None,
     )
 
     idempotency_key = f"{offer_id}:{body.platform}:{body.local_time.isoformat()}:{version_hash or ''}"
@@ -169,7 +172,7 @@ async def list_schedules(
         SELECT s.id, s.offer_id, o.title AS offer_title, o.provider AS offer_provider,
                s.platform, s.state::text AS state, s.local_time, s.timezone,
                s.privacy, s.caption_variant, s.version_hash, s.approved_by,
-               s.metadata::text AS metadata, s.retry_count,
+               s.metadata::text AS metadata, s.retry_count, s.updated_at,
                s.remote_post_id, s.outcome_detail::text AS outcome_detail, s.created_at
         FROM schedules s JOIN offers o ON o.id = s.offer_id
         WHERE ($1::text IS NULL OR s.state::text = $1)
