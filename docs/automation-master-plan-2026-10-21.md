@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** three WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, and safe egress with raw-byte fetch provenance. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md) and [slice 3](implementation-wp01-slice3-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** seven WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record and signed fetch provenance. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md) and [slice 7](implementation-wp01-slice7-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -134,7 +134,7 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 | [x] Partial | Metrics, monitor, health, auth, audit logs, backup scripts | Existing API/workers/infra; operational execution not demonstrated here |
 | [ ] | Trend/entity clustering, velocity, cross-source corroboration and watched topics | WP05–WP06 |
 | [x] | Retained hash-checked text snapshots, typed evidence binding, literal quote checks and server-derived core completeness | WP01 first integrity slice; 325 tests passed including isolated PostgreSQL integration; not semantic offer verification |
-| [ ] | Complete official offer confirmation: type-specific terms, trusted fetch provenance, freshness and downstream fact-pack propagation | Remaining WP01 work |
+| [ ] | Complete official offer confirmation: type-specific terms, signed fetch provenance, freshness and downstream fact-pack propagation | Remaining WP01 work |
 | [ ] | Strict local GLM/MiniMax-compatible model gateway and evaluations | WP07 |
 | [ ] | Native Full HD capture, semantic edit plan, speech alignment and media QC | WP08–WP09 |
 | [ ] | Light manual in-app editing, revision history and selective rerender | WP10 |
@@ -615,10 +615,19 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Record `robots_url`, `checked_at`, `allowed` and `status` with every machine-collected snapshot; the API re-checks the host, path and ordering and rejects a missing or disallowed decision.
 - [x] Persist the record in migration 015 (`raw_content` implies a permitted decision; pre-015 rows stay readable but are re-checked by the gate) and re-check it at promotion; reviewer-attested snapshots remain exempt. 28 new tests; full suite **520 passed, zero skips**. See [sixth-slice checkpoint](implementation-wp01-slice6-2026-10-21.md).
 
+**Completed — seventh slice, signed fetch provenance:**
+
+- [x] Sign each machine-collected provenance record with a deployment-held HMAC-SHA256 key (`services/api/fetch_attestation.py`): fixed field list, canonical URLs, UTC timestamps, sorted-key JSON, 64-hex signature; keys under 32 bytes are refused rather than used silently.
+- [x] Verify the signature server-side after the URL-chain checks; an unconfigured key is a 503, a missing or invalid signature a 422, and the worker never invents a signature when its key is absent.
+- [x] Store `fetch_signature` in migration 016 with a hex-shape CHECK and require it at promotion for machine-collected official evidence; reviewer attestations stay exempt. `MTK_REQUIRE_FETCH_SIGNATURE=0` is the documented migration opt-out, and unsigned records stay explicitly unsigned.
+- [x] State the limit in code and docs: a valid signature proves a holder of the key produced the record, **not** that the bytes were fetched; the key is symmetric, so the API can forge it too. 28 new tests; full suite **548 passed, zero skips**. See [seventh-slice checkpoint](implementation-wp01-slice7-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Implement trusted acquisition identities: the API cannot yet prove which
-  process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
+- [ ] Implement trusted acquisition identities beyond a shared key: replace the
+  symmetric HMAC with asymmetric signing (API holds only a public key) or
+  server-side fetching, so the API cannot forge a record and a compromised
+  worker cannot sign bytes it never fetched.
 - [ ] Record a per-source terms-of-service review/attestation: robots.txt is machine-checkable, ToS consent is not, and no human attestation is captured yet.
 - [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
@@ -813,7 +822,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress and a robots.txt permission record implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md). Trusted acquisition identity, ToS review attestation, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record and signed fetch provenance implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md). Non-symmetric acquisition identity, ToS review attestation, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -934,6 +943,44 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   model/OAuth service or publishing account touched. Only the isolated test
   database received migrations; the `robots.txt` reads in tests are stubbed.
 - **Next smallest task:** trusted acquisition identity.
+
+#### 21 October 2026, 18:37 UTC — WP01 seventh slice: signed fetch provenance
+
+- **Status:** implemented; locally VERIFIED for the signed-provenance scope only.
+  Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `09640ac`).
+- **Changes:** `services/api/fetch_attestation.py` canonicalises a fixed field
+  list (normalised URLs, UTC timestamps, ordered redirects, robots decision) and
+  signs it with HMAC-SHA256, refusing keys under 32 bytes; the verification
+  worker signs each machine provenance record when `MTK_FETCH_SIGNING_KEY` is
+  configured and never invents a signature; the API verifies it after the URL
+  chain checks, returns 422 for a missing/invalid signature and 503 when the
+  deployment key is unset; migration 016 stores `fetch_signature` with a
+  hex-shape CHECK; the promotion gate requires it for machine-collected official
+  evidence, with reviewer attestations exempt. See
+  [seventh-slice checkpoint](implementation-wp01-slice7-2026-10-21.md).
+- **Limit, stated in code and docs:** a valid signature proves that a holder of
+  the deployment key produced the record — **not** that the bytes were fetched.
+  The key is symmetric, so the API can forge the same record. Replacing it with
+  asymmetric signing or server-side fetching remains an open WP01 task.
+- **Failing first:** at `09640ac` the signing module and schema field do not
+  exist, so the attestation tests fail at import and no signed provenance can be
+  accepted; the gate has no signature column to require.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **548 passed, 26 warnings, zero skips**, exit 0 (was 520; +28 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The 015→016 upgrade
+  test confirms legacy rows keep `fetch_signature = NULL` and the database
+  refuses a non-hex signature.
+- **Not closed, and deliberately not ticked:** non-symmetric acquisition
+  identity; key rotation/storage is deployment work; terms-of-service review
+  attestation; long-document extraction; risk-based freshness; downstream
+  invalidation; legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database received migrations; the test signing key is a fixed non-secret.
+- **Next smallest task:** long-document section extraction — verification
+  currently refuses a snapshot above 250k characters and the rules extractor
+  reads one blob, so applicable terms on long pages can be missed.
 
 ## 13. Coding-model execution guide
 

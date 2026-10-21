@@ -47,6 +47,7 @@ class GatePool:
             "reviewer": None, "raw_preserved": True, "requested_url": URL,
             "parser_version": "page_watch/1",
             "robots_url": "https://example.com/robots.txt", "robots_allowed": True,
+            "fetch_signature": "a" * 64,
         }]
 
     async def fetchrow(self, query, *args):
@@ -256,3 +257,23 @@ class TestFetchProvenanceGate:
         monkeypatch.delenv("MTK_REQUIRE_FETCH_PROVENANCE", raising=False)
         from offers_api import _require_fetch_provenance
         assert _require_fetch_provenance() is True
+
+    def test_missing_signature_blocks_promotion(self):
+        """WP01 slice 7: bytes and permission without an attested author."""
+        pool = GatePool()
+        pool.evidence[0].update(fetch_signature=None)
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "signed acquisition record" in exc.value.detail
+
+    def test_signature_requirement_is_on_by_default(self, monkeypatch):
+        monkeypatch.delenv("MTK_REQUIRE_FETCH_SIGNATURE", raising=False)
+        from offers_api import _require_fetch_signature
+        assert _require_fetch_signature() is True
+
+    def test_signature_opt_out_allows_legacy_rows(self, monkeypatch):
+        monkeypatch.setenv("MTK_REQUIRE_FETCH_SIGNATURE", "0")
+        pool = GatePool()
+        pool.evidence[0].update(fetch_signature=None)
+        gate(pool)  # must not raise while the deployment opts out

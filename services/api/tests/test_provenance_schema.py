@@ -28,6 +28,7 @@ def provenance(**overrides):
         "raw_sha256": RAW_SHA,
         "parser_version": "page_watch/1",
         "fetch_identity": "verification-worker",
+        "signature": "a" * 64,
         "robots": {
             "robots_url": "https://example.com/robots.txt",
             "checked_at": "2026-10-21T11:59:00+00:00",
@@ -166,3 +167,24 @@ class TestRobotsDecision:
                 "allowed": True,
                 "status": 200,
             })))
+
+
+class TestSignatureShape:
+    """WP01 slice 7: the signature is 64 lower-case hex characters or absent."""
+
+    def test_valid_signature_accepted(self):
+        parsed = EvidenceIn.model_validate(evidence())
+        assert parsed.provenance.signature == "a" * 64
+
+    def test_signature_is_optional_at_the_schema_level(self):
+        """Legacy callers may omit it; the API rejects them when required."""
+        parsed = EvidenceIn.model_validate(evidence(provenance=provenance(signature=None)))
+        assert parsed.provenance.signature is None
+
+    def test_non_hex_signature_rejected(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(signature="g" * 64)))
+
+    def test_wrong_length_signature_rejected(self):
+        with pytest.raises(ValidationError):
+            EvidenceIn.model_validate(evidence(provenance=provenance(signature="a" * 63)))

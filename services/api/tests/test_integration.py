@@ -38,6 +38,7 @@ import asyncpg
 from fastapi.testclient import TestClient
 
 import db_migrate
+from fetch_attestation import sign_provenance
 
 DSN = os.environ[REQUIRED_ENV]
 
@@ -339,21 +340,25 @@ def _procured(url, text, *, fetched_at=None, redirects=(), robots=None):
             "allowed": True,
             "status": 200,
         }
+    provenance = {
+        "requested_url": url,
+        "final_url": url,
+        "http_status": 200,
+        "content_type": "text/html",
+        "fetched_at": fetched.isoformat(),
+        "redirects": list(redirects),
+        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "parser_version": "page_watch/1",
+        "fetch_identity": "integration-test",
+        "encoding": "utf-8",
+        "robots": robots,
+    }
+    key = os.environ.get("MTK_FETCH_SIGNING_KEY", "").strip()
+    if key:
+        provenance["signature"] = sign_provenance(provenance, key)
     return {
         "raw_content_b64": base64.b64encode(raw).decode("ascii"),
-        "provenance": {
-            "requested_url": url,
-            "final_url": url,
-            "http_status": 200,
-            "content_type": "text/html",
-            "fetched_at": fetched.isoformat(),
-            "redirects": list(redirects),
-            "raw_sha256": hashlib.sha256(raw).hexdigest(),
-            "parser_version": "page_watch/1",
-            "fetch_identity": "integration-test",
-            "encoding": "utf-8",
-            "robots": robots,
-        },
+        "provenance": provenance,
     }
 
 
@@ -516,7 +521,7 @@ def test_raw_bytes_and_provenance_are_preserved(client):
     row = _run(
         "SELECT raw_content, raw_hash, requested_url, fetch_status, fetched_at, "
         "parser_version, fetch_identity, fetch_redirects::text AS fetch_redirects, "
-        "robots_url, robots_checked_at, robots_allowed, robots_status "
+        "robots_url, robots_checked_at, robots_allowed, robots_status, fetch_signature "
         "FROM evidence WHERE id = $1",
         uuid.UUID(eid),
     )[0]
@@ -533,12 +538,14 @@ def test_raw_bytes_and_provenance_are_preserved(client):
     assert row["robots_checked_at"] is not None
     assert row["robots_allowed"] is True
     assert row["robots_status"] == 200
+    assert row["fetch_signature"] is not None and len(row["fetch_signature"]) == 64
 
     shown = client.get(f"/offers/{oid}").json()["evidence"][0]
     assert shown["raw_preserved"] is True
     assert shown["raw_hash"] == row["raw_hash"]
     assert shown["parser_version"] == "page_watch/1"
     assert shown["robots_allowed"] is True
+    assert shown["fetch_signature"] == row["fetch_signature"]
     # Raw bytes stay out of the general workspace response.
     assert "raw_content" not in shown
 
@@ -617,6 +624,59 @@ def test_robots_decision_must_come_from_the_fetched_host(client):
     response = client.post(f"/offers/{oid}/evidence", json=broken)
     assert response.status_code == 422
     assert "fetched host" in response.json()["detail"]
+
+
+def test_unsigned_provenance_is_rejected(client):
+    """WP01 slice 7: an unsigned record only names its author, it does not prove it."""
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-unsigned-" + uuid.uuid4().hex
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT)}
+    broken["provenance"] = {
+        key: value for key, value in broken["provenance"].items() if key != "signature"
+    }
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 422
+    assert "not signed" in response.json()["detail"]
+
+
+def test_tampered_signature_is_rejected(client):
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-tampered-signature-" + uuid.uuid4().hex
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT)}
+    broken["provenance"] = {**broken["provenance"], "signature": "0" * 64}
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 422
+    assert "signature does not match" in response.json()["detail"]
+
+
+def test_signing_must_be_configured_server_side(client, monkeypatch):
+    """A missing key is a deployment error, not permission to accept a claim."""
+    import uuid
+    oid, _, _, _, payload = _verification_fixture(client)
+    monkeypatch.setenv("MTK_FETCH_SIGNING_KEY", "")
+    url = "https://example.com/wp01-no-key-" + uuid.uuid4().hex
+    broken = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT)}
+    response = client.post(f"/offers/{oid}/evidence", json=broken)
+    assert response.status_code == 503
+    assert "MTK_FETCH_SIGNING_KEY" in response.json()["detail"]
+
+
+def test_signature_opt_out_accepts_an_unsigned_legacy_record(client, monkeypatch):
+    """The documented migration escape hatch, recorded as absent, not as valid."""
+    import uuid
+    monkeypatch.setenv("MTK_REQUIRE_FETCH_SIGNATURE", "0")
+    oid, _, _, _, payload = _verification_fixture(client)
+    url = "https://example.com/wp01-unsigned-ok-" + uuid.uuid4().hex
+    unsigned = {**payload, "url": url, **_procured(url, SNAPSHOT_TEXT)}
+    unsigned["provenance"] = {
+        key: value for key, value in unsigned["provenance"].items()
+        if key != "signature"
+    }
+    response = client.post(f"/offers/{oid}/evidence", json=unsigned)
+    assert response.status_code == 201, response.text
+    assert response.json()["provenance"]["fetch_signature"] is None
 
 
 def test_future_fetch_time_is_rejected(client):
@@ -787,8 +847,10 @@ def test_robots_permission_migration_never_invents_permission(client):
             await conn.execute(f'CREATE SCHEMA "{schema}"')
             await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
             paths = db_migrate.migration_files()
-            for path in paths[:-1]:
-                await conn.execute(path.read_text(encoding="utf-8"))
+            target = next(p for p in paths if p.name.startswith("015_"))
+            for path in paths:
+                if path.name < target.name:
+                    await conn.execute(path.read_text(encoding="utf-8"))
             oid = await conn.fetchval(
                 "INSERT INTO offers (title, provider, category, offer_type) "
                 "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
@@ -800,7 +862,7 @@ def test_robots_permission_migration_never_invents_permission(client):
                 "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1') RETURNING id",
                 oid, SNAPSHOT_URL, digest, raw,
                 hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL)
-            await conn.execute(paths[-1].read_text(encoding="utf-8"))
+            await conn.execute(target.read_text(encoding="utf-8"))
             row = await conn.fetchrow(
                 "SELECT robots_url, robots_checked_at, robots_allowed, robots_status "
                 "FROM evidence WHERE id = $1", eid)
@@ -823,6 +885,56 @@ def test_robots_permission_migration_never_invents_permission(client):
                 oid, SNAPSHOT_URL + "/ok", digest, raw,
                 hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL,
                 "https://example.com/robots.txt")
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
+
+
+def test_fetch_signature_migration_keeps_legacy_rows_unsigned(client):
+    """Upgrade 015→016: legacy machine rows keep NULL, and only hex is storable."""
+    import hashlib
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_signature_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            target = next(p for p in paths if p.name.startswith("016_"))
+            for path in paths:
+                if path.name < target.name:
+                    await conn.execute(path.read_text(encoding="utf-8"))
+            oid = await conn.fetchval(
+                "INSERT INTO offers (title, provider, category, offer_type) "
+                "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
+            raw = SNAPSHOT_TEXT.encode()
+            eid = await conn.fetchval(
+                "INSERT INTO evidence (offer_id, url, content_hash, raw_content, raw_hash, "
+                "requested_url, fetched_at, parser_version, robots_url, robots_checked_at, "
+                "robots_allowed, robots_status) "
+                "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1', $7, now(), TRUE, 200) "
+                "RETURNING id",
+                oid, SNAPSHOT_URL, hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest(),
+                raw, hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL,
+                "https://example.com/robots.txt")
+            await conn.execute(target.read_text(encoding="utf-8"))
+            signature = await conn.fetchval(
+                "SELECT fetch_signature FROM evidence WHERE id = $1", eid)
+            assert signature is None  # nothing is invented for pre-016 rows
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE evidence SET fetch_signature = 'not-a-signature' WHERE id = $1",
+                        eid)
+            await conn.execute(
+                "UPDATE evidence SET fetch_signature = $2 WHERE id = $1", eid, "b" * 64)
+            assert await conn.fetchval(
+                "SELECT fetch_signature FROM evidence WHERE id = $1", eid) == "b" * 64
         finally:
             await tx.rollback()
             await conn.close()

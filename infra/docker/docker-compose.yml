@@ -84,6 +84,10 @@ services:
       DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
       REDIS_URL: redis://redis:6379/0
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      # WP01: shared with the verification worker; unsigned machine evidence is
+      # refused by default. Unset ⇒ machine evidence cannot be accepted (503).
+      MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
+      MTK_REQUIRE_FETCH_SIGNATURE: ${MTK_REQUIRE_FETCH_SIGNATURE:-1}
       # public origin of the dashboard — enables §11 correction links in
       # scheduled captions (schedules_state.platform_metadata)
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}

@@ -163,6 +163,46 @@ def test_robots_is_checked_once_per_host(monkeypatch):
     assert calls == ["example.com"]
 
 
+def test_provenance_is_signed_with_the_deployment_key(monkeypatch):
+    from fetch_attestation import verify_provenance
+
+    key = "k" * 40
+    monkeypatch.setattr(worker_main, "FETCH_SIGNING_KEY", key)
+    provenance = {
+        "requested_url": URL, "final_url": URL, "http_status": 200,
+        "content_type": "text/html", "fetched_at": "2026-10-21T12:00:00+00:00",
+        "redirects": [], "raw_sha256": "a" * 64, "byte_length": 10,
+        "encoding": "utf-8", "parser_version": "page_watch/1",
+    }
+    _, posts = exercise(monkeypatch, extra={
+        "provenance": provenance, "raw_content_b64": "PGh0bWw+",
+    })
+    evidence = next(payload for path, payload in posts if path.endswith("/evidence"))
+    sent = evidence["provenance"]
+    assert len(sent["signature"]) == 64
+    assert verify_provenance(sent, sent["signature"], key) is True
+    # Any post-signature edit invalidates it.
+    assert verify_provenance(
+        {**sent, "raw_sha256": "b" * 64}, sent["signature"], key,
+    ) is False
+
+
+def test_unsigned_provenance_is_forwarded_when_no_key_is_configured(monkeypatch):
+    monkeypatch.setattr(worker_main, "FETCH_SIGNING_KEY", "")
+    provenance = {
+        "requested_url": URL, "final_url": URL, "http_status": 200,
+        "content_type": "text/html", "fetched_at": "2026-10-21T12:00:00+00:00",
+        "redirects": [], "raw_sha256": "a" * 64, "byte_length": 10,
+        "encoding": "utf-8", "parser_version": "page_watch/1",
+    }
+    _, posts = exercise(monkeypatch, extra={
+        "provenance": provenance, "raw_content_b64": "PGh0bWw+",
+    })
+    evidence = next(payload for path, payload in posts if path.endswith("/evidence"))
+    # The worker does not invent a signature; the API rejects the record.
+    assert "signature" not in evidence["provenance"]
+
+
 def test_unavailable_page_is_not_stored_as_terms(monkeypatch):
     """A 503/challenge body must never become official evidence."""
     _, posts = exercise(monkeypatch, extra={

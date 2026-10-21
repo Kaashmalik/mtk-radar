@@ -34,10 +34,14 @@ def _api_auth_headers() -> dict:
     return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
+# The signing helper lives beside the API so both sides share one implementation.
+# Inserted before the worker directory so worker modules keep precedence.
+sys.path.insert(0, os.path.join(REPO_ROOT, "services", "api"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from source_adapters import Fetcher, check_robots, fetch_page_snapshot  # noqa: E402
 from source_adapters.egress import EgressPolicy  # noqa: E402
+from fetch_attestation import sign_provenance  # noqa: E402
 
 from allowlist import build_allowlist, domain_ok, host_of  # noqa: E402
 from extractors import extract, is_complete  # noqa: E402
@@ -47,6 +51,10 @@ SWEEP_INTERVAL = 120  # seconds
 VERIFY_STATES = ("candidate", "evidence_needed")
 #: Recorded with every snapshot so a reviewer can see which process fetched it.
 FETCH_IDENTITY = os.environ.get("MTK_FETCH_IDENTITY", "verification-worker")
+#: HMAC key shared with the API. Without it the API rejects machine evidence;
+#: a signature attests the key holder produced the record, not that the fetch
+#: happened (see services/api/fetch_attestation.py).
+FETCH_SIGNING_KEY = os.environ.get("MTK_FETCH_SIGNING_KEY", "").strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("verification")
@@ -60,6 +68,16 @@ class Verifier:
         # Verification fetches are HTTPS-only, public-address-only, hop-validated
         # and bounded (master plan §6 step 2, audit A19).
         self.policy = EgressPolicy()
+        if not FETCH_SIGNING_KEY:
+            log.warning(
+                "MTK_FETCH_SIGNING_KEY is not set — the API will reject unsigned "
+                "machine evidence"
+            )
+        elif len(FETCH_SIGNING_KEY) < 32:
+            log.error(
+                "MTK_FETCH_SIGNING_KEY is shorter than 32 characters — signing "
+                "will fail and no evidence will be accepted"
+            )
 
     # ------------------------------------------------------------- API I/O
 
@@ -176,6 +194,10 @@ class Verifier:
                     "fetch_identity": FETCH_IDENTITY,
                     "robots": permission.as_provenance(),
                 }
+                if FETCH_SIGNING_KEY:
+                    provenance["signature"] = sign_provenance(
+                        provenance, FETCH_SIGNING_KEY,
+                    )
                 payload["raw_content_b64"] = item.extra["raw_content_b64"]
                 payload["provenance"] = provenance
             evidence = self._post(f"/offers/{offer_id}/evidence", json=payload)
