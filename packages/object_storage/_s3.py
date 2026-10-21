@@ -4,6 +4,8 @@ Path-style addressing ({endpoint}/{bucket}/{key}) — the norm for MinIO and
 self-hosted stores. Refs are `s3://<bucket>/<key>`.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
