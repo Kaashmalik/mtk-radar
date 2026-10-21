@@ -1168,6 +1168,63 @@ def test_machine_evidence_requires_a_tos_attested_source(client):
     assert listed["tos_reviewer"] == "pytest"
     assert listed["tos_reference"] == "provider terms v3"
     assert listed["tos_reviewed_at"] is not None
+    assert listed["tos_valid"] is True
+    assert listed["tos_expires_at"] is not None
+
+
+def test_expired_tos_review_blocks_collection(client, monkeypatch):
+    import uuid
+    monkeypatch.setenv("MTK_TOS_REVIEW_TTL_DAYS", "1")
+    provider = f"WP01TOSEXP {uuid.uuid4()}"
+    source_id = _new_source(client, provider)
+    offer_id = _new_offer(client, provider)
+    _attest(client, source_id)
+    _run("UPDATE sources SET tos_reviewed_at = now() - interval '2 days' "
+         "WHERE id = $1::uuid", source_id)
+
+    url = "https://example.com/expired-tos"
+    payload = {
+        "url": url, "source_id": source_id, "official": True,
+        "captured_content": SNAPSHOT_TEXT, **_procured(url, SNAPSHOT_TEXT),
+    }
+    blocked = client.post(f"/offers/{offer_id}/evidence", json=payload)
+    assert blocked.status_code == 422, blocked.text
+    assert "expired" in blocked.json()["detail"]
+    listed = next(s for s in client.get("/sources").json() if s["id"] == source_id)
+    assert listed["tos_valid"] is False
+
+    _attest(client, source_id)
+    allowed = client.post(f"/offers/{offer_id}/evidence", json=payload)
+    assert allowed.status_code == 201, allowed.text
+
+
+def test_tos_review_revocation_blocks_new_collection(client):
+    import uuid
+    provider = f"WP01TOSREV {uuid.uuid4()}"
+    source_id = _new_source(client, provider)
+    offer_id = _new_offer(client, provider)
+    _attest(client, source_id)
+
+    denied = client.delete(f"/sources/{source_id}/tos-review")
+    assert denied.status_code == 403
+    revoked = client.delete(f"/sources/{source_id}/tos-review",
+                            params={"reviewer": "pytest"})
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["revoked"] is True
+
+    url = "https://example.com/revoked-tos"
+    blocked = client.post(f"/offers/{offer_id}/evidence", json={
+        "url": url, "source_id": source_id, "official": True,
+        "captured_content": SNAPSHOT_TEXT, **_procured(url, SNAPSHOT_TEXT),
+    })
+    assert blocked.status_code == 422, blocked.text
+    assert "terms-of-service review" in blocked.json()["detail"]
+    listed = next(s for s in client.get("/sources").json() if s["id"] == source_id)
+    assert listed["tos_reviewer"] is None and listed["tos_valid"] is False
+
+    unknown = client.delete(f"/sources/{uuid.uuid4()}/tos-review",
+                            params={"reviewer": "pytest"})
+    assert unknown.status_code == 404
 
 
 def test_tos_requirement_opt_out_allows_legacy_sources(client, monkeypatch):

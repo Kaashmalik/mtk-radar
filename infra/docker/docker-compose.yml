@@ -94,6 +94,9 @@ services:
       # WP01: evidence ingest refuses machine collection for a source without a
       # recorded terms-of-service review. Unset defaults to required.
       MTK_REQUIRE_TOS_ATTESTATION: ${MTK_REQUIRE_TOS_ATTESTATION:-1}
+      # WP01: a review expires after this many days (1..3650, default 180);
+      # expired reviews stop new machine collection until re-recorded.
+      MTK_TOS_REVIEW_TTL_DAYS: ${MTK_TOS_REVIEW_TTL_DAYS:-180}
       # public origin of the dashboard — enables §11 correction links in
       # scheduled captions (schedules_state.platform_metadata)
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
