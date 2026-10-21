@@ -9,13 +9,19 @@ outbound verification fetches:
   fixtures) on a permitted port, never with embedded credentials;
 - the hostname is resolved and **every** answer must be a global unicast
   address — one private answer poisons the whole name;
-- every redirect hop is re-validated against the same rules;
+- every redirect hop is re-resolved and re-validated against the same rules;
+- the connection is **pinned to the validated address** (default), while `Host`
+  and TLS SNI keep the provider hostname, so certificate verification still
+  refers to the real name. A resolver that answers public during validation and
+  private at connect time has no effect;
+- ambient proxy settings are ignored, and keep-alive is off, because pooled
+  connections are keyed by the pinned IP rather than the provider name;
 - the body is streamed and bounded, and non-text payloads are refused.
 
-What this does not yet do: pin the connection to the address that was
-validated. A resolver that answers public during validation and private at
-connect time (DNS rebinding) is a residual risk until the transport pins the
-IP. Do not describe this module as a complete SSRF defence.
+Residual risk: `pin_addresses=False` exists for fixtures and must never be set
+in production. Pinning is unit-tested at the request level and exercised over a
+real loopback socket, but no live TLS handshake is performed by the automated
+suite, so a deployment smoke test is still required before relying on it.
 
 An HTTP error status is *returned*, not raised: a login wall, challenge or
 outage means "unavailable", never proof that the offer ended or is valid.
@@ -29,7 +35,7 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -62,6 +68,10 @@ class EgressPolicy:
     # Only for local fixtures (never in production): permit loopback/private
     # destinations. Kept explicit so the default cannot be relaxed by accident.
     allow_private: bool = False
+    # Connect to the address that was validated instead of letting the HTTP
+    # stack resolve the name a second time. Disable only for tests that need to
+    # see the logical hostname at the transport layer.
+    pin_addresses: bool = True
 
     def schemes(self) -> frozenset[str]:
         return frozenset({"http", "https"}) if self.allow_plain_http else frozenset({"https"})
@@ -147,7 +157,8 @@ def _default_resolver(host: str, port: int) -> list[str]:
 
 
 def _resolve_public(host: str, port: int, resolver: Callable[[str, int], list[str]],
-                   *, allow_private: bool = False) -> None:
+                   *, allow_private: bool = False) -> list[str]:
+    """Resolve, validate **every** answer, and return them for pinning."""
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -155,7 +166,7 @@ def _resolve_public(host: str, port: int, resolver: Callable[[str, int], list[st
     if literal is not None:
         if not allow_private and not is_public_address(host):
             raise EgressError(f"IP literal '{host}' is not a public address")
-        return
+        return [host]
     try:
         addresses = resolver(host, port)
     except EgressError:
@@ -165,12 +176,28 @@ def _resolve_public(host: str, port: int, resolver: Callable[[str, int], list[st
     if not addresses:
         raise EgressError(f"could not resolve host '{host}': no addresses")
     if allow_private:
-        return
+        return list(addresses)
     non_public = [address for address in addresses if not is_public_address(address)]
     if non_public:
         raise EgressError(
             f"host '{host}' resolves to a non-public address ({', '.join(non_public)}); refused"
         )
+    return list(addresses)
+
+
+def _netloc(host: str, port: int, scheme: str) -> str:
+    """Bracket IPv6 literals and omit a default port."""
+    bare = f"[{host}]" if ":" in host else host
+    default = 443 if scheme.lower() == "https" else 80
+    return bare if port == default else f"{bare}:{port}"
+
+
+def _pinned_url(url: str, address: str) -> str:
+    """Same path/query, but the socket goes to `address`."""
+    parts = urlsplit(url)
+    port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+    return urlunsplit((parts.scheme, _netloc(address, port, parts.scheme),
+                       parts.path, parts.query, parts.fragment))
 
 
 def _check_content_type(content_type: str) -> str:
@@ -204,6 +231,11 @@ def safe_fetch(
             headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
             timeout=policy.timeout,
             follow_redirects=False,
+            # Ambient proxy settings would bypass address pinning, and pooled
+            # connections are keyed by the pinned IP, so two provider names on
+            # one address could otherwise share a TLS session.
+            trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=10),
         )
 
     requested = str(url)
@@ -212,17 +244,34 @@ def safe_fetch(
     try:
         for _ in range(policy.max_redirects + 1):
             host, port = validate_url(current, policy)
-            _resolve_public(host, port, resolver, allow_private=policy.allow_private)
+            addresses = _resolve_public(
+                host, port, resolver, allow_private=policy.allow_private,
+            )
+            if policy.pin_addresses:
+                # Connect to the address we just validated. The hostname stays
+                # in Host and in SNI, so HTTP authority and certificate
+                # verification still refer to the provider, while a resolver
+                # that changes its answer at connect time has no effect.
+                target = _pinned_url(current, addresses[0])
+                request_headers = {
+                    "Host": _netloc(host, port, urlsplit(current).scheme),
+                }
+                extensions = {"sni_hostname": host}
+            else:
+                target, request_headers, extensions = current, {}, {}
             if before_request is not None:
                 before_request(current)
 
-            with client.stream("GET", current) as response:
+            with client.stream("GET", target, headers=request_headers,
+                               extensions=extensions) as response:
                 status = response.status_code
                 if status in REDIRECT_STATUSES:
                     location = response.headers.get("location")
                     if not location:
                         raise EgressError(f"redirect {status} without a location header")
-                    current = urljoin(str(response.url), location)
+                    # Resolve against the logical URL: a relative Location must
+                    # not inherit the pinned IP as the new hostname.
+                    current = urljoin(current, location)
                     redirects.append(current)
                     continue
 
@@ -243,7 +292,7 @@ def safe_fetch(
                     fetched_at = fetched_at.replace(tzinfo=timezone.utc)
                 return FetchResult(
                     requested_url=requested,
-                    final_url=str(response.url),
+                    final_url=current,
                     status=status,
                     content_type=content_type,
                     body=b"".join(chunks),

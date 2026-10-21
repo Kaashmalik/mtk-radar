@@ -41,17 +41,27 @@ def resolver_mixed(host, port):
 
 
 def client_for(routes):
-    """routes: url -> (status, headers, body) or callable(request)."""
+    """routes: url -> (status, headers, body).
+
+    The handler resolves the route from the ``Host`` header, because the egress
+    policy pins the socket to a validated IP address while preserving the
+    original hostname in ``Host``/SNI.
+    """
 
     def handler(request):
-        target = str(request.url)
+        scheme = request.url.scheme
+        host = request.headers.get("host", "")
+        target = f"{scheme}://{host}{request.url.raw_path.decode('ascii')}"
+        client.seen.append(request)
         result = routes.get(target)
         if result is None:
             return httpx.Response(404, text="missing", request=request)
         status, headers, body = result
         return httpx.Response(status, headers=headers, content=body, request=request)
 
-    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    client.seen = []
+    return client
 
 
 def policy(**kwargs):
@@ -265,6 +275,156 @@ class TestFetch:
             result = safe_fetch(url, policy=policy(), client=client,
                                 resolver=resolver_public, clock=lambda: FIXED_NOW)
         assert result.status == 503
+
+
+class TestAddressPinning:
+    """The connection must go to the address that was validated, not a re-lookup."""
+
+    def route(self, url, body=b"<html>terms</html>"):
+        return {url: (200, {"content-type": "text/html"}, body)}
+
+    def test_socket_targets_the_validated_address(self):
+        url = "https://example.com/terms"
+        with client_for(self.route(url)) as client:
+            safe_fetch(url, policy=policy(), client=client,
+                       resolver=resolver_public, clock=lambda: FIXED_NOW)
+        sent = client.seen[0]
+        assert sent.url.host == "93.184.216.34"          # socket destination
+        assert sent.headers["host"] == "example.com"     # HTTP authority
+        assert sent.extensions["sni_hostname"] == "example.com"  # TLS identity
+
+    def test_pinned_request_still_reports_the_logical_url(self):
+        url = "https://example.com/terms"
+        with client_for(self.route(url)) as client:
+            result = safe_fetch(url, policy=policy(), client=client,
+                                resolver=resolver_public, clock=lambda: FIXED_NOW)
+        assert result.requested_url == url
+        assert result.final_url == url
+
+    def test_ipv6_pin_is_bracketed(self):
+        url = "https://example.com/ipv6"
+        v6 = "2606:2800:220:1:248:1893:25c8:1946"
+        with client_for(self.route(url)) as client:
+            safe_fetch(url, policy=policy(), client=client,
+                       resolver=lambda host, port: [v6], clock=lambda: FIXED_NOW)
+        sent = client.seen[0]
+        assert sent.url.host == v6
+        assert sent.headers["host"] == "example.com"
+        assert sent.extensions["sni_hostname"] == "example.com"
+
+    def test_each_redirect_hop_is_resolved_and_pinned_again(self):
+        first = "https://example.com/terms"
+        second = "https://example.com/terms-2026"
+        routes = {
+            first: (302, {"location": second}, b""),
+            second: (200, {"content-type": "text/html"}, b"<p>final</p>"),
+        }
+        answers = {("example.com", 443): ["93.184.216.34", "93.184.216.35"]}
+        calls = []
+
+        def resolver(host, port):
+            calls.append((host, port))
+            # A rebinding resolver: different answer on the second lookup.
+            return [answers[(host, port)][min(len(calls) - 1, 1)]]
+
+        with client_for(routes) as client:
+            result = safe_fetch(first, policy=policy(), client=client,
+                                resolver=resolver, clock=lambda: FIXED_NOW)
+        assert result.final_url == second
+        assert [request.url.host for request in client.seen] == [
+            "93.184.216.34", "93.184.216.35",
+        ]
+        assert all(r.headers["host"] == "example.com" for r in client.seen)
+
+    def test_relative_redirect_resolves_against_the_hostname_not_the_ip(self):
+        first = "https://example.com/terms"
+        second = "https://example.com/terms-2026"
+        routes = {
+            first: (302, {"location": "/terms-2026"}, b""),
+            second: (200, {"content-type": "text/html"}, b"<p>final</p>"),
+        }
+        with client_for(routes) as client:
+            result = safe_fetch(first, policy=policy(), client=client,
+                                resolver=resolver_public, clock=lambda: FIXED_NOW)
+        assert result.final_url == second
+        assert result.redirects == (second,)
+
+    def test_pinning_can_be_disabled_only_explicitly(self):
+        url = "https://example.com/terms"
+        with client_for(self.route(url)) as client:
+            safe_fetch(url, policy=policy(pin_addresses=False), client=client,
+                       resolver=resolver_public, clock=lambda: FIXED_NOW)
+        assert client.seen[0].url.host == "example.com"
+
+    def test_default_policy_pins(self):
+        assert EgressPolicy().pin_addresses is True
+
+    def test_dns_is_rechecked_even_when_the_name_was_seen_before(self):
+        """No cross-request cache: every hop is resolved and validated."""
+        url = "https://example.com/terms"
+        answers = [["93.184.216.34"], ["10.0.0.7"]]
+        calls = []
+
+        def resolver(host, port):
+            calls.append(host)
+            return answers[min(len(calls) - 1, 1)]
+
+        with client_for(self.route(url)) as client:
+            safe_fetch(url, policy=policy(), client=client,
+                       resolver=resolver, clock=lambda: FIXED_NOW)
+            with pytest.raises(EgressError, match="non-public"):
+                safe_fetch(url, policy=policy(), client=client,
+                           resolver=resolver, clock=lambda: FIXED_NOW)
+        assert len(calls) == 2
+
+
+class TestPinnedConnectionOverRealSockets:
+    """MockTransport cannot prove httpcore honours our Host/pin wiring."""
+
+    def test_host_header_survives_pinning_over_a_real_socket(self):
+        import http.server
+        import threading
+
+        received: list[tuple[str, str]] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 — stdlib callback name
+                received.append((self.path, self.headers.get("Host", "")))
+                body = b"<html>ok</html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            local_policy = EgressPolicy(
+                allow_plain_http=True, allow_private=True,
+                allowed_ports=frozenset({port}),
+            )
+            url = f"http://example.test:{port}/terms"
+            result = safe_fetch(
+                url, policy=local_policy,
+                resolver=lambda host, _port: ["127.0.0.1"],
+                clock=lambda: FIXED_NOW,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        assert result.status == 200
+        assert result.final_url == url
+        # The server was reached through the pinned loopback address but saw
+        # the provider hostname as its authority.
+        assert received == [("/terms", f"example.test:{port}")]
 
 
 class TestPageSnapshotProvenance:
