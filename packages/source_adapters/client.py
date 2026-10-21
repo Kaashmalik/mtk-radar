@@ -30,11 +30,15 @@ class Fetcher:
             follow_redirects=True,
         )
         # Verification must validate each redirect hop itself, so it needs a
-        # client that never follows automatically.
+        # client that never follows automatically. Ambient proxies are ignored
+        # (they would bypass address pinning) and keep-alive is disabled
+        # because pooled connections are keyed by the pinned IP.
         self._safe_client = httpx.Client(
             headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
             timeout=timeout,
             follow_redirects=False,
+            trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=10),
         )
         self._last_hit: dict[str, float] = {}
 

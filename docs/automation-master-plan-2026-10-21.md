@@ -596,9 +596,16 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Require raw bytes + provenance at promotion for machine-collected official evidence, while exempting reviewer-attested snapshots; legacy text-only evidence stays storable but cannot earn `verified`.
 - [x] Prove the new tests fail before implementation: **14 failing slice cases + 2 collection errors** at `fe4764e`. Full suite on isolated PostgreSQL 16.15: **476 tests, zero skips**; lint, compilation and typecheck exit 0. See [third-slice checkpoint](implementation-wp01-slice3-2026-10-21.md).
 
+**Completed — fourth slice, DNS-rebinding-resistant egress:**
+
+- [x] Pin every connection to the address that was validated, while keeping the provider hostname in `Host` and in TLS `server_hostname`, so a resolver that changes its answer at connect time has no effect.
+- [x] Re-resolve, re-validate and re-pin **every** redirect hop; resolve relative `Location` against the logical provider URL, never the pinned IP.
+- [x] Disable keep-alive and ambient proxies on the verification client, because pooled connections are keyed by the pinned IP and a proxy would bypass the pin entirely.
+- [x] Prove the behaviour over a real socket (httpcore sends `Host: example.test` while connecting to loopback), not only through a mock transport; 9 new tests, **5 failing** at `a1dd206`. Full suite: **485 passed, zero skips**. See [fourth-slice checkpoint](implementation-wp01-slice4-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Close the DNS-rebinding window by pinning the validated address in the transport, and apply the egress policy to the collector adapters (only verification uses it today).
+- [ ] Apply the egress policy to the collector adapters (`fetch_rss`, `fetch_github_releases`, collector `page_watch`); only the verification path is protected today.
 - [ ] Implement trusted acquisition identities: the API cannot yet prove which process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
 - [ ] Record a per-source robots/terms permission decision alongside each fetch.
 - [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
@@ -794,7 +801,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, and safe egress + raw-byte fetch provenance implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md). DNS-rebinding pinning, trusted acquisition identity, collector-path egress, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, and DNS-rebinding-resistant pinning implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md). Trusted acquisition identity, collector-path egress, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
