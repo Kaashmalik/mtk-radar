@@ -193,6 +193,7 @@ adapter stays disabled (posts are skipped, not failed).
 | Dead platform token | `ALERT token expiry …` in the publishing log → re-consent (§3) → account returns to `active` |
 | Offer expired | monitor sweep auto-pauses scheduled posts; the offer page shows the correction path |
 | Metrics empty | check the OAuth scope (`yt-analytics.readonly`) and the metrics worker log |
+| Post shows "HELD" on the calendar | a previous upload's outcome is unknown — check the platform first (it may already be live), then re-queue or cancel the post |
 | Reviewer token lost | `python -m scripts.mint_reviewer --name "Kashi"` → mint a new one |
 
 Full incident procedures: `docs/runbook.md` (§3 recovery, §5 daily ops,

@@ -161,8 +161,15 @@ export default async function CalendarPage() {
             <div style={{ display: "grid", gap: "0.7rem" }}>
               {items.map((s) => {
                 let outcome: string | null = null;
+                let held = false;
                 if (s.outcome_detail) {
-                  try { outcome = JSON.parse(s.outcome_detail)?.detail ?? null; } catch {}
+                  try {
+                    const parsed = JSON.parse(s.outcome_detail);
+                    outcome = parsed?.detail ?? null;
+                    // v0.23: a held post waits for a human (unknown upload
+                    // outcome) — it must be obvious on the calendar.
+                    held = Boolean(parsed?.hold);
+                  } catch {}
                 }
                 return (
                   <article key={s.id} className="entry">
@@ -177,6 +184,12 @@ export default async function CalendarPage() {
                           {s.remote_post_id && <> · post {s.remote_post_id}</>}
                           {outcome && <> · {outcome}</>}
                         </div>
+                        {held && (
+                          <div className="small" style={{ color: "#f0883e" }}>
+                            ⚠ HELD — needs operator review: check the platform before
+                            re-queueing (a previous upload may already be live).
+                          </div>
+                        )}
                       </div>
                       <span
                         className="badge"

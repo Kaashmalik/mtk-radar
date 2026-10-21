@@ -273,6 +273,12 @@ class Publisher:
 
         requeued = 0
         for post in failed:
+            # v0.23: a post on hold needs a human (e.g. an interrupted upload
+            # whose outcome is unknown) — auto-retry must not touch it.
+            if self._is_held(post):
+                log.info("schedule %s: on hold — operator review required, not auto-retried",
+                         post["id"])
+                continue
             attempts = post.get("retry_count", 0) or 0
             if attempts >= self.MAX_RETRIES:
                 log.info("schedule %s: giving up auto-retry after %d attempts — operator review",
@@ -311,6 +317,21 @@ class Publisher:
         if adapter is None:
             self._report(post["id"], ok=False,
                          detail=f"platform '{platform}' not configured (register env credentials)")
+            return
+
+        # v0.23: an upload attempt that never reported its outcome is
+        # UNKNOWN — the post may already be live on the platform. Publishing
+        # again would create a duplicate public post, so the post is held for
+        # a human to verify (one click on the platform) instead.
+        open_attempt = self._open_attempt(post)
+        if open_attempt:
+            log.warning("schedule %s: an upload attempt from %s has no recorded outcome — "
+                        "the post may already be published; holding for operator review",
+                        post["id"], open_attempt.get("started_at"))
+            self._report(post["id"], ok=False, hold=True,
+                         detail="previous upload attempt has no recorded outcome — the post "
+                                "may already be live; verify on the platform, then resume or "
+                                "cancel this post (duplicate protection)")
             return
 
         render = self._latest_render(post["offer_id"])
@@ -388,6 +409,7 @@ class Publisher:
             if public_url:
                 meta["public_url"] = public_url
 
+        self._announce_attempt(post["id"])
         try:
             remote_id = adapter.upload(
                 video_file,
@@ -419,12 +441,50 @@ class Publisher:
         except httpx.HTTPError:
             return None
 
+    @staticmethod
+    def _is_held(post: dict) -> bool:
+        """True when a human must review this post before it goes out (v0.23)."""
+        detail = post.get("outcome_detail")
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except (TypeError, ValueError):
+                return False
+        if not isinstance(detail, dict):
+            return False
+        return bool(detail.get("hold"))
+
+    @staticmethod
+    def _open_attempt(post: dict) -> dict | None:
+        """The open attempt marker of a schedule, if any (v0.23)."""
+        detail = post.get("outcome_detail")
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(detail, dict):
+            return None
+        attempt = detail.get("attempt")
+        return attempt if isinstance(attempt, dict) else None
+
+    def _announce_attempt(self, schedule_id: str) -> None:
+        """Tell the API an upload is starting (v0.23) — if this worker dies
+        mid-upload, the marker stays open and the post is held for review."""
+        try:
+            self.api.post(f"/schedules/{schedule_id}/attempt",
+                          json={"detail": "upload started", "worker": "publishing-worker"})
+        except httpx.HTTPError as exc:
+            # the attempt marker is a safety net, not a gate: continue without it
+            log.warning("could not record the upload attempt for %s: %s", schedule_id, exc)
+
     def _report(self, schedule_id: str, *, ok: bool, detail: str | None = None,
-                remote_post_id: str | None = None) -> None:
+                remote_post_id: str | None = None, hold: bool = False) -> None:
         try:
             self.api.post(
                 f"/schedules/{schedule_id}/result",
-                json={"ok": ok, "remote_post_id": remote_post_id, "detail": detail},
+                json={"ok": ok, "remote_post_id": remote_post_id, "detail": detail,
+                      "hold": hold},
             )
         except httpx.HTTPError as exc:
             log.error("failed to report result for %s: %s", schedule_id, exc)

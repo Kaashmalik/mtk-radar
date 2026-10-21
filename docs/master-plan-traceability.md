@@ -32,6 +32,7 @@ demonstrates it works.
 | Synthetic narration must be disclosed | `narration.disclosure_record()` → `renders.disclosure`; narration mix refused unless the track decodes and covers ≥85 % of segments | narration tests (truncation refused) |
 | Posts pause when an offer expires or changes | DB trigger `trg_pause_on_offer_change` + worker-side recheck at upload time | integration + publish-gate tests |
 | Approval binds to the exact script content | `script_version_hash()` (sha256 of the markdown) on schedule + render + approval | publish-gate test (hash mismatch ⇒ pause) |
+| Never publish the same post twice | attempt marker (`POST /schedules/{id}/attempt`) + hold semantics; a held post is skipped by auto-retry and shown on the calendar | duplicate-protection tests (worker + integration) |
 | Publishing uses official APIs only | `workers/publishing/platforms/*` (Data API, Graph, TikTok, IG Graph) | adapter tests; no browser automation for posting |
 | Corrections link to affected posts | `offer_corrections` + caption permalink (`MTK_PUBLIC_BASE_URL`) + YouTube description write-back | correction write-back tests |
 | Reviewed records only | redaction review attestation required for render registration | integration test (unreviewed capture never queues) |

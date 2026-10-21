@@ -55,6 +55,10 @@ class ScheduleResultIn(BaseModel):
     ok: bool
     remote_post_id: Optional[str] = None
     detail: Optional[str] = None
+    # v0.23: hold = "a human must look at this post" — the auto-retry sweep
+    # skips held posts (e.g. an interrupted upload whose outcome is unknown:
+    # retrying could publish a duplicate).
+    hold: bool = False
 
 
 # ---------------------------------------------------------------- create
@@ -244,6 +248,11 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
         params.append(offer_ok)
         sets.append(f"offer_evidence_ok = ${len(params)}")
 
+    if body.to == "scheduled":
+        # a post that was HELD (unknown upload outcome) is being re-queued by
+        # a human decision — clear the hold so it may go out (v0.23)
+        sets.append("outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb")
+
     row = await pool.fetchrow(
         f"UPDATE schedules SET {', '.join(sets)}, updated_at = now() "
         f"WHERE id = $1 RETURNING state::text AS state, version_hash",
@@ -294,9 +303,47 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
         "UPDATE schedules SET state = 'scheduled', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
     )
+    # a human resumed the post: clear the hold so the worker may try again
+    await pool.execute(
+        "UPDATE schedules SET outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb, "
+        "updated_at = now() WHERE id = $1",
+        schedule_id,
+    )
     await _audit(pool, actor=effective_reviewer(request, reviewer, default="operator"),
                  action="schedule:resume", entity="schedules", entity_id=schedule_id)
     return {"id": schedule_id, "state": row["state"]}
+
+
+class AttemptIn(BaseModel):
+    """The worker announces an upload BEFORE it starts (v0.23). If the worker
+    dies mid-upload, the marker stays open: the next sweep knows the outcome
+    is UNKNOWN and holds the post for a human instead of publishing a
+    duplicate."""
+    detail: Optional[str] = None
+    worker: Optional[str] = None
+
+
+@router.post("/schedules/{schedule_id}/attempt")
+async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
+    """Mark an upload attempt as started (idempotent per attempt)."""
+    pool = db.get()
+    schedule = await _load(pool, schedule_id)
+    if schedule["state"] != "scheduled":
+        raise HTTPException(
+            status_code=409,
+            detail=f"attempts only apply to scheduled posts (current: {schedule['state']})",
+        )
+    marker = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "detail": body.detail,
+        "worker": body.worker or "publishing-worker",
+    }
+    await pool.execute(
+        "UPDATE schedules SET outcome_detail = outcome_detail || $2::jsonb, updated_at = now() "
+        "WHERE id = $1",
+        schedule_id, json.dumps({"attempt": marker}),
+    )
+    return {"id": str(schedule_id), "attempt": marker}
 
 
 @router.post("/schedules/{schedule_id}/result")
@@ -313,7 +360,10 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
         raise HTTPException(status_code=400, detail="successful publish requires remote_post_id")
 
     new_state = "published" if body.ok else "failed"
-    outcome = {"detail": body.detail, "reported_at": datetime.now().isoformat()}
+    # a definite outcome clears any open "attempt" marker (the upload either
+    # succeeded or failed — retrying is safe)
+    outcome = {"detail": body.detail, "reported_at": datetime.now().isoformat(),
+               "attempt": None, "hold": bool(body.hold)}
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))

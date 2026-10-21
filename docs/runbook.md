@@ -163,6 +163,12 @@ live), **Settings** (publish windows, pipeline status), **Queue** (what the
 automation renders vs what waits on you). Secrets never pass through the
 browser.
 
+Duplicate protection (v0.23): the worker announces an upload
+(`POST /schedules/{id}/attempt`) before it starts. If the outcome never
+arrives (worker died mid-upload), the post is HELD — the calendar shows a
+warning, the auto-retry sweep skips it, and a human verifies on the platform
+before re-queueing. A duplicate public post is worse than a delayed one.
+
 Concurrency safety (v0.22): worker sweeps take a named lock
 (`POST /locks/acquire`) before working the queue, so a deploy overlap or a
 manually started second worker cannot upload the same post twice. A lock

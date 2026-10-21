@@ -15,6 +15,7 @@ care about. Skipped automatically when the env var is absent.
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys as _sys
 from pathlib import Path
@@ -564,3 +565,95 @@ def test_expired_lock_is_taken_over(auth_client):
     res = auth_client.post("/locks/acquire", headers=SVC,
                            json={"name": "dead-worker", "holder": "newcomer", "ttl_s": 60})
     assert res.json()["acquired"] is True, "an expired lock must be taken over"
+
+
+def test_upload_attempt_marker_blocks_a_blind_retry(auth_client):
+    """v0.23: the worker announces an upload before it starts. If the outcome
+    never arrives, the marker stays open so the next sweep holds the post for
+    a human instead of publishing a duplicate."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Dup Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-attempt-1', 'hash-1')
+        RETURNING id
+        """, offer_id)[0]["id"]
+
+    started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC,
+                               json={"detail": "upload started", "worker": "publishing-worker"})
+    assert started.status_code == 200, started.text
+    assert started.json()["attempt"]["started_at"]
+
+    listing = auth_client.get("/schedules", params={"state": "scheduled"}, headers=SVC).json()
+    mine = [s for s in listing if str(s["id"]) == str(sid)][0]
+    detail = json.loads(mine["outcome_detail"]) if isinstance(mine["outcome_detail"], str) else mine["outcome_detail"]
+    assert detail["attempt"]["detail"] == "upload started", "the marker must be visible to the worker"
+
+    # a definite outcome clears the marker -> retrying is safe again
+    reported = auth_client.post(f"/schedules/{sid}/result", headers=SVC,
+                                json={"ok": False, "detail": "upload rejected"})
+    assert reported.status_code == 200, reported.text
+    listing = auth_client.get("/schedules", params={"state": "failed"}, headers=SVC).json()
+    mine = [s for s in listing if str(s["id"]) == str(sid)][0]
+    detail = json.loads(mine["outcome_detail"]) if isinstance(mine["outcome_detail"], str) else mine["outcome_detail"]
+    assert detail.get("attempt") is None, "a recorded outcome must clear the attempt marker"
+
+
+def test_attempt_marker_is_refused_for_non_scheduled_posts(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Dup Co 2", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'draft', now(), 'Asia/Karachi', 'private',
+                'itest-attempt-2', 'hash-2')
+        RETURNING id
+        """, offer_id)[0]["id"]
+    res = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert res.status_code == 409, "only scheduled posts get upload attempts"
+
+
+def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
+    """A held post (unknown upload outcome) must not be auto-retried; an
+    operator resuming it clears the hold."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Hold Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-hold-1', 'hash-1')
+        RETURNING id
+        """, offer_id)[0]["id"]
+
+    held = auth_client.post(f"/schedules/{sid}/result", headers=SVC,
+                            json={"ok": False, "detail": "unknown outcome", "hold": True})
+    assert held.status_code == 200, held.text
+    row = _run("SELECT outcome_detail::text AS d FROM schedules WHERE id = $1",
+               __import__("uuid").UUID(str(sid)))[0]
+    assert json.loads(row["d"])["hold"] is True
+
+    # the operator re-queues it (failed -> scheduled; the script must still
+    # match the approved hash)
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown) "
+         "VALUES ($1, 1, '# hold script') ON CONFLICT DO NOTHING", offer_id)
+    version_hash = script_version_hash("# hold script")
+    _run("UPDATE schedules SET version_hash = $2 WHERE id = $1",
+         __import__("uuid").UUID(str(sid)), version_hash)
+    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                                json={"to": "scheduled", "reviewer": "pytest"})
+    assert resumed.status_code == 200, resumed.text
+    row = _run("SELECT outcome_detail::text AS d FROM schedules WHERE id = $1",
+               __import__("uuid").UUID(str(sid)))[0]
+    assert json.loads(row["d"])["hold"] is False, "resume must clear the hold"
