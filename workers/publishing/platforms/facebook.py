@@ -67,3 +67,30 @@ class FacebookAdapter(PublishAdapter):
                 raise TokenExpiredError(str(exc)) from exc
             resp.raise_for_status()
         return str(payload["id"])
+
+    # ------------------------------------------------------------- analytics
+
+    def insights(self, video_id: str) -> dict:
+        """Per-video audience metrics via Graph video_insights (v0.18, docs:
+        https://developers.facebook.com/docs/video-api/guides/insights/).
+        Requires the video to be published; unpublished test uploads answer
+        empty/404 — callers treat that as no-data, not failure."""
+        self.ensure_ready()
+        resp = self._http.get(
+            f"{VIDEO_ENDPOINT}{video_id}/video_insights",
+            params={
+                "metric": "total_video_views,total_video_reactions,total_comments",
+                "access_token": self.page_access_token,
+            },
+        )
+        if resp.status_code in (400, 401, 403):
+            raise TokenExpiredError(f"graph insights rejected ({resp.status_code}) — re-auth required")
+        resp.raise_for_status()
+        out: dict[str, int] = {}
+        for entry in resp.json().get("data", []):
+            values = entry.get("values") or [{}]
+            try:
+                out[entry["name"]] = int(values[0].get("value", 0))
+            except (TypeError, ValueError):
+                out[entry["name"]] = 0
+        return out

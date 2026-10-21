@@ -229,6 +229,8 @@ from captures_api import router as _captures_router
 from offers_api import router as _offers_router
 from renders_api import router as _renders_router
 from schedules_api import router as _schedules_router
+from settings_api import router as _settings_router
+from analytics_api import router as _analytics_router
 from schedules_state import script_version_hash
 
 
@@ -284,7 +286,8 @@ def auth_client(client):
         import db
         await db.close()
 
-    for r in (_offers_router, _schedules_router, _renders_router, _captures_router):
+    for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
+              _settings_router, _analytics_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -357,3 +360,103 @@ def test_revoked_reviewer_token_rejected(auth_client):
     api_hardening.reset_reviewer_cache()
     r = auth_client.get("/whoami", headers=AUTH)
     assert r.status_code == 401, "revocation must take effect"
+
+
+# ------------------------------------------------- v0.18: settings + metrics
+
+def test_settings_roundtrip_and_validation(auth_client):
+    assert auth_client.get("/settings/no_such_setting", headers=SVC).status_code == 404
+    assert auth_client.get("/settings/publish_windows", headers=SVC).json()["value"] is None
+
+    bad = auth_client.put("/settings/publish_windows", headers=SVC,
+                          json={"value": {"windows": ["25:00", "18:00"]}})
+    assert bad.status_code == 422, "out-of-range windows must be refused"
+
+    ok = auth_client.put("/settings/publish_windows", headers=SVC,
+                         json={"value": {"windows": ["09:30", "18:00", "09:30"]}})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["value"]["windows"] == ["09:30", "18:00"], "dedup + order preserved"
+
+    fetched = auth_client.get("/settings/publish_windows", headers=SVC).json()
+    assert fetched["value"]["windows"] == ["09:30", "18:00"]
+
+
+def test_metrics_ingest_upserts_one_daily_snapshot(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Metrics Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, remote_post_id, version_hash)
+        VALUES ($1, 'youtube', 'published', now(), 'Asia/Karachi', 'private',
+                'itest-metrics-1', 'vid-metrics-1', 'hash-metrics-1')
+        RETURNING id
+        """,
+        __import__("uuid").UUID(offer["id"]),
+    )[0]["id"]
+
+    wrong = auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "facebook", "source": "graph-insights", "views": 1,
+    })
+    assert wrong.status_code == 409, "metrics platform must match the schedule"
+
+    first = auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "youtube", "source": "youtube-analytics",
+        "views": 100, "likes": 5, "comments": 2, "avg_watch_s": 90.5,
+    })
+    assert first.status_code == 201, first.text
+
+    second = auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "youtube", "source": "youtube-analytics",
+        "views": 150, "likes": 9, "comments": 4, "avg_watch_s": 95.0, "raw": {"n": 2},
+    })
+    assert second.status_code == 201
+
+    rows = auth_client.get(f"/schedules/{sid}/metrics", headers=SVC).json()["metrics"]
+    assert len(rows) == 1, "same-day re-pull must REPLACE, not duplicate"
+    assert rows[0]["views"] == 150 and rows[0]["comments"] == 4
+
+
+def test_analytics_content_performance_and_patch_marker(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Patch Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, remote_post_id, version_hash)
+        VALUES ($1, 'youtube', 'published', now(), 'Asia/Karachi', 'private',
+                'itest-patch-1', 'vid-patch-1', 'hash-patch-1')
+        RETURNING id
+        """,
+        __import__("uuid").UUID(offer["id"]),
+    )[0]["id"]
+
+    auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "youtube", "source": "youtube-analytics", "views": 77, "likes": 3,
+    })
+
+    data = auth_client.get("/analytics", headers=SVC).json()
+    totals = data["metrics_totals"]
+    assert totals["posts_measured"] >= 1 and int(totals["views"]) >= 77
+    perf = {str(row["id"]): row for row in data["content_performance"]}
+    assert str(sid) in perf and perf[str(sid)]["views"] == 77
+
+    not_published = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, idempotency_key) "
+        "SELECT offer_id, 'youtube', 'scheduled', now(), 'private', 'itest-patch-2' "
+        "FROM schedules WHERE id = $1 RETURNING id", __import__("uuid").UUID(str(sid)))[0]["id"]
+    refused = auth_client.post(f"/schedules/{not_published}/mark-description-patched", headers=SVC, json={})
+    assert refused.status_code == 409, "only published posts get description patches"
+
+    patched = auth_client.post(f"/schedules/{sid}/mark-description-patched", headers=SVC, json={})
+    assert patched.status_code == 200, patched.text
+    row = _run("SELECT description_patched_at FROM schedules WHERE id = $1",
+               __import__("uuid").UUID(str(sid)))[0]
+    assert row["description_patched_at"] is not None
+
+    listing = auth_client.get("/schedules", params={"state": "published"}, headers=SVC).json()
+    mine = [p for p in listing if str(p["id"]) == str(sid)]
+    assert mine and mine[0]["description_patched_at"] is not None, \
+        "the worker sweep reads this field to stay idempotent"

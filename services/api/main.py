@@ -26,13 +26,14 @@ from platforms_api import router as platforms_router
 from analytics_api import router as analytics_router
 from renders_api import router as renders_router
 from schedules_api import router as schedules_router
+from settings_api import router as settings_router
 from schemas import ItemIn, PollResult, SourceIn
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.16.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.18.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +47,7 @@ app.include_router(offers_router)
 app.include_router(captures_router)
 app.include_router(renders_router)
 app.include_router(schedules_router)
+app.include_router(settings_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 

@@ -14,7 +14,7 @@ master plan §17). Gates enforced server-side:
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -173,6 +173,7 @@ async def list_schedules(
                s.platform, s.state::text AS state, s.local_time, s.timezone,
                s.privacy, s.caption_variant, s.version_hash, s.approved_by,
                s.metadata::text AS metadata, s.retry_count, s.updated_at,
+               s.description_patched_at,
                s.remote_post_id, s.outcome_detail::text AS outcome_detail, s.created_at
         FROM schedules s JOIN offers o ON o.id = s.offer_id
         WHERE ($1::text IS NULL OR s.state::text = $1)
@@ -345,6 +346,91 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
     await _audit(pool, actor="publishing-worker", action=f"result:{new_state}",
                  entity="schedules", entity_id=schedule_id, detail={"remote_post_id": body.remote_post_id})
     return {"id": schedule_id, "state": new_state}
+
+
+# ------------------------------------------------- audience metrics (v0.18)
+
+
+class MetricsIn(BaseModel):
+    """One audience-metrics snapshot from the metrics worker (master plan §7).
+    Normalized fields feed analytics; `raw` keeps the provider payload."""
+    platform: str = Field(pattern="^(youtube|facebook|instagram|tiktok)$")
+    views: Optional[int] = None
+    likes: Optional[int] = None
+    comments: Optional[int] = None
+    impressions: Optional[int] = None
+    avg_watch_s: Optional[float] = None
+    source: str = Field(min_length=3, max_length=64)
+    raw: dict = Field(default_factory=dict)
+
+
+@router.post("/schedules/{schedule_id}/metrics", status_code=201)
+async def ingest_metrics(schedule_id: uuid.UUID, body: MetricsIn) -> dict:
+    """Upsert a daily metrics snapshot: at most one row per (post, UTC day) —
+    a re-pull on the same day REPLACES the row instead of drift-duplicating."""
+    pool = db.get()
+    schedule = await _load(pool, schedule_id)
+    if schedule["platform"] != body.platform:
+        raise HTTPException(status_code=409, detail="metrics platform must match the schedule")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM post_metrics WHERE schedule_id = $1 AND captured_at::date = now()::date",
+                schedule_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO post_metrics
+                    (schedule_id, platform, views, likes, comments, impressions, avg_watch_s, source, raw)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                """,
+                schedule_id, body.platform, body.views, body.likes, body.comments,
+                body.impressions, body.avg_watch_s, body.source, json.dumps(body.raw),
+            )
+    latest = await pool.fetchrow(
+        "SELECT views, likes, comments, impressions, avg_watch_s, captured_at FROM post_metrics WHERE schedule_id = $1 ORDER BY captured_at DESC LIMIT 1",
+        schedule_id,
+    )
+    return {"schedule_id": str(schedule_id), **dict(latest)}
+
+
+@router.get("/schedules/{schedule_id}/metrics")
+async def list_metrics(schedule_id: uuid.UUID) -> dict:
+    """All snapshots for a post, newest first (dashboard trend display)."""
+    pool = db.get()
+    rows = await pool.fetch(
+        """SELECT views, likes, comments, impressions, avg_watch_s, source,
+                  captured_at FROM post_metrics WHERE schedule_id = $1
+           ORDER BY captured_at DESC LIMIT 90""",
+        schedule_id,
+    )
+    return {"schedule_id": str(schedule_id), "metrics": [dict(r) for r in rows]}
+
+
+# ------------------------------------------ correction description patching
+
+
+class DescriptionPatchedIn(BaseModel):
+    detail: Optional[str] = None
+
+
+@router.post("/schedules/{schedule_id}/mark-description-patched")
+async def mark_description_patched(schedule_id: uuid.UUID, body: DescriptionPatchedIn,
+                                   request: Request) -> dict:
+    """Worker confirms the §11 correction notice was pushed into an
+    already-published description (idempotency marker for the sweep)."""
+    pool = db.get()
+    schedule = await _load(pool, schedule_id)
+    if schedule["state"] != "published":
+        raise HTTPException(status_code=409, detail="only published posts get description patches")
+    await pool.execute(
+        "UPDATE schedules SET description_patched_at = now(), updated_at = now() WHERE id = $1",
+        schedule_id,
+    )
+    await _audit(pool, actor=effective_reviewer(request, None, default="publishing-worker"),
+                 action="schedule:description-patched", entity="schedules", entity_id=schedule_id,
+                 detail={"detail": body.detail})
+    return {"id": str(schedule_id), "description_patched_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ---------------------------------------------------------------- helpers

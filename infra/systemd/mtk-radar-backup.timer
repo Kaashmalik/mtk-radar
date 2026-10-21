@@ -1,0 +1,11 @@
+[Unit]
+Description=MTK RADAR — nightly backup schedule (03:00 host time; host TZ is PKT on the deploy box)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# run immediately if the box was off at 03:00 (laptop/NAS deploys)
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

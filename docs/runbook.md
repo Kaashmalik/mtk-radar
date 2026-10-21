@@ -40,7 +40,10 @@ continue the `NNN_name.sql` sequence.
 ./infra/restore.sh backups/mtk_radar_YYYYMMDDTHHMMSSZ.dump mtk_radar_drill
 ```
 
-- Schedule `backup.sh` daily (cron or systemd timer). Retention: default 14 days.
+- Automation (v0.18): `infra/systemd/` ships install-and-forget timers —
+  `mtk-radar-backup.timer` (daily 03:00, `Persistent=true` catch-up) and
+  `mtk-radar-restore-drill.timer` (monthly, newest dump → throwaway DB). See
+  `infra/systemd/README.md`; on hosts without systemd, cron lines are included.
 - **Monthly drill (mandatory):** restore the newest dump into a throwaway DB
   (`restore.sh` defaults to `mtk_radar_restore` so drills never touch prod),
   run the verification query it prints, and only then discard.
@@ -129,6 +132,7 @@ Workers (manual runs when not under compose):
 python workers/collectors/main.py --once
 python workers/monitor/main.py --once
 python workers/publishing/main.py --once
+python workers/metrics/main.py --once     # v0.18: audience metrics sweep
 ```
 
 Failed posts auto-retry with exponential backoff (base × 2^attempts, cap
@@ -205,6 +209,16 @@ before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
 rows to refs.
 
 ## 9. Known gaps (explicit, not hidden)
+- **Audience analytics (v0.18)**: the metrics worker pulls per-video views,
+  likes, comments and watch time from the official YouTube Analytics API and
+  Meta Graph video_insights into `post_metrics` (one snapshot per UTC day,
+  idempotent re-pulls); `/analytics` exposes reach totals + per-post content
+  performance, rendered on the dashboard. Not yet measured: TikTok (insights
+  need an approved developer app + undocumented scopes — skip by design),
+  Instagram (no adapter yet — needs a linked business account), retention
+  curves and click-through (needs platform reporting dims; snapshots keep the
+  raw payload for re-parsing). YouTube pulls 403 without the
+  `yt-analytics` OAuth scope — re-consent the client to add it.
 - TTS narration mixing: v0.17 replaced the homogeneous-codec stream-copy with
   a re-encode (libmp3lame 44.1 kHz) plus an ffprobe duration gate (≥85% of
   summed segments, else capture-audio fallback) — a provider/model change
@@ -213,26 +227,27 @@ rows to refs.
   action to a named reviewer — audit_log.actor comes from the token, not the
   request body, and the shared `MTK_API_TOKEN` no longer reaches the browser.
   Still an operator-token model, NOT session/SSO login: no password auth, no
-  browser sessions. Fine for the single-operator deployment; revisit if a
-  second operator needs self-serve access (`MTK_API_TOKEN` gates workers and
-  the extension exactly as in v0.13; leave it unset only for throwaway dev).
-- Publishing safe-guards: post upload re-verifies the offer (state +
-  expiry/recheck timestamps, §11) and the render↔approval hash binding (§17);
-  failed posts auto-retry with exponential backoff (v0.17, cap
-  `MTK_PUBLISH_MAX_RETRIES`) — past the cap, or on 409 (hash changed), the
-  post waits for operator review. Remaining exposure: the worker-host clock is
-  trusted for due/retry timing.
-- Corrections: recordable from the dashboard offer page (v0.17), affected
-  posts listed with live post IDs; scheduled captions carry a correction
-  permalink when `MTK_PUBLIC_BASE_URL` is set (§11). Not yet possible:
-  updating an ALREADY-published description (needs platform write scopes —
-  YouTube `videos.update` etc.); treat as manual follow-up for now.
+  browser sessions. Fine for the single-operator deployment.
+- Publishing safe-guards: approval-hash binding + expiry gates (v0.16),
+  auto-retry with exponential backoff capped at `MTK_PUBLISH_MAX_RETRIES`
+  (v0.17), correction notices pushed into already-published YouTube
+  descriptions by the worker sweep (v0.18 `apply_correction_notice`,
+  idempotent via `description_patched_at`). Remaining exposure: the
+  worker-host clock is trusted for due/retry timing; non-YouTube platforms
+  have no description write-back API available to us (manual follow-up).
+- Publish windows (v0.18): operator-configurable via
+  `PUT /settings/publish_windows` (defaults to a single 18:00 PKT slot);
+  the ScheduleForm renders quick-picks from the setting. Still hardcoded:
+  the display timezone is Asia/Karachi everywhere (fine for a PKT operator).
 - Extension (v0.17): configured via its options page (API URL + worker token);
   the save action surfaces 401/connection problems on the badge. Not yet:
   packaging/store hardening (icons, CSP review, MV3 store listing).
-- Analytics: pipeline metrics only (items, offers, schedules, source
-  freshness, token health). Audience metrics (views/retention/clicks per
-  video) need platform Analytics/API ingestion — planned as its own phase.
+- Backup automation (v0.18): systemd timers in `infra/systemd/` — daily
+  backup, monthly restore drill into a throwaway DB; the drill unit going red
+  means backups are unusable. Not yet: off-machine backup copy (e.g. rclone
+  to object storage) — the dumps stay on the deploy host.
+- Postiz / cross-posting service: intentionally not integrated (the plan
+  marks it optional; platform adapters cover it).
 - Analytics counts runs on one Postgres instance; no replication/HA.
 
 ## 10. Test & automation layers (v0.14)

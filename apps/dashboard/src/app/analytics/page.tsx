@@ -35,6 +35,28 @@ type Analytics = {
     item_count: number;
   }[];
   account_health: { platform: string; status: string; last_error: string | null }[];
+  metrics_totals: {
+    posts_measured: number;
+    views: number | string;
+    likes: number | string;
+    comments: number | string;
+    impressions: number | string;
+    last_captured_at: string | null;
+    published_total: number;
+  } | null;
+  content_performance: {
+    id: string;
+    platform: string;
+    offer_title: string;
+    remote_post_id: string | null;
+    views: number | null;
+    likes: number | null;
+    comments: number | null;
+    avg_watch_s: number | null;
+    captured_at: string;
+    source: string;
+    description_patched_at: string | null;
+  }[];
 };
 
 async function getAnalytics(): Promise<Analytics | null> {
@@ -64,6 +86,20 @@ const STATE_COLORS: Record<string, string> = {
 
 function n(v: number | null | undefined): string {
   return v === null || v === undefined ? "–" : String(v);
+}
+
+function big(v: number | string | null | undefined): string {
+  if (v === null || v === undefined) return "–";
+  const num = typeof v === "string" ? Number(v) : v;
+  if (!Number.isFinite(num)) return "–";
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
+  return String(num);
+}
+
+function fmtWatch(seconds: number): string {
+  const s = Math.round(seconds);
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
 export default async function AnalyticsPage() {
@@ -174,6 +210,62 @@ export default async function AnalyticsPage() {
                   ))}
                 </tbody>
               </table>
+            )}
+          </section>
+
+          <section className="card">
+            <h2>Audience reach</h2>
+            {!data.metrics_totals || data.metrics_totals.posts_measured === 0 ? (
+              <p className="muted small">
+                No audience metrics yet — the metrics worker pulls per-post numbers
+                from platform APIs once posts are live (docs/runbook.md §9).
+              </p>
+            ) : (
+              <>
+                <div className="stats">
+                  <div><strong>{big(data.metrics_totals.views)}</strong><span>total views</span></div>
+                  <div><strong>{big(data.metrics_totals.likes)}</strong><span>reactions</span></div>
+                  <div><strong>{big(data.metrics_totals.comments)}</strong><span>comments</span></div>
+                  <div>
+                    <strong>{n(data.metrics_totals.posts_measured)}</strong>
+                    <span>of {data.metrics_totals.published_total} posts measured</span>
+                  </div>
+                  <div>
+                    <strong>{data.metrics_totals.last_captured_at
+                      ? new Date(data.metrics_totals.last_captured_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })
+                      : "–"}</strong>
+                    <span>last captured (PKT)</span>
+                  </div>
+                </div>
+                {(data.content_performance ?? []).length > 0 && (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>post</th><th>platform</th><th>views</th><th>reactions</th>
+                        <th>comments</th><th>avg watch</th><th>captured</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.content_performance.map((p) => (
+                        <tr key={p.id}>
+                          <td>{p.offer_title}</td>
+                          <td>{p.platform}</td>
+                          <td>{p.views ?? "–"}</td>
+                          <td>{p.likes ?? "–"}</td>
+                          <td>{p.comments ?? "–"}</td>
+                          <td>{p.avg_watch_s != null ? fmtWatch(p.avg_watch_s) : "–"}</td>
+                          <td className="small">
+                            {new Date(p.captured_at).toLocaleDateString("en-GB", { timeZone: "Asia/Karachi" })}
+                            {p.description_patched_at && (
+                              <span className="muted"> · correction posted</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
             )}
           </section>
 

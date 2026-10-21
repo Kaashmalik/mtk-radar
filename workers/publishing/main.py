@@ -151,7 +151,55 @@ class Publisher:
                 self._report(post["id"], ok=False, detail=f"unexpected: {exc}")
 
         self.retry_failed(now)
+        self.apply_corrections(adapters)
         return published
+
+    # ------------------------------------------ §11 description patch (v0.18)
+
+    def apply_corrections(self, adapters: dict) -> int:
+        """§11 close-out: when an offer is corrected AFTER publishing, push a
+        correction notice into the already-published YouTube description
+        (platform write-back; other platforms' description-update APIs are
+        not available to us — documented gap). Idempotent: the API marks each
+        schedule description_patched_at, and the sweep skips marked posts.
+        """
+        try:
+            posts = self.api.get("/schedules", params={"state": "published", "limit": 500}).json()
+        except httpx.HTTPError as exc:
+            log.warning("correction sweep skipped (API unreachable): %s", exc)
+            return 0
+
+        adapter = adapters.get("youtube")
+        if adapter is None:
+            return 0
+
+        patched = 0
+        for post in posts:
+            if post.get("platform") != "youtube" or not post.get("remote_post_id"):
+                continue
+            if post.get("description_patched_at"):
+                continue
+            try:
+                offer = self.api.get(f"/offers/{post['offer_id']}").json()
+                note = (offer.get("correction_note") or "").strip()
+                if offer.get("state") != "corrected" or not note:
+                    continue
+                notice = (f"⚠ CORRECTION ({datetime.now(timezone.utc).date().isoformat()}): "
+                          f"{note}")
+                adapter.apply_correction_notice(post["remote_post_id"], notice)
+            except TokenExpiredError as exc:
+                log.warning("schedule %s: correction patch stopped — dead YouTube session (%s)",
+                            post["id"], exc)
+                break  # every other attempt will fail the same way this sweep
+            except (httpx.HTTPError, RuntimeError) as exc:
+                log.warning("schedule %s: correction patch failed: %s", post["id"], exc)
+                continue
+            resp = self.api.post(f"/schedules/{post['id']}/mark-description-patched",
+                                 json={"detail": "correction notice applied to description"})
+            if resp.status_code < 300:
+                patched += 1
+                log.info("schedule %s: correction notice applied to description", post["id"])
+        return patched
 
     # ------------------------------------------------- auto-retry (§17, v0.17)
 

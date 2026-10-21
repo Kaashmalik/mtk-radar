@@ -158,3 +158,75 @@ class YouTubeAdapter(PublishAdapter):
             raise TransportUnauthorized("upload rejected: token expired mid-flight")
         upload.raise_for_status()
         return str(upload.json()["id"])
+
+    # ------------------------------------------------- analytics & corrections
+
+    def access_token(self) -> str:
+        """Valid bearer token for auxiliary YouTube APIs (analytics reports).
+        Refreshes like the upload path so the metrics worker can reuse one
+        adapter instance across a sweep."""
+        self._ensure_token()
+        assert self._access
+        return self._access
+
+    def fetch_video_metrics(self, video_id: str) -> dict:
+        """Per-video audience metrics via the official YouTube Analytics API v2
+        (docs: https://developers.google.com/youtube/analytics). Requires the
+        OAuth grant to include the yt-analytics scope — without it the API
+        answers 403 and the caller should skip (documented gap, not an error)."""
+        self._ensure_token()
+        resp = self._http.get(
+            "https://youtubeanalytics.googleapis.com/v2/reports",
+            params={
+                "ids": "channel==MINE",
+                "startDate": "2000-01-01",
+                "endDate": datetime.now(timezone.utc).date().isoformat(),
+                "metrics": "views,likes,comments,shares,averageViewDuration",
+                "filters": f"video=={video_id}",
+            },
+            headers={"Authorization": f"Bearer {self._access}"},
+        )
+        if resp.status_code == 403:
+            raise PermissionError("yt-analytics scope not granted for this OAuth client")
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("rows") or []
+        if not rows:
+            return {}
+        cols = [c["name"] for c in data.get("columnHeaders", [])]
+        return dict(zip(cols, rows[0]))
+
+    def apply_correction_notice(self, video_id: str, notice: str) -> None:
+        """§11: push a correction notice into an ALREADY-published description.
+        videos.update requires the full snippet (categoryId included), so this
+        is list → merge → update; the description is replaced with current +
+        notice appended to keep the operation idempotent-safe."""
+        self._ensure_token()
+        headers = {"Authorization": f"Bearer {self._access}"}
+        listing = self._http.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "snippet", "id": video_id},
+            headers=headers,
+        )
+        if listing.status_code == 401:
+            raise TransportUnauthorized("videos.list rejected: token invalid")
+        listing.raise_for_status()
+        items = listing.json().get("items") or []
+        if not items:
+            raise RuntimeError(f"video {video_id} not visible to this credential")
+        snippet = items[0]["snippet"]
+        snippet["description"] = f"{snippet.get('description', '').rstrip()}\n\n{notice}".strip()
+
+        update = self._http.put(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "snippet"},
+            json={"id": video_id, "snippet": {
+                "title": snippet.get("title", ""),
+                "description": snippet["description"],
+                "categoryId": snippet.get("categoryId") or CATEGORY_DEVELOPER,
+            }},
+            headers=headers,
+        )
+        if update.status_code == 401:
+            raise TransportUnauthorized("videos.update rejected: token expired")
+        update.raise_for_status()

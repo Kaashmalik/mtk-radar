@@ -1,0 +1,11 @@
+[Unit]
+Description=MTK RADAR — monthly restore drill (newest dump → throwaway DB)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mtk-radar
+# restore.sh restores into a THROWAWAY database (never prod); the drill fails
+# loudly when the newest dump cannot be restored end-to-end.
+ExecStart=/bin/sh -c 'latest=$(ls -t backups/mtk_radar_*.dump 2>/dev/null | head -1); [ -n "$latest" ] || { echo "NO BACKUP DUMP FOUND — backup timer is broken"; exit 1; }; exec bash ./infra/restore.sh "$latest"'

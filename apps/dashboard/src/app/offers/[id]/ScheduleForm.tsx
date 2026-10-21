@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
 
@@ -8,19 +8,33 @@ import { clientFetch } from "@/lib/api-client";
 /**
  * Schedule a private test post (week 9). The API gates everything — approved
  * offer state, render existence, redaction review, idempotency.
+ *
+ * v0.18: operator-configured publish windows (settings.publish_windows,
+ * §17) render as quick-picks; the default stays 18:00 PKT when unset.
  */
 export default function ScheduleForm({ offerId }: { offerId: string }) {
   const router = useRouter();
   const [platform, setPlatform] = useState("youtube");
   const [privacy, setPrivacy] = useState("private");
-  const [when, setWhen] = useState(() => {
-    const d = new Date(Date.now() + 24 * 3600 * 1000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T18:00`;
-  });
+  const [windows, setWindows] = useState<string[]>([]);
+  const [when, setWhen] = useState(() => defaultWhen("18:00"));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    clientFetch("/settings/publish-windows")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        const list = b?.value?.windows;
+        if (alive && Array.isArray(list) && list.length > 0) setWindows(list);
+      })
+      .catch(() => {}); // settings are an enhancement — the form works without them
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function schedule() {
     setBusy(true);
@@ -94,8 +108,42 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
       </button>
       {msg && <span style={{ color: "#3fb950", fontSize: "0.75rem" }}>{msg}</span>}
       {error && <span style={{ color: "#f85149", fontSize: "0.75rem" }}>{error}</span>}
+      {windows.length > 0 && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", width: "100%" }}>
+          <span className="muted small">publish windows:</span>
+          {windows.map((w) => (
+            <button
+              key={w}
+              type="button"
+              onClick={() => setWhen(defaultWhen(w))}
+              style={{
+                padding: "0.15rem 0.5rem",
+                fontSize: "0.72rem",
+                borderRadius: 999,
+                border: "1px solid #30363d",
+                background: "transparent",
+                color: "#8b949e",
+                cursor: "pointer",
+              }}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/** `when` values are PKT wall-clock (the submit appends +05:00). */
+function defaultWhen(hhmm: string): string {
+  const [hh, mm] = hhmm.split(":").map(Number);
+  const pad = (x: number) => String(x).padStart(2, "0");
+  const d = new Date(Date.now() + 24 * 3600 * 1000);
+  // shift into Asia/Karachi wall-clock so the pre-filled slot matches the window
+  const pkt = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Karachi" }));
+  pkt.setHours(hh, mm, 0, 0);
+  return `${pkt.getFullYear()}-${pad(pkt.getMonth() + 1)}-${pad(pkt.getDate())}T${pad(pkt.getHours())}:${pad(pkt.getMinutes())}`;
 }
 
 const inputStyle: React.CSSProperties = {

@@ -174,6 +174,30 @@ services:
       api:
         condition: service_healthy
 
+  metrics:
+    profiles: ["workers"]
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /repo
+    volumes:
+      - ../..:/repo:ro
+    environment:
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_METRICS_INTERVAL: ${MTK_METRICS_INTERVAL:-3600}
+      # platform credentials are the SAME env references the publishing worker
+      # uses (§6) — the metrics worker only ever reads via the adapters.
+      YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
+      YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
+      YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:-}
+      FACEBOOK_PAGE_ID: ${FACEBOOK_PAGE_ID:-}
+      FACEBOOK_PAGE_ACCESS_TOKEN: ${FACEBOOK_PAGE_ACCESS_TOKEN:-}
+    command: >
+      sh -c "pip install -q httpx &&
+             python workers/metrics/main.py --api http://api:8000 --interval ${MTK_METRICS_INTERVAL:-3600}"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
   minio-data:

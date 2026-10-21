@@ -81,6 +81,50 @@ async def analytics() -> dict:
         "ORDER BY platform, status"
     )
 
+    # ---- audience reach (v0.18): latest metrics snapshot per published post.
+    metrics_totals = await pool.fetchrow(
+        """
+        WITH latest AS (
+          SELECT DISTINCT ON (pm.schedule_id)
+                 pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
+                 pm.avg_watch_s, pm.captured_at
+          FROM post_metrics pm
+          JOIN schedules s ON s.id = pm.schedule_id AND s.state = 'published'
+          ORDER BY pm.schedule_id, pm.captured_at DESC
+        )
+        SELECT COUNT(*)::int AS posts_measured,
+               COALESCE(SUM(views), 0)::bigint AS views,
+               COALESCE(SUM(likes), 0)::bigint AS likes,
+               COALESCE(SUM(comments), 0)::bigint AS comments,
+               COALESCE(SUM(impressions), 0)::bigint AS impressions,
+               MAX(captured_at) AS last_captured_at,
+               (SELECT COUNT(*) FROM schedules WHERE state = 'published')::int AS published_total
+        FROM latest
+        """
+    )
+    content_performance = await _rows(
+        pool,
+        """
+        WITH latest AS (
+          SELECT DISTINCT ON (pm.schedule_id)
+                 pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
+                 pm.avg_watch_s, pm.captured_at, pm.source
+          FROM post_metrics pm
+          ORDER BY pm.schedule_id, pm.captured_at DESC
+        )
+        SELECT s.id, s.platform, o.title AS offer_title, s.remote_post_id,
+               l.views, l.likes, l.comments, l.impressions, l.avg_watch_s,
+               l.captured_at, l.source,
+               s.description_patched_at
+        FROM schedules s
+        JOIN offers o ON o.id = s.offer_id
+        JOIN latest l ON l.schedule_id = s.id
+        WHERE s.state = 'published'
+        ORDER BY l.views DESC NULLS LAST, l.captured_at DESC
+        LIMIT 25
+        """
+    )
+
     generated_at = await pool.fetchval("SELECT now()")
 
     return {
@@ -92,5 +136,7 @@ async def analytics() -> dict:
         "publishing": dict(publishing or {}),
         "source_freshness": source_freshness,
         "account_health": account_health,
+        "metrics_totals": dict(metrics_totals or {}),
+        "content_performance": content_performance,
         "generated_at": generated_at,
     }

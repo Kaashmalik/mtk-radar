@@ -1,0 +1,13 @@
+[Unit]
+Description=MTK RADAR — nightly Postgres backup (pg_dump -Fc, retention prune)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+# WorkingDirectory must be the repo checkout (backup.sh targets the compose
+# postgres container and writes ./backups by default).
+WorkingDirectory=/opt/mtk-radar
+ExecStart=/usr/bin/env bash ./infra/backup.sh 14
+# a failed backup pages the operator, it never passes silently
+FailureAction=none

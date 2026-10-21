@@ -11,7 +11,7 @@ Rules enforced:
 - Published/failed results are recorded by the publishing worker, never assumed.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from jsonb import decode_mapping
@@ -130,13 +130,52 @@ def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[
             "privacy_default": "private"}
 
 
-def default_publish_window(now: datetime | None = None) -> str:
-    """§17: begin with a manageable cadence; never promise universal best hours.
-    Default: next 18:00 Asia/Karachi (13:00 UTC) slot from a UTC now."""
-    now = now or datetime.now(timezone.utc)
-    from datetime import timedelta
+def parse_publish_windows(value) -> list[str]:
+    """Validate a publish-windows setting: list of unique HH:MM (00–23) local
+    (Asia/Karachi) times. Returns the normalized list; raises ValueError."""
+    if not isinstance(value, dict) or not isinstance(value.get("windows"), list):
+        raise ValueError("publish_windows must be {\"windows\": [\"HH:MM\", …]}")
+    out: list[str] = []
+    for w in value["windows"]:
+        parts = str(w).split(":")
+        if len(parts) != 2 or not all(p.isdigit() and len(p) == 2 for p in parts):
+            raise ValueError(f"invalid publish window {w!r} — want HH:MM")
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"invalid publish window {w!r} — out of range")
+        norm = f"{hour:02d}:{minute:02d}"
+        if norm not in out:
+            out.append(norm)
+    if not out:
+        raise ValueError("publish_windows needs at least one HH:MM time")
+    return out
 
-    candidate = now.replace(hour=13, minute=0, second=0, microsecond=0)  # 18:00 PKT
-    if candidate <= now:
-        candidate = candidate + timedelta(days=1)
-    return candidate.isoformat()
+
+def default_publish_window(now: datetime | None = None,
+                           windows: list[str] | None = None) -> str:
+    """§17: "begin with a manageable cadence; never promise universal best
+    hours." Picks the next occurrence among the operator's configured publish
+    windows (settings.publish_windows, Asia/Karachi local = UTC+5) — falling
+    back to the single 18:00 PKT default when unset."""
+    now = now or datetime.now(timezone.utc)
+    PKT = timezone(timedelta(hours=5))
+    local = now.astimezone(PKT)
+
+    times: list[tuple[int, int]] = []
+    if windows:
+        for w in windows:
+            hh, mm = w.split(":")
+            times.append((int(hh), int(mm)))
+    else:
+        times = [(18, 0)]
+
+    candidates: list[datetime] = []
+    for offset in (0, 1):  # today, then tomorrow
+        day = (local + timedelta(days=offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        for hh, mm in times:
+            c = day + timedelta(hours=hh, minutes=mm)
+            if c > local:
+                candidates.append(c)
+    nxt = min(candidates).astimezone(timezone.utc)
+    return nxt.isoformat()
