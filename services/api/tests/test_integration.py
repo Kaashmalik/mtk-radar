@@ -482,6 +482,43 @@ def test_resume_refuses_an_offer_whose_freshness_lapsed(client):
     assert resumed.json()["state"] == "scheduled"
 
 
+def test_recheck_deadline_is_capped_by_the_offer_expiry(client):
+    """An offer expiring in hours must not get a two-day recheck deadline."""
+    import uuid
+    oid, _, eid, fields, _ = _verification_fixture(client)
+    expiry = datetime.now(timezone.utc) + timedelta(hours=6)
+    patched = client.patch(f"/offers/{oid}", json={"expires_at": expiry.isoformat()})
+    assert patched.status_code == 200, patched.text
+    assert client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    }).status_code == 201
+    promoted = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert promoted.status_code == 200, promoted.text
+
+    row = _run("SELECT recheck_at, expires_at FROM offers WHERE id = $1",
+               uuid.UUID(oid))[0]
+    assert row["recheck_at"] is not None
+    assert row["recheck_at"] <= row["expires_at"]
+    assert row["recheck_at"] > datetime.now(timezone.utc)
+
+
+def test_recheck_deadline_keeps_the_policy_for_a_distant_expiry(client):
+    import uuid
+    oid, _, eid, fields, _ = _verification_fixture(client)
+    expiry = datetime.now(timezone.utc) + timedelta(days=30)
+    assert client.patch(f"/offers/{oid}", json={
+        "expires_at": expiry.isoformat(),
+    }).status_code == 200
+    assert client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    }).status_code == 201
+    assert client.post(f"/offers/{oid}/transition",
+                       json={"to": "verified"}).status_code == 200
+    row = _run("SELECT recheck_at FROM offers WHERE id = $1", uuid.UUID(oid))[0]
+    now = datetime.now(timezone.utc)
+    assert now + timedelta(days=1) < row["recheck_at"] < now + timedelta(days=3)
+
+
 def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
     import hashlib
     import uuid

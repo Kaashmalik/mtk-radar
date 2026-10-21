@@ -472,8 +472,14 @@ async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Reque
     recheck_clause = ""
     params: list = [offer_id, target]
     if target == "verified":
+        # §11: a recheck deadline must not outlive the offer it describes. A
+        # two-day policy on an offer expiring in six hours is not a deadline;
+        # it guarantees the recheck is late.
         params.append(RECHECK_INTERVAL)
-        recheck_clause = f", recheck_at = now() + ${len(params)}::text::interval"
+        recheck_clause = (
+            f", recheck_at = LEAST(now() + ${len(params)}::text::interval,"
+            " COALESCE(expires_at, 'infinity'::timestamptz))"
+        )
 
     row = await pool.fetchrow(
         f"UPDATE offers SET state = ${2}::offer_state{recheck_clause}, updated_at = now() "

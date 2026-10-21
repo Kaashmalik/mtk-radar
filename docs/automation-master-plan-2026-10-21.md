@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** twelve WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation and freshness checks at capture/resume. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md) and [slice 12](implementation-wp01-slice12-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** thirteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume and a recheck deadline capped by the offer's expiry. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md) and [slice 13](implementation-wp01-slice13-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -654,13 +654,18 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Refuse a new capture for a verified offer whose recheck is overdue or which has expired, instead of relying on the state sweep; a fresh offer still records normally.
 - [x] Revalidate the offer (state, expiry, recheck) when a paused post is resumed, reporting the specific freshness reason, so the upload check is no longer the first line of defence. 2 new tests; full suite **604 passed, zero skips**. See [twelfth-slice checkpoint](implementation-wp01-slice12-2026-10-21.md).
 
+**Completed — thirteenth slice, recheck deadline capped by expiry:**
+
+- [x] Set `recheck_at = LEAST(now() + policy, COALESCE(expires_at, 'infinity'))` on the transition to `verified`, so an offer expiring inside the policy window is never described as fresh past its own end; absent and distant expiries keep the two-day policy.
+- [x] Leave existing rows untouched (no backfill) and apply the rule at the next verification; an already-expired offer verified anyway receives a past deadline and is immediately stale at the slice-12 boundaries. 2 new tests; full suite **606 passed, zero skips**. See [thirteenth-slice checkpoint](implementation-wp01-slice13-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
 - [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
 - [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
 - [ ] Detect terms that changed inside a review's validity window and re-read the attested reference; today only the clock is checked, not the document.
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
-- [ ] Add risk-based freshness checks: `recheck_at` is still a fixed two-day interval and can outlive the offer's expiry; derive it from the expiry and the offer's risk, then revalidate/refuse at the remaining boundaries as that policy lands.
+- [ ] Make the freshness policy itself risk-based: `recheck_at` is still a fixed two-day interval for every offer (now capped by expiry, but not derived from offer type, provider trust or claim volatility), and a verification does not refuse an already-expired offer.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
 - [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary; no bulk production migration or legacy queue review has been performed.
 - [ ] Deploy migration/API/worker together with owner approval and prove live acquisition/release behavior through the remaining safety gates; local tests are not production deployment.
@@ -852,7 +857,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation and freshness at capture/resume implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume and an expiry-capped recheck deadline implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1183,6 +1188,36 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Next smallest task:** derive `recheck_at` from the offer it describes —
   `min(now + policy, expires_at)` — so a recheck deadline cannot outlive the
   expiry.
+
+#### 21 October 2026, 22:40 UTC — WP01 thirteenth slice: expiry-capped recheck
+
+- **Status:** implemented; locally VERIFIED for the deadline scope only. Whole
+  WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `5807251`).
+- **Changes:** the transition to `verified` writes
+  `recheck_at = LEAST(now() + policy, COALESCE(expires_at, 'infinity'))`, so an
+  offer expiring inside the two-day window gets its expiry as the deadline
+  instead of a window it cannot honour; absent and distant expiries keep the
+  policy. No migration, no backfill — existing rows are unchanged and the rule
+  applies at the next verification. See
+  [thirteenth-slice checkpoint](implementation-wp01-slice13-2026-10-21.md).
+- **Failing first:** at `5807251` an offer expiring in six hours is verified with
+  `recheck_at = now() + 2 days`; the new cap assertion fails.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **606 passed, 26 warnings, zero skips**, exit 0 (was 604; +2 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0.
+- **Not closed, and deliberately not ticked:** the interval is still one fixed
+  two-day policy and does not vary with offer type, provider trust or claim
+  volatility; existing rows are not backfilled; verification still accepts an
+  already-expired offer (it yields an immediately stale record); terms-change
+  detection, claim-free page coverage, non-symmetric acquisition identity,
+  semantic applicable-terms coverage, downstream invalidation and legacy review
+  remain open.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database was used; no network fetch was performed.
+- **Next smallest task:** report which stored `verified` offers would fail today's
+  gate, as the inventory a legacy reclassification decision needs.
 
 ## 13. Coding-model execution guide
 
