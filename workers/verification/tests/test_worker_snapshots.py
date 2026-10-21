@@ -27,6 +27,7 @@ SOURCE = {
     "id": "source-1", "provider": "Acme", "canonical_domain": "example.com",
     "adapter": "page_watch", "enabled": True, "trust_tier": "A_provider_owned",
     "config": {"url": URL},
+    "tos_reviewed_at": "2026-10-20T09:00:00+00:00",
 }
 OFFER = {"id": "offer-1", "provider": "Acme", "state": "evidence_needed"}
 
@@ -94,6 +95,7 @@ def test_single_untruncated_snapshot_and_bound_evidence_id(monkeypatch):
     evidence, extraction, transition = [payload for _, payload in posts]
     assert len(TEXT) > 2000 and evidence["captured_content"] == TEXT
     assert evidence["supported_fields"] == ["eligibility", "promo_code"]
+    assert evidence["source_id"] == "source-1"
     assert extraction["fields"]["promo_code"]["evidence_id"] == "evidence-1"
     assert "complete" not in extraction
     assert transition["to"] == "verified"
@@ -116,6 +118,20 @@ def test_long_document_is_sectioned_not_refused(monkeypatch):
     from document_sections import split_sections
     assert extraction["coverage"]["sections_total"] == len(split_sections(long_text))
     assert extraction["coverage"]["sections_total"] > 1
+
+
+def test_source_without_a_tos_review_is_not_read():
+    worker = object.__new__(worker_main.Verifier)
+    worker._get = lambda path: [{**SOURCE, "tos_reviewed_at": None}]
+    assert worker._official_pages("Acme", build_allowlist([SOURCE])) == []
+
+
+def test_attested_source_yields_its_url_and_identity():
+    worker = object.__new__(worker_main.Verifier)
+    worker._get = lambda path: [SOURCE]
+    assert worker._official_pages("Acme", build_allowlist([SOURCE])) == [
+        (URL, "source-1"),
+    ]
 
 
 def test_document_above_the_ceiling_is_refused(monkeypatch):
@@ -269,7 +285,7 @@ def test_verification_fetch_uses_the_egress_policy(monkeypatch):
     worker = object.__new__(worker_main.Verifier)
     worker.fetcher = object()
     worker.policy = EgressPolicy()
-    worker._official_pages = lambda *args: [URL]
+    worker._official_pages = lambda *args: [(URL, "source-1")]
     worker._post = post
     worker.verify_offer(OFFER, build_allowlist([SOURCE]))
     assert isinstance(seen["policy"], EgressPolicy)
@@ -314,7 +330,7 @@ def test_conflict_is_retained_when_best_page_lacks_that_field(monkeypatch):
     worker = object.__new__(worker_main.Verifier)
     worker.fetcher = object()
     worker.policy = EgressPolicy()
-    worker._official_pages = lambda *args: pages
+    worker._official_pages = lambda *args: [(u, "source-1") for u in pages]
     worker._post = post
     worker.verify_offer(OFFER, build_allowlist([SOURCE]))
     extraction = next(payload for path, payload in posts if path.endswith("/extraction"))

@@ -91,6 +91,9 @@ services:
       # WP01: promotion refuses machine evidence without an extraction coverage
       # record. Unset defaults to required; 0 is a legacy-migration opt-out.
       MTK_REQUIRE_EXTRACTION_COVERAGE: ${MTK_REQUIRE_EXTRACTION_COVERAGE:-1}
+      # WP01: evidence ingest refuses machine collection for a source without a
+      # recorded terms-of-service review. Unset defaults to required.
+      MTK_REQUIRE_TOS_ATTESTATION: ${MTK_REQUIRE_TOS_ATTESTATION:-1}
       # public origin of the dashboard — enables §11 correction links in
       # scheduled captions (schedules_state.platform_metadata)
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}

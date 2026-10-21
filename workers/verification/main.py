@@ -60,6 +60,11 @@ FETCH_IDENTITY = os.environ.get("MTK_FETCH_IDENTITY", "verification-worker")
 #: a signature attests the key holder produced the record, not that the fetch
 #: happened (see services/api/fetch_attestation.py).
 FETCH_SIGNING_KEY = os.environ.get("MTK_FETCH_SIGNING_KEY", "").strip()
+#: A source may only be read when a human has recorded that its terms permit
+#: automated reading. robots.txt is checked separately at fetch time.
+TOS_ATTESTATION_REQUIRED = os.environ.get(
+    "MTK_REQUIRE_TOS_ATTESTATION", "1",
+).strip().lower() not in {"0", "false", "no", "off"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("verification")
@@ -156,7 +161,7 @@ class Verifier:
         #: Sections examined per evidence row. The API recomputes this from the
         #: stored snapshot text, so a truncated read is rejected, not trusted.
         sections_by_evidence: dict[str, int] = {}
-        for url in official_urls:
+        for url, source_id in official_urls:
             # Permission first (master plan §3): a page may only be read when
             # the host's robots policy is readable and permits it. The decision
             # is recorded with the evidence, not inferred later.
@@ -197,7 +202,8 @@ class Verifier:
                 item.text, item.url,
             )
             payload = {
-                "url": item.url, "captured_content": item.text,
+                "url": item.url, "source_id": source_id,
+                "captured_content": item.text,
                 "excerpt": item.title, "official": True,
                 "supported_fields": sorted(fields),
             }
@@ -283,10 +289,14 @@ class Verifier:
             cache[host] = check_robots(host, fetcher=self.fetcher, policy=self.policy)
         return cache[host]
 
-    def _official_pages(self, provider: str, allowlist: dict) -> list[str]:
-        """Registered page_watch URLs belonging to the provider's domains."""
+    def _official_pages(self, provider: str, allowlist: dict) -> list[tuple[str, str]]:
+        """Registered page_watch URLs and their source id, for the provider.
+
+        A source without a recorded terms-of-service review is not read: robots
+        permission is necessary but is not contractual consent (slice 10).
+        """
         sources = self._get("/sources")
-        urls = []
+        pages: list[tuple[str, str]] = []
         for s in sources:
             if not s.get("enabled") or s.get("trust_tier") != "A_provider_owned":
                 continue
@@ -297,12 +307,18 @@ class Verifier:
                 continue
             if (s.get("provider") or "").strip().lower() != provider.strip().lower():
                 continue
+            if TOS_ATTESTATION_REQUIRED and not s.get("tos_reviewed_at"):
+                log.warning(
+                    "source %s (%s) has no recorded terms-of-service review — "
+                    "not fetching", s.get("id"), s.get("provider"),
+                )
+                continue
             url = config.get("url") or s.get("canonical_domain")
             if not url:
                 continue
             if domain_ok(allowlist, provider, url):
-                urls.append(url)
-        return urls
+                pages.append((url, s["id"]))
+        return pages
 
 
 def main() -> None:

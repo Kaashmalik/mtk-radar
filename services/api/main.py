@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
@@ -30,7 +30,7 @@ from analytics_api import router as analytics_router
 from renders_api import router as renders_router
 from schedules_api import router as schedules_router
 from settings_api import router as settings_router
-from schemas import ItemIn, PollResult, SourceIn
+from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
@@ -108,7 +108,8 @@ async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
         """
         SELECT id, provider, canonical_domain, account_handle, category, adapter,
                config, enabled, polling_cadence::text AS polling_cadence,
-               country_scope, trust_tier::text AS trust_tier, last_checked_at
+               country_scope, trust_tier::text AS trust_tier, last_checked_at,
+               tos_reviewed_at, tos_reviewer, tos_reference
         FROM sources
         WHERE ($1::boolean IS NULL OR enabled = $1)
         ORDER BY trust_tier, provider
@@ -156,6 +157,38 @@ async def create_source(source: SourceIn) -> dict:
         source.enabled,
     )
     return {"id": row["id"], "created": True}
+
+
+@app.post("/sources/{source_id}/tos-review")
+async def record_tos_review(source_id: uuid.UUID, review: TosReviewIn,
+                            request: Request) -> dict:
+    """Record a human decision that automated reading of this source is permitted.
+
+    robots.txt is checked separately at fetch time; this is the contractual
+    permission. The reviewer is bound from the authenticated token when present,
+    otherwise the explicit body field is the recorded identity (service callers).
+    Re-recording replaces the previous attestation; the audit log keeps history.
+    """
+    actor = api_hardening.effective_reviewer(request, review.reviewer, require=True)
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        UPDATE sources
+        SET tos_reviewed_at = clock_timestamp(), tos_reviewer = $2, tos_reference = $3
+        WHERE id = $1
+        RETURNING id, tos_reviewed_at, tos_reviewer, tos_reference
+        """,
+        source_id, actor, review.reference,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="source not found")
+    await pool.execute(
+        "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
+        "VALUES ($1, $2, 'sources', $3, $4::jsonb)",
+        actor, "tos_review:recorded", source_id,
+        _json({"reference": review.reference}),
+    )
+    return dict(row)
 
 
 @app.post("/sources/{source_id}/poll-result")

@@ -308,6 +308,8 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
     provenance = await _validate_provenance(
         pool, offer["provider"], evidence, raw_hash,
     )
+    if provenance is not None and _require_tos_attestation():
+        await _require_source_tos_attestation(pool, evidence)
 
     evidence_reviewer = effective_reviewer(request, evidence.reviewer)
     row = await pool.fetchrow(
@@ -995,6 +997,36 @@ def _require_extraction_coverage() -> bool:
     """Machine evidence must record what the extractor examined (slice 9)."""
     value = os.environ.get("MTK_REQUIRE_EXTRACTION_COVERAGE", "1")
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _require_tos_attestation() -> bool:
+    """Machine reading needs contractual permission, not just robots.txt."""
+    value = os.environ.get("MTK_REQUIRE_TOS_ATTESTATION", "1")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+async def _require_source_tos_attestation(pool, evidence: EvidenceIn) -> None:
+    """Refuse machine-collected evidence for a source with no recorded review."""
+    if evidence.source_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "machine-collected evidence must name the registered source "
+                "whose terms were reviewed"
+            ),
+        )
+    row = await pool.fetchrow(
+        "SELECT tos_reviewed_at FROM sources WHERE id = $1", evidence.source_id,
+    )
+    if row is None or row["tos_reviewed_at"] is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "machine collection of this source requires a recorded "
+                "terms-of-service review; a reviewer must record one at "
+                "POST /sources/{id}/tos-review before evidence is stored"
+            ),
+        )
 
 
 async def _coverage_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
