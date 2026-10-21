@@ -21,8 +21,11 @@ FILE="$BACKUP_DIR/mtk_radar_$STAMP.dump"
 
 mkdir -p "$BACKUP_DIR"
 
+# write to a temp file first so a failed pg_dump never leaves an empty
+# *.dump behind (restore drills and retention would treat it as valid)
 echo "backing up postgres from $CONTAINER -> $FILE"
-docker exec "$CONTAINER" pg_dump -U mtk -Fc mtk_radar > "$FILE"
+docker exec "$CONTAINER" pg_dump -U mtk -Fc mtk_radar > "$FILE.tmp"
+mv "$FILE.tmp" "$FILE"
 
 # retention: prune dumps older than KEEP_DAYS
 find "$BACKUP_DIR" -name 'mtk_radar_*.dump' -mtime +"$KEEP_DAYS" -delete

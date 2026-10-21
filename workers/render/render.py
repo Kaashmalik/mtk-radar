@@ -9,7 +9,7 @@ import os
 import shlex
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Final, Optional
 
 from presets import Preset
@@ -30,8 +30,9 @@ def build_ffmpeg_cmd(
     - video/narration/captions are RELATIVE paths (run with cwd=project dir)
       so subtitles filters never need OS-specific escaping.
     """
-    if captions and (Path(captions).is_absolute() or Path(video).is_absolute()):
-        raise ValueError("use relative asset paths; run with cwd=project folder")
+    for asset in (video, output, captions, narration):
+        if asset and (Path(asset).is_absolute() or PureWindowsPath(asset).is_absolute()):
+            raise ValueError("use relative asset paths; run with cwd=project folder")
 
     cmd = [FFMPEG, "-y", "-i", video]
     audio_map = "0:a?"

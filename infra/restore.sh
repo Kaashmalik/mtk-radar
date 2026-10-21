@@ -14,6 +14,19 @@ CONTAINER="${MTK_PG_CONTAINER:-mtk-radar-postgres-1}"
 
 [ -f "$DUMP" ] || { echo "dump not found: $DUMP" >&2; exit 1; }
 
+# safety: db names are interpolated into SQL below — restrict the charset
+if ! [[ "$TARGET_DB" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "invalid target db name: '$TARGET_DB' (allowed: letters, digits, underscore)" >&2
+  exit 1
+fi
+# safety: refuse to drop the production database unless explicitly forced
+if [ "$TARGET_DB" = "mtk_radar" ] && [ "${MTK_RESTORE_FORCE:-0}" != "1" ]; then
+  echo "refusing to DROP the production database 'mtk_radar'." >&2
+  echo "restore into a throwaway instead (default: mtk_radar_restore)," >&2
+  echo "or set MTK_RESTORE_FORCE=1 to override (runbook §restore)." >&2
+  exit 1
+fi
+
 echo "restoring $DUMP -> database '$TARGET_DB' (throwaway drill unless you know better)"
 docker exec "$CONTAINER" psql -U mtk -d postgres -c "DROP DATABASE IF EXISTS $TARGET_DB"
 docker exec "$CONTAINER" psql -U mtk -d postgres -c "CREATE DATABASE $TARGET_DB"

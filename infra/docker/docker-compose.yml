@@ -16,7 +16,12 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ../../services/api/db/migrations:/docker-entrypoint-initdb.d:ro
+      # NOTE: no /docker-entrypoint-initdb.d mount — schema is owned by the
+      # migration runner (`pnpm migrate` / services/api/db_migrate.py), which
+      # records applied migrations in schema_migrations. Feeding initdb.d
+      # directly would apply migrations that never get recorded, so a later
+      # `pnpm migrate` re-runs them and fails on "already exists".
+      # On first boot run: docker compose exec api python db_migrate.py
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mtk -d mtk_radar"]
       interval: 5s
