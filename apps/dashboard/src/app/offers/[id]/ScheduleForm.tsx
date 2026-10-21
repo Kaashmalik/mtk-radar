@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { clientFetch } from "@/lib/api-client";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 /**
  * Schedule a private test post (week 9). The API gates everything — approved
@@ -28,7 +28,7 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
     setMsg(null);
     try {
       // interpret the input as Asia/Karachi (+05:00) — display timezone per §17
-      const res = await fetch(`${API}/offers/${offerId}/schedules`, {
+      const res = await clientFetch(`/offers/${offerId}/schedules`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

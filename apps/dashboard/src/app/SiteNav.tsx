@@ -6,7 +6,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { clientFetch } from "@/lib/api-client";
 
 const LINKS: [string, string][] = [
   ["/", "Inbox"],
@@ -22,7 +22,7 @@ function HealthDot() {
     let alive = true;
     const check = async () => {
       try {
-        const res = await fetch(`${API}/health`, { signal: AbortSignal.timeout(4000) });
+        const res = await clientFetch("/health", { signal: AbortSignal.timeout(4000) });
         if (alive) setUp(res.ok);
       } catch {
         if (alive) setUp(false);

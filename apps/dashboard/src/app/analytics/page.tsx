@@ -5,8 +5,8 @@
  */
 
 import "./styles.css";
+import { apiFetch } from "@/lib/api";
 
-const API = process.env.API_URL ?? "http://localhost:8000";
 
 type Analytics = {
   items_total: number;
@@ -39,7 +39,7 @@ type Analytics = {
 
 async function getAnalytics(): Promise<Analytics | null> {
   try {
-    const res = await fetch(`${API}/analytics`, { cache: "no-store" });
+    const res = await apiFetch(`/analytics`, { cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch {

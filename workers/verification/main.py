@@ -24,6 +24,13 @@ import time
 
 import httpx
 
+
+_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+
+def _api_auth_headers() -> dict:
+    """Authorization headers for the API when MTK_API_TOKEN is configured
+    (services/api/api_hardening.py). Empty dict = open local dev API."""
+    return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -44,7 +51,7 @@ log = logging.getLogger("verification")
 class Verifier:
     def __init__(self, api_url: str = API_URL):
         self.api_url = api_url.rstrip("/")
-        self.client = httpx.Client(timeout=30)
+        self.client = httpx.Client(timeout=30, headers=_api_auth_headers())
         self.fetcher = Fetcher(timeout=25.0, min_interval=3.0)
 
     # ------------------------------------------------------------- API I/O

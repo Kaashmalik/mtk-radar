@@ -1,6 +1,7 @@
 import "./styles.css";
 import GenerateScriptButton from "./GenerateScriptButton";
 import ScheduleForm from "./ScheduleForm";
+import { apiFetch } from "@/lib/api";
 
 /**
  * Offer workspace (weeks 5-6): verified offer → script versions, command-card
@@ -8,7 +9,6 @@ import ScheduleForm from "./ScheduleForm";
  * Week 11 (§18): correction log linked to the affected videos/posts.
  */
 
-const API = process.env.API_URL ?? "http://localhost:8000";
 
 type Evidence = {
   id: string;
@@ -72,7 +72,7 @@ export const dynamic = "force-dynamic";
 
 async function getOffer(id: string): Promise<OfferDetail | null> {
   try {
-    const res = await fetch(`${API}/offers/${id}`, { cache: "no-store" });
+    const res = await apiFetch(`/offers/${id}`, { cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -82,7 +82,7 @@ async function getOffer(id: string): Promise<OfferDetail | null> {
 
 async function getScripts(id: string): Promise<ScriptRow[]> {
   try {
-    const res = await fetch(`${API}/offers/${id}/scripts`, { cache: "no-store" });
+    const res = await apiFetch(`/offers/${id}/scripts`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -92,7 +92,7 @@ async function getScripts(id: string): Promise<ScriptRow[]> {
 
 async function getCaptures(id: string): Promise<CaptureRow[]> {
   try {
-    const res = await fetch(`${API}/captures?offer_id=${id}`, { cache: "no-store" });
+    const res = await apiFetch(`/captures?offer_id=${id}`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -102,7 +102,7 @@ async function getCaptures(id: string): Promise<CaptureRow[]> {
 
 async function getRenders(id: string): Promise<RenderRow[]> {
   try {
-    const res = await fetch(`${API}/renders?offer_id=${id}`, { cache: "no-store" });
+    const res = await apiFetch(`/renders?offer_id=${id}`, { cache: "no-store" });
     if (!res.ok) return [];
     const rows: RenderRow[] = await res.json();
     return rows.map((r) => ({
@@ -142,7 +142,7 @@ type ImpactRow = {
 
 async function getCorrections(id: string): Promise<CorrectionRow[]> {
   try {
-    const res = await fetch(`${API}/offers/${id}/corrections`, { cache: "no-store" });
+    const res = await apiFetch(`/offers/${id}/corrections`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -152,7 +152,7 @@ async function getCorrections(id: string): Promise<CorrectionRow[]> {
 
 async function getImpact(id: string): Promise<ImpactRow | null> {
   try {
-    const res = await fetch(`${API}/offers/${id}/impact`, { cache: "no-store" });
+    const res = await apiFetch(`/offers/${id}/impact`, { cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch {

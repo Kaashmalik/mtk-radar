@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
+import api_hardening
 from captures_api import router as captures_router
 from jsonb import decode_mapping
 from normalize import canonicalize_url, hash_parts
@@ -47,6 +48,10 @@ app.include_router(renders_router)
 app.include_router(schedules_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
+
+# Optional bearer-token auth (MTK_API_TOKEN) + structured request logging.
+# Unset token = open local dev; set it for anything reachable beyond localhost.
+api_hardening.register(app)
 
 
 @app.on_event("startup")

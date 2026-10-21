@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { clientFetch } from "@/lib/api-client";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const REVIEWER = "kashif"; // TODO(week-5): real session identity
 
 type Props = { offerId: string; state: string };
@@ -18,7 +18,7 @@ export default function OfferActions({ offerId, state }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/offers/${offerId}/transition`, {
+      const res = await clientFetch(`/offers/${offerId}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ to, reviewer: REVIEWER, note }),

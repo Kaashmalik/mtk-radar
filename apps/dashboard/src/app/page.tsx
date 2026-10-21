@@ -4,6 +4,7 @@
  */
 
 import "./styles.css";
+import { apiFetch } from "@/lib/api";
 
 type ItemRow = {
   id: string;
@@ -19,7 +20,7 @@ type ItemRow = {
 
 async function getHealth(): Promise<{ status?: string }> {
   try {
-    const res = await fetch(`${process.env.API_URL ?? "http://localhost:8000"}/health`, {
+    const res = await apiFetch(`/health`, {
       cache: "no-store",
     });
     return await res.json();
@@ -30,8 +31,7 @@ async function getHealth(): Promise<{ status?: string }> {
 
 async function getInbox(): Promise<ItemRow[]> {
   try {
-    const res = await fetch(
-      `${process.env.API_URL ?? "http://localhost:8000"}/items?processed=false&limit=50`,
+    const res = await apiFetch(`/items?processed=false&limit=50`,
       { cache: "no-store" },
     );
     if (!res.ok) return [];

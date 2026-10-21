@@ -29,6 +29,13 @@ from pathlib import Path
 
 import httpx
 
+
+_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+
+def _api_auth_headers() -> dict:
+    """Authorization headers for the API when MTK_API_TOKEN is configured
+    (services/api/api_hardening.py). Empty dict = open local dev API."""
+    return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 
@@ -55,7 +62,7 @@ log = logging.getLogger("publishing")
 
 class Publisher:
     def __init__(self, api_url: str = API_URL_DEFAULT):
-        self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"))
+        self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"), headers=_api_auth_headers())
 
     # ------------------------------------------------------------ adapters
 

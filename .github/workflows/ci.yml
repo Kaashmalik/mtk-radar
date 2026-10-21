@@ -19,7 +19,9 @@ jobs:
           pip install -r services/api/requirements.txt
           pip install -r workers/requirements.txt
           pip install -r workers/publishing/requirements.txt
-          pip install pytest
+          pip install pytest ruff
+      - name: Lint (syntax errors + undefined/unused names — catches broken SQL-call classes)
+        run: ruff check --select E9,F63,F7,F82 services workers packages
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests
@@ -41,4 +43,5 @@ jobs:
         run: pnpm exec tsc --noEmit -p packages/offer-schema
       - name: Typecheck dashboard
         run: pnpm exec tsc --noEmit -p apps/dashboard
-      # TODO: `next build` once CI deps/settings for the dashboard are settled
+      - name: Dashboard production build
+        run: pnpm --dir apps/dashboard build

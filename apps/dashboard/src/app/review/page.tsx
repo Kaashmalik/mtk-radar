@@ -1,5 +1,6 @@
 import "./styles.css";
 import OfferActions from "./OfferActions";
+import { apiFetch } from "@/lib/api";
 
 /**
  * Review desk (Weeks 3-4): the reviewer queue.
@@ -7,7 +8,6 @@ import OfferActions from "./OfferActions";
  * enforces gates server-side); stale offers surface the correction workflow.
  */
 
-const API = process.env.API_URL ?? "http://localhost:8000";
 
 type OfferRow = {
   id: string;
@@ -37,7 +37,7 @@ export const dynamic = "force-dynamic";
 
 async function getOffers(): Promise<OfferRow[]> {
   try {
-    const res = await fetch(`${API}/offers?limit=100`, { cache: "no-store" });
+    const res = await apiFetch(`/offers?limit=100`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -47,7 +47,7 @@ async function getOffers(): Promise<OfferRow[]> {
 
 async function getStale(): Promise<StaleRow[]> {
   try {
-    const res = await fetch(`${API}/offers/stale`, { cache: "no-store" });
+    const res = await apiFetch(`/offers/stale`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {

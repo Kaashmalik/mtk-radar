@@ -150,6 +150,10 @@ measure (docs/first-offer-recipe.md drives the steps):
   worker fails with "render file not on this host" when scaled out.
 - TTS narration is per-segment (`workers/render/narration.py`); a single mixed
   narration track is still pending.
-- Reviewer identity is an operator string (no auth layer yet) — fine for the
-  single-operator phase; revisit before multi-operator.
+- Reviewer identity is an operator string (no session/SSO yet) — fine for the
+  single-operator deployment. Transport-level protection exists: set
+  `MTK_API_TOKEN` and every route except `/health` requires
+  `Authorization: Bearer <token>` (services/api/api_hardening.py). The
+  dashboard and workers attach the token automatically when the env is set;
+  compose forwards it. Leave it unset only for throwaway local dev.
 - Analytics counts runs on one Postgres instance; no replication/HA.

@@ -20,8 +20,16 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import os
 import httpx
 
+
+_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+
+def _api_auth_headers() -> dict:
+    """Authorization headers for the API when MTK_API_TOKEN is configured
+    (services/api/api_hardening.py). Empty dict = open local dev API."""
+    return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 API_URL_DEFAULT = "http://localhost:8000"
 INTERVAL_S = 300
 TOKEN_WARN_DAYS = 3
@@ -83,7 +91,7 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=INTERVAL_S)
     args = parser.parse_args()
 
-    client = httpx.Client(timeout=60, base_url=args.api.rstrip("/"))
+    client = httpx.Client(timeout=60, base_url=args.api.rstrip("/"), headers=_api_auth_headers())
     if args.once:
         run_once(client)
         log.info("monitor sweep complete")

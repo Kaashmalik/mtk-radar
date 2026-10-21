@@ -1,5 +1,6 @@
 import "./styles.css";
 import ScheduleActions from "./ScheduleActions";
+import { apiFetch } from "@/lib/api";
 
 /**
  * Content calendar (week 9, master plan §17): per-platform schedules displayed
@@ -9,7 +10,6 @@ import ScheduleActions from "./ScheduleActions";
  * expiry surfaced so the operator can recover dead sessions.
  */
 
-const API = process.env.API_URL ?? "http://localhost:8000";
 const DISPLAY_TZ = "Asia/Karachi";
 
 type ScheduleRow = {
@@ -32,7 +32,7 @@ export const dynamic = "force-dynamic";
 
 async function getSchedules(): Promise<ScheduleRow[]> {
   try {
-    const res = await fetch(`${API}/schedules?limit=200`, { cache: "no-store" });
+    const res = await apiFetch(`/schedules?limit=200`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -53,7 +53,7 @@ type AccountRow = {
 
 async function getAccounts(): Promise<AccountRow[]> {
   try {
-    const res = await fetch(`${API}/platform-accounts`, { cache: "no-store" });
+    const res = await apiFetch(`/platform-accounts`, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch {
