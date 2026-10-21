@@ -32,3 +32,7 @@ __pycache__/
 
 # Backups (infra/backup.sh output) — sensitive, never commit
 backups/
+
+# Agent tooling + stray npm lockfile (this repo uses pnpm)
+.serena/
+package-lock.json
