@@ -97,6 +97,11 @@ class NoScopeYouTube:
         raise PermissionError("yt-analytics scope not granted for this OAuth client")
 
 
+class FakeInstagram:
+    def insights(self, media_id):
+        return {"reach": 900, "plays": 640, "likes": 21, "comments": 3}
+
+
 def _worker(posts, adapters):
     return metrics_main.MetricsWorker(adapters=adapters, api_url="http://fake")
 
@@ -149,3 +154,14 @@ def test_api_unreachable_sweep_is_nonfatal():
     w = _worker([], {})
     w.api = DeadAPI()
     assert w.run_once() == 0
+
+
+def test_instagram_insights_map_to_the_snapshot():
+    posts = [{"id": "sch-ig", "platform": "instagram", "remote_post_id": "media-1"}]
+    api = FakeAPI(posts)
+    w = _worker(posts, {"instagram": FakeInstagram()})
+    w.api = api
+    assert w.run_once() == 1
+    body = api.written[0][1]
+    assert body["platform"] == "instagram"
+    assert body["views"] == 640 and body["impressions"] == 900 and body["likes"] == 21

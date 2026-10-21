@@ -460,3 +460,57 @@ def test_analytics_content_performance_and_patch_marker(auth_client):
     mine = [p for p in listing if str(p["id"]) == str(sid)]
     assert mine and mine[0]["description_patched_at"] is not None, \
         "the worker sweep reads this field to stay idempotent"
+
+
+# --------------------------------------- v0.19: render-candidate automation queue
+
+def test_render_candidates_gate_script_capture_and_render(auth_client):
+    """The queue that lets the render worker serve itself: an offer becomes a
+    candidate when it has a script + a redaction-reviewed capture and NO
+    render for that exact script version."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Queue Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+
+    # script + reviewed capture, but the offer is still a candidate → no render yet
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown) "
+         "VALUES ($1, 1, '# queue script') ON CONFLICT DO NOTHING", offer_id)
+    version_hash = script_version_hash("# queue script")
+    _run("INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+         "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE)", offer_id)
+
+    # the offer must be in a video-allowed state to be a candidate
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
+
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in candidates if c["offer_id"] == offer["id"]]
+    assert len(mine) == 1, "verified + script + reviewed capture = ready to render"
+    assert mine[0]["script_version"] == 1
+    assert mine[0]["capture_id"]
+
+    # a render for the same script version disqualifies the offer
+    created = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": "projects/x/render.mp4", "script_version": 1,
+        "script_version_hash": version_hash,
+    })
+    assert created.status_code == 201, created.text
+
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in candidates if c["offer_id"] == offer["id"]]
+    assert mine == [], "a rendered script version must not queue again"
+
+    # an unreviewed capture never queues
+    other = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Queue Co 2", "category": "domains", "offer_type": "coupon",
+    }).json()
+    other_id = __import__("uuid").UUID(other["id"])
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown) "
+         "VALUES ($1, 1, '# unreviewed') ON CONFLICT DO NOTHING", other_id)
+    _run("INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+         "VALUES ($1, 'projects/x/cap2.mp4', '[]'::jsonb, FALSE)", other_id)
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", other_id)
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    assert not [c for c in candidates if c["offer_id"] == other["id"]], \
+        "footage that failed redaction review must never reach the renderer"

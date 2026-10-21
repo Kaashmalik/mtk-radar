@@ -33,7 +33,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.18.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.19.0")
 
 app.add_middleware(
     CORSMiddleware,

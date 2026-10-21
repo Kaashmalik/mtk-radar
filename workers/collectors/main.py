@@ -14,6 +14,7 @@ Design:
   so last_checked_at stays accurate for source-health monitoring.
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -37,6 +38,13 @@ from source_adapters import (  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # optional; raises rate limits
+MTK_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+
+
+def _api_auth_headers() -> dict:
+    """Authorization headers for the API when MTK_API_TOKEN is configured
+    (services/api/api_hardening.py) — same contract as the other workers."""
+    return {"Authorization": f"Bearer {MTK_API_TOKEN}"} if MTK_API_TOKEN else {}
 HOUSEKEEPING_INTERVAL = 60  # seconds between due-source sweeps
 
 logging.basicConfig(
@@ -107,7 +115,7 @@ def collect(source: dict, fetcher: Fetcher) -> list[dict]:
 class Collector:
     def __init__(self, api_url: str = API_URL):
         self.api_url = api_url.rstrip("/")
-        self.client = httpx.Client(timeout=30)
+        self.client = httpx.Client(timeout=30, headers=_api_auth_headers())
         self.fetcher = Fetcher()
         self.next_due: dict[str, float] = {}
 
@@ -168,7 +176,19 @@ class Collector:
 
 
 def main() -> None:
-    Collector().run_forever()
+    parser = argparse.ArgumentParser(description="MTK RADAR collector worker")
+    parser.add_argument("--once", action="store_true",
+                        help="run one due-source sweep and exit (same contract "
+                             "as monitor/publishing/metrics; a scheduled "
+                             "`--once` cron is the deployment default)")
+    parser.add_argument("--api", default=API_URL)
+    args = parser.parse_args()
+
+    collector = Collector(args.api)
+    if args.once:
+        asyncio.run(collector.sweep())
+        return
+    collector.run_forever()
 
 
 if __name__ == "__main__":

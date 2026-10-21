@@ -49,6 +49,7 @@ from object_storage import materialize  # noqa: E402
 
 from platforms import (  # noqa: E402
     FacebookAdapter,
+    InstagramAdapter,
     NotConfiguredError,
     OAuthConfig,
     TikTokAdapter,
@@ -106,6 +107,17 @@ class Publisher:
                     )
                 else:
                     log.warning("Facebook account registered but FACEBOOK_* env missing")
+            elif platform == "instagram":
+                user_id = os.environ.get("INSTAGRAM_USER_ID", "")
+                token = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
+                if user_id and token:
+                    adapters[platform] = InstagramAdapter(
+                        user_id=user_id, access_token=token,
+                        account_id=account["id"],
+                    )
+                else:
+                    log.warning("Instagram account registered but INSTAGRAM_* env missing "
+                                "(requires a professional account bound to a Page)")
             elif platform == "tiktok":
                 cfg = TikTokConfig.from_env()
                 if cfg:
@@ -330,6 +342,12 @@ class Publisher:
         meta = post.get("metadata")
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
         meta.setdefault("title", f"{post.get('offer_title', 'MTK RADAR AI')}")
+        if platform == "instagram":
+            # Instagram's Graph API fetches the media itself — it needs a
+            # PUBLIC https URL, not a file on this host (§6).
+            public_url = public_media_url(video_path)
+            if public_url:
+                meta["public_url"] = public_url
 
         try:
             remote_id = adapter.upload(
@@ -400,6 +418,22 @@ def _is_due(local_time: str | None, now: datetime) -> bool:
 def _account_hint(adapters: dict, platform: str) -> str | None:
     adapter = adapters.get(platform)
     return getattr(adapter, "account_id", None)
+
+
+def public_media_url(ref: str) -> str | None:
+    """Public https URL for a managed media ref (Instagram/TikTok need the
+    platform to FETCH the file, not receive an upload). MTK_PUBLIC_MEDIA_BASE_URL
+    points at the public origin of the object store (CDN / public bucket /
+    reverse proxy). None when unset — the adapter then states the requirement.
+    """
+    base = os.environ.get("MTK_PUBLIC_MEDIA_BASE_URL", "").strip().rstrip("/")
+    if not base or not ref:
+        return None
+    for scheme in ("s3://", "local://"):
+        if ref.startswith(scheme):
+            key = ref[len(scheme):].lstrip("/")
+            return f"{base}/{key}" if key else None
+    return None
 
 
 def main() -> None:

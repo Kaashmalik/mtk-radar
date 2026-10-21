@@ -11,7 +11,15 @@ test("app shell: brand, primary nav, and a green API health dot", async ({ page 
   await page.goto("/");
 
   await expect(page.locator(".brand")).toContainText("MTK RADAR");
-  for (const label of ["Inbox", "Review desk", "Calendar", "Analytics"]) {
+  for (const label of [
+    "Inbox",
+    "Review desk",
+    "Queue",
+    "Calendar",
+    "Analytics",
+    "Connections",
+    "Settings",
+  ]) {
     await expect(page.locator(".site-nav a", { hasText: label })).toBeVisible();
   }
 
@@ -31,5 +39,21 @@ test("inbox and analytics load real data from the API", async ({ page }) => {
   await page.goto("/analytics");
   await expect(page.locator("h1")).toContainText("Analytics");
   // the page renders aggregate sections once the API responds
+  await expect(page.locator("main")).not.toContainText("unreachable");
+});
+
+test("operator console: queue, connections and settings render live data", async ({ page }) => {
+  // v0.19: the pages where the operator adds keys, connects accounts and
+  // watches the automation — they must work against the real API.
+  await page.goto("/queue");
+  await expect(page.locator("h1")).toContainText("Queue");
+  await expect(page.locator("main")).not.toContainText("unreachable");
+
+  await page.goto("/connections");
+  await expect(page.locator("h1")).toContainText("Connections");
+  await expect(page.locator("main")).not.toContainText("unreachable");
+
+  await page.goto("/settings");
+  await expect(page.locator("h1")).toContainText("Settings");
   await expect(page.locator("main")).not.toContainText("unreachable");
 });

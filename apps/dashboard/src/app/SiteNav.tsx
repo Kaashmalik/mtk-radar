@@ -14,8 +14,11 @@ import IdentityBadge from "./IdentityBadge";
 const LINKS: [string, string][] = [
   ["/", "Inbox"],
   ["/review", "Review desk"],
+  ["/queue", "Queue"],
   ["/calendar", "Calendar"],
   ["/analytics", "Analytics"],
+  ["/connections", "Connections"],
+  ["/settings", "Settings"],
 ];
 
 function HealthDot() {

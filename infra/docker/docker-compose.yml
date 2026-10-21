@@ -157,6 +157,67 @@ services:
       api:
         condition: service_healthy
 
+  collectors:
+    profiles: ["workers"]
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /repo
+    volumes:
+      - ../..:/repo:ro
+    environment:
+      API_URL: http://api:8000
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    command: >
+      sh -c "pip install -q httpx feedparser &&
+             python workers/collectors/main.py --api http://api:8000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  batch:
+    profiles: ["workers"]
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /repo
+    volumes:
+      - ../..:/repo:ro
+    environment:
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_BATCH_INTERVAL: ${MTK_BATCH_INTERVAL:-900}
+    command: >
+      sh -c "pip install -q httpx &&
+             python workers/batch/main.py --api http://api:8000 --interval ${MTK_BATCH_INTERVAL:-900}"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  render:
+    profiles: ["workers"]
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /repo
+    volumes:
+      - ../..:/repo
+    environment:
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
+      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
+      MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+      MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+    # ffmpeg is installed on first start; the render queue then serves itself
+    command: >
+      sh -c "apt-get update -qq && apt-get install -y -qq ffmpeg > /dev/null &&
+             pip install -q httpx &&
+             python workers/render/main.py --sweep --watch --api http://api:8000 --out ./projects"
+    depends_on:
+      api:
+        condition: service_healthy
+
   monitor:
     profiles: ["workers"]
     image: python:3.12-slim

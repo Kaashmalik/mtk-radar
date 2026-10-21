@@ -32,9 +32,19 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 
 from platforms.facebook import FacebookAdapter, TokenExpiredError  # noqa: E402
+from platforms.instagram import InstagramAdapter  # noqa: E402
 from platforms.youtube import OAuthConfig, YouTubeAdapter  # noqa: E402
 
 from platform_metrics import parse_graph_insights, parse_youtube_analytics  # noqa: E402
+
+
+def _int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
 
@@ -75,6 +85,12 @@ class MetricsWorker:
             adapters["facebook"] = FacebookAdapter(page_id=page_id, page_access_token=token)
         else:
             log.warning("FACEBOOK_* env missing — facebook metrics disabled")
+        ig_user = os.environ.get("INSTAGRAM_USER_ID", "")
+        ig_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
+        if ig_user and ig_token:
+            adapters["instagram"] = InstagramAdapter(user_id=ig_user, access_token=ig_token)
+        else:
+            log.warning("INSTAGRAM_* env missing — instagram metrics disabled")
         return adapters
 
     def run_once(self) -> int:
@@ -139,6 +155,17 @@ class MetricsWorker:
             return parse_graph_insights({"data": [
                 {"name": k, "values": [{"value": v}]} for k, v in payload.items()
             ]})
+        if platform == "instagram":
+            payload = adapter.insights(video_id)
+            if not payload:
+                return None
+            return {
+                "views": _int(payload.get("plays")),
+                "likes": _int(payload.get("likes")),
+                "comments": _int(payload.get("comments")),
+                "impressions": _int(payload.get("reach")),
+                "avg_watch_s": None,
+            }
         return None
 
     def run_forever(self, interval: int) -> None:

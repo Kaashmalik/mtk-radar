@@ -39,12 +39,20 @@ from object_storage import capture_key, make_from_env  # noqa: E402
 from redact_local import scan as scan_secrets  # slim copy of the API's scanner
 
 API_URL_DEFAULT = "http://localhost:8000"
+MTK_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+
+
+def _api_auth_headers() -> dict:
+    """Authorization headers for the API when MTK_API_TOKEN is configured
+    (services/api/api_hardening.py) — same contract as the other workers."""
+    return {"Authorization": f"Bearer {MTK_API_TOKEN}"} if MTK_API_TOKEN else {}
 
 
 class CaptureSession:
     def __init__(self, offer_id: str, api_url: str, out_dir: Path):
         self.offer_id = offer_id
-        self.api = httpx.Client(timeout=30, base_url=api_url.rstrip("/"))
+        self.api = httpx.Client(timeout=30, base_url=api_url.rstrip("/"),
+                                headers=_api_auth_headers())
         self.out_dir = out_dir / f"{offer_id}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.step_log: list[dict] = []

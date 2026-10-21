@@ -133,6 +133,8 @@ python workers/collectors/main.py --once
 python workers/monitor/main.py --once
 python workers/publishing/main.py --once
 python workers/metrics/main.py --once     # v0.18: audience metrics sweep
+python workers/batch/main.py --once       # v0.19: script generation + readiness
+python workers/render/main.py --sweep    # v0.19: render the ready queue
 ```
 
 Failed posts auto-retry with exponential backoff (base × 2^attempts, cap
@@ -209,6 +211,22 @@ before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
 rows to refs.
 
 ## 9. Known gaps (explicit, not hidden)
+- **Automation (v0.19)**: the pipeline now runs itself around the human gates
+  — the batch worker generates scripts for earned offers and reports
+  readiness, the render service renders the ready queue (script +
+  redaction-reviewed capture, idempotent per script version), and the
+  collector/publishing/metrics/monitor services run continuously under
+  compose. The human gates are deliberate and stay human: evidence
+  verification (§3), capture recording (§4), redaction review (§4), publish
+  approval (§17). Operator console: **Connections** (register accounts and
+  see where each credential lives), **Settings** (publish windows),
+  **Queue** (what is rendering, what is waiting on you). Go-live procedure:
+  `docs/go-live-checklist.md`.
+- **Instagram (v0.19)**: adapter implemented (Graph content publishing:
+  container → transcoding wait → publish) and wired into publishing + metrics.
+  Needs a professional (business/creator) account bound to a Page AND a
+  public https media URL (`MTK_PUBLIC_MEDIA_BASE_URL`) — the Graph API
+  fetches the video itself.
 - **Audience analytics (v0.18)**: the metrics worker pulls per-video views,
   likes, comments and watch time from the official YouTube Analytics API and
   Meta Graph video_insights into `post_metrics` (one snapshot per UTC day,

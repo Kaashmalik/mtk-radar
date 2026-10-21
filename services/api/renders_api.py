@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import db
+from schedules_state import script_version_hash
 from state import can_generate_video
 
 router = APIRouter(tags=["renders"])
@@ -99,6 +100,66 @@ async def list_renders(
         limit,
     )
     return [dict(r) for r in rows]
+
+
+@router.get("/render-candidates")
+async def render_candidates(limit: int = Query(default=50, le=200)) -> list[dict]:
+    """Offers that are READY to render (v0.19 automation queue).
+
+    A candidate has: an approved-for-video/verified offer, a generated
+    script, and a capture session that passed redaction review — but no
+    render registered for that exact script version yet. The render worker
+    polls this endpoint (`workers/render/main.py --sweep`) and the dashboard
+    shows it as a work queue, so rendering no longer needs a human at a
+    terminal. Idempotency: a render for the same script version (same
+    content hash) disqualifies the offer.
+    """
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        WITH latest_script AS (
+          SELECT DISTINCT ON (offer_id) offer_id, version, markdown
+          FROM offer_scripts ORDER BY offer_id, version DESC
+        )
+        SELECT o.id AS offer_id, o.title, o.provider, o.state::text AS state,
+               ls.version AS script_version, ls.markdown,
+               c.id AS capture_id, c.video_path, c.created_at AS capture_created_at
+        FROM offers o
+        JOIN latest_script ls ON ls.offer_id = o.id
+        JOIN LATERAL (
+          SELECT c.* FROM capture_sessions c
+          WHERE c.offer_id = o.id AND c.redaction_reviewed
+          ORDER BY c.created_at DESC LIMIT 1
+        ) c ON TRUE
+        WHERE o.state IN ('verified', 'approved_for_video')
+        ORDER BY c.created_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    candidates = [dict(r) for r in rows]
+    if not candidates:
+        return []
+
+    # the approval hash is derived from the script CONTENT (never stored), so
+    # it is computed here and compared against registered renders
+    offer_ids = [c["offer_id"] for c in candidates]
+    rendered = await pool.fetch(
+        "SELECT offer_id, script_version_hash FROM renders WHERE offer_id = ANY($1::uuid[])",
+        offer_ids,
+    )
+    done = {(r["offer_id"], r["script_version_hash"]) for r in rendered
+            if r["script_version_hash"]}
+
+    out: list[dict] = []
+    for candidate in candidates:
+        version_hash = script_version_hash(candidate.get("markdown") or "")
+        if (candidate["offer_id"], version_hash) in done:
+            continue  # this exact script version is already rendered
+        candidate.pop("markdown", None)  # content never leaves the server
+        candidate["script_version_hash"] = version_hash
+        out.append(candidate)
+    return out
 
 
 def _json(value) -> str:

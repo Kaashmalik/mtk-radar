@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import time
 import shutil
 from pathlib import Path
 
@@ -51,6 +52,8 @@ from presets import get_preset  # noqa: E402
 
 API_URL_DEFAULT = "http://localhost:8000"
 VIDEO_STATES = ("verified", "approved_for_video", "published")
+# the same override the render/narration modules honour (FFMPEG_PATH=/path/to/ffmpeg)
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("render")
@@ -243,23 +246,91 @@ class RenderJob:
                 log.error("render registration failed: %s %s", resp.status_code, resp.text)
 
 
+def sweep(api_url: str, out_root: Path, preset_keys: list[str],
+          skip_narration: bool, limit: int = 10) -> int:
+    """Auto-render the ready queue (v0.19).
+
+    The API's /render-candidates lists offers that have a script + a
+    redaction-reviewed capture but no render for that exact script version.
+    Each candidate is rendered through the SAME code path as a manual run
+    (RenderJob.run) — so automation cannot produce a different artifact than
+    an operator would. One bad candidate never stops the sweep.
+    """
+    client = httpx.Client(timeout=60, base_url=api_url.rstrip("/"),
+                          headers=_api_auth_headers())
+    try:
+        candidates = client.get("/render-candidates", params={"limit": limit}).json()
+    except httpx.HTTPError as exc:
+        log.error("render sweep skipped (API unreachable): %s", exc)
+        return 0
+
+    rendered = 0
+    for candidate in candidates:
+        offer_id = candidate["offer_id"]
+        log.info("render sweep: rendering offer %s (script v%s)", offer_id,
+                 candidate.get("script_version"))
+        job = RenderJob(offer_id, api_url, out_root)
+        try:
+            job.run(
+                capture_video=None,
+                preset_keys=preset_keys,
+                skip_narration=skip_narration,
+                capture_id=candidate.get("capture_id"),
+            )
+            rendered += 1
+        except SystemExit as exc:
+            log.error("render sweep: %s skipped — %s", offer_id, exc)
+        except Exception as exc:  # noqa: BLE001 — one candidate never stops the sweep
+            log.exception("render sweep: %s failed: %s", offer_id, exc)
+    log.info("render sweep complete: %d/%d rendered", rendered, len(candidates))
+    return rendered
+
+
+def _require_ffmpeg() -> str:
+    """Preflight: the ffmpeg binary this host will use. Honours FFMPEG_PATH
+    (the same override the render/narration modules read) and names the binary
+    it looked for, so a wrong PATH never hides the real knob."""
+    if shutil.which(FFMPEG_PATH) is None:
+        raise SystemExit(
+            f"ffmpeg not found ('{FFMPEG_PATH}') — install it or set FFMPEG_PATH"
+        )
+    return FFMPEG_PATH
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MTK RADAR render pipeline (FFmpeg)")
-    parser.add_argument("--offer", required=True)
+    parser.add_argument("--offer", default=None, help="render one offer (omit with --sweep)")
+    parser.add_argument("--sweep", action="store_true",
+                        help="render every ready candidate (script + reviewed capture)")
     parser.add_argument("--capture", default=None, help="capture session UUID (enables redaction gating)")
     parser.add_argument("--video", default=None, help="path to the capture video file")
     parser.add_argument("--presets", default="landscape,vertical", help="comma list: landscape,vertical")
     parser.add_argument("--api", default=API_URL_DEFAULT)
     parser.add_argument("--out", default="./projects")
     parser.add_argument("--skip-narration", action="store_true", help="never call TTS")
+    parser.add_argument("--limit", type=int, default=10, help="max candidates per sweep")
+    parser.add_argument("--watch", action="store_true",
+                        help="keep sweeping every --interval seconds (service mode)")
+    parser.add_argument("--interval", type=int, default=900, help="seconds between sweeps")
     args = parser.parse_args()
 
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg not found on PATH — install it or set FFMPEG_PATH")
+    _require_ffmpeg()
+
+    presets = [k.strip() for k in args.presets.split(",") if k.strip()]
+
+    if args.sweep:
+        if not args.watch:
+            sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit)
+            return
+        while True:  # service mode: the render queue is self-serving
+            sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit)
+            time.sleep(max(30, args.interval))
+    if not args.offer:
+        raise SystemExit("pass --offer <OFFER_ID> or --sweep")
 
     RenderJob(args.offer, args.api, Path(args.out)).run(
         capture_video=args.video,
-        preset_keys=[k.strip() for k in args.presets.split(",") if k.strip()],
+        preset_keys=presets,
         skip_narration=args.skip_narration,
         capture_id=args.capture,
     )
