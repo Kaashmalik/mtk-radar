@@ -36,7 +36,14 @@ class GatePool:
 
     def __init__(self, offer_type="coupon"):
         self.offer_type = offer_type
-        self.extraction = {"fields": json.dumps(fields()), "conflicts": "[]", "complete": True}
+        self.extraction = {
+            "fields": json.dumps(fields()), "conflicts": "[]", "complete": True,
+            # WP01 slice 8: machine evidence must record what was examined.
+            "coverage": json.dumps({
+                "version": "paragraph-groups/1", "sections_total": 1,
+                "max_section_chars": 6000, "evidence_ids": [str(EVIDENCE_ID)],
+            }),
+        }
         self.evidence = [{
             "id": EVIDENCE_ID, "url": URL, "official": True, "domain_ok": True,
             "captured_content": TEXT,
@@ -136,7 +143,10 @@ class TestOfferTypeContract:
 
     def run_gate(self, offer_type, payload, text=TEXT):
         pool = GatePool(offer_type)
-        pool.extraction = {"fields": json.dumps(payload), "conflicts": "[]", "complete": True}
+        pool.extraction = {
+            **pool.extraction,
+            "fields": json.dumps(payload), "conflicts": "[]", "complete": True,
+        }
         pool.evidence[0]["captured_content"] = text
         pool.evidence[0]["content_hash"] = hashlib.sha256(text.encode()).hexdigest()
         return gate(pool)
@@ -277,3 +287,43 @@ class TestFetchProvenanceGate:
         pool = GatePool()
         pool.evidence[0].update(fetch_signature=None)
         gate(pool)  # must not raise while the deployment opts out
+
+
+class TestExtractionCoverageGate:
+    """WP01 slice 8: no record of what was examined, no verification."""
+
+    def test_missing_coverage_blocks_promotion(self):
+        pool = GatePool()
+        pool.extraction["coverage"] = None
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "coverage record" in exc.value.detail
+
+    def test_coverage_must_list_the_snapshots_the_claims_use(self):
+        pool = GatePool()
+        pool.extraction["coverage"] = json.dumps({
+            "version": "paragraph-groups/1", "sections_total": 1,
+            "max_section_chars": 6000, "evidence_ids": [str(uuid.uuid4())],
+        })
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "does not include" in exc.value.detail
+
+    def test_reviewer_attested_extraction_is_exempt(self):
+        pool = GatePool()
+        pool.extraction["coverage"] = None
+        pool.evidence[0]["reviewer"] = "Kashi"
+        gate(pool)  # must not raise: a human attested the snapshot
+
+    def test_coverage_requirement_is_on_by_default(self, monkeypatch):
+        monkeypatch.delenv("MTK_REQUIRE_EXTRACTION_COVERAGE", raising=False)
+        from offers_api import _require_extraction_coverage
+        assert _require_extraction_coverage() is True
+
+    def test_coverage_opt_out_allows_legacy_rows(self, monkeypatch):
+        monkeypatch.setenv("MTK_REQUIRE_EXTRACTION_COVERAGE", "0")
+        pool = GatePool()
+        pool.extraction["coverage"] = None
+        gate(pool)
