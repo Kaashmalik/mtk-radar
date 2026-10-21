@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 import db
 from api_hardening import effective_reviewer
+from offer_freshness import freshness_problem
 from schedules_state import (
     PLATFORMS,
     ScheduleTransitionError,
@@ -299,6 +300,16 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
             status_code=409,
             detail="script changed since approval — reapproval required before resume (§17)",
         )
+    # §11: an offer that expired or missed its recheck while the post was paused
+    # must be re-verified, not quietly re-queued; the upload recheck is the last
+    # line, not the only one.
+    if not await _revalidate_offer(pool, schedule["offer_id"]):
+        problem = await freshness_problem(pool, schedule["offer_id"]) \
+            or "offer state no longer allows publishing"
+        raise HTTPException(
+            status_code=409,
+            detail=f"resume blocked: {problem} (§11 freshness)",
+        )
     row = await pool.fetchrow(
         "UPDATE schedules SET state = 'scheduled', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
@@ -505,7 +516,7 @@ async def _current_script_hash(pool, offer_id: uuid.UUID) -> Optional[str]:
 
 
 async def _revalidate_offer(pool, offer_id: uuid.UUID) -> bool:
-    """§17: revalidate offer validity before upload — expiry + recheck state."""
+    """§17: offer still fresh for scheduling, resume or upload — expiry, recheck state."""
     row = await pool.fetchrow(
         """
         SELECT (expires_at IS NULL OR expires_at > now())

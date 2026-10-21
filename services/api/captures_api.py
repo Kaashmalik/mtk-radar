@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 import db
 from api_hardening import effective_reviewer
+from offer_freshness import freshness_problem
 from redact import scan as scan_secrets
 from state import can_generate_video
 
@@ -48,6 +49,14 @@ async def record_capture(offer_id: uuid.UUID, capture: CaptureIn) -> dict:
         raise HTTPException(
             status_code=409,
             detail=f"capture blocked: offer state is '{offer['state']}' (§3)",
+        )
+    # Recording footage is acting on the claims: never for an offer past its
+    # expiry or recheck deadline, even if the state sweep has not run yet.
+    problem = await freshness_problem(pool, offer_id)
+    if problem:
+        raise HTTPException(
+            status_code=409,
+            detail=f"capture blocked: {problem} (§11 freshness)",
         )
 
     # Server-side scan over the serialized step log. Findings NEVER contain values.
