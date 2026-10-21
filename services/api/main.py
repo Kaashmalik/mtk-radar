@@ -21,6 +21,7 @@ import api_hardening
 from captures_api import router as captures_router
 import health_api
 from health_api import router as health_router
+from locks_api import router as locks_router
 from jsonb import decode_mapping
 from normalize import canonicalize_url, hash_parts
 from offers_api import router as offers_router
@@ -35,7 +36,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.20.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.22.0")
 health_api.APP_VERSION = app.version
 
 
@@ -73,6 +74,7 @@ app.include_router(renders_router)
 app.include_router(schedules_router)
 app.include_router(settings_router)
 app.include_router(health_router)
+app.include_router(locks_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 

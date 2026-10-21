@@ -14,6 +14,7 @@ import json
 from fastapi import APIRouter
 
 import db
+from cache import ANALYTICS_KEY, cache_get_json, cache_set_json
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -25,6 +26,15 @@ async def _rows(pool, query: str):
 @router.get("")
 async def analytics() -> dict:
     pool = db.get()
+
+    # v0.22: the aggregate read is the one hot path the dashboard hits on
+    # every refresh — serve it from the optional Redis cache when available.
+    # A cache miss, an unreachable Redis or a disabled cache all fall through
+    # to a fresh computation.
+    cached = await cache_get_json(ANALYTICS_KEY)
+    if cached is not None:
+        cached["cached"] = True
+        return cached
 
     funnel = await _rows(pool, "SELECT COUNT(*) AS n FROM items")
     offers_by_state = await _rows(
@@ -127,7 +137,7 @@ async def analytics() -> dict:
 
     generated_at = await pool.fetchval("SELECT now()")
 
-    return {
+    body = {
         "items_total": funnel[0]["n"] if funnel else 0,
         "offers_by_state": offers_by_state,
         "verification": dict(verification or {}),
@@ -139,4 +149,7 @@ async def analytics() -> dict:
         "metrics_totals": dict(metrics_totals or {}),
         "content_performance": content_performance,
         "generated_at": generated_at,
+        "cached": False,
     }
+    await cache_set_json(ANALYTICS_KEY, body)
+    return body

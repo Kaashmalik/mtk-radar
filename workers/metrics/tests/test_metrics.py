@@ -162,6 +162,6 @@ def test_instagram_insights_map_to_the_snapshot():
     w = _worker(posts, {"instagram": FakeInstagram()})
     w.api = api
     assert w.run_once() == 1
-    body = api.written[0][1]
+    body = [b for path, b in api.written if path.endswith("/metrics")][0]
     assert body["platform"] == "instagram"
     assert body["views"] == 640 and body["impressions"] == 900 and body["likes"] == 21

@@ -145,8 +145,42 @@ class Publisher:
 
     # ---------------------------------------------------------------- sweep
 
+    def _acquire_sweep_lock(self, name: str, ttl_s: int = 300) -> bool:
+        """Claim the sweep lock so a second publisher/metrics instance cannot
+        work the same queue (v0.22). Fails OPEN: if the lock endpoint is
+        unavailable the sweep continues — the API's own state transitions
+        remain the real gate."""
+        try:
+            res = self.api.post("/locks/acquire",
+                                 json={"name": name, "holder": f"{name}-worker", "ttl_s": ttl_s})
+        except Exception as exc:  # noqa: BLE001 — a lock must never stop the sweep
+            log.warning("sweep lock unavailable (%s) — continuing without it", exc)
+            return True
+        if res.status_code >= 300:
+            log.warning("sweep lock refused (%s) — continuing without it", res.status_code)
+            return True
+        # a response without the flag is treated as "proceed" (fail-open)
+        acquired = bool(res.json().get("acquired", True))
+        if not acquired:
+            log.info("another worker holds the %s lock — this sweep is skipped", name)
+        return acquired
+
+    def _release_sweep_lock(self, name: str) -> None:
+        try:
+            self.api.post("/locks/release", json={"name": name})
+        except Exception:  # noqa: BLE001 — the lock expires on its own
+            pass
+
     def run_once(self) -> int:
         now = datetime.now(timezone.utc)
+        if not self._acquire_sweep_lock("publishing"):
+            return 0
+        try:
+            return self._sweep(now)
+        finally:
+            self._release_sweep_lock("publishing")
+
+    def _sweep(self, now: datetime) -> int:
         adapters = self.build_adapters()
 
         posts = self.api.get("/schedules", params={"state": "scheduled", "limit": 200}).json()

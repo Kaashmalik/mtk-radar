@@ -29,7 +29,22 @@ for arg in "$@"; do
 done
 
 PG_NAME="mtk-verify-pg"
-PG_PORT="${MTK_VERIFY_PG_PORT:-55499}"
+
+# first free port from a start point (a busy port would make the whole run
+# look broken for reasons that have nothing to do with the code)
+pick_port() {
+  python3 - "$1" << 'PY'
+import socket, sys
+start = int(sys.argv[1])
+for candidate in range(start, start + 50):
+    with socket.socket() as s:
+        s.settimeout(0.2)
+        if s.connect_ex(("127.0.0.1", candidate)) != 0:
+            print(candidate)
+            break
+PY
+}
+PG_PORT="${MTK_VERIFY_PG_PORT:-$(pick_port 55499)}"
 PG_URL="postgresql://mtk:mtk@localhost:${PG_PORT}/mtk_verify"
 VENV="${MTK_VERIFY_VENV:-/tmp/opencode/verify-venv}"
 
@@ -126,18 +141,6 @@ if [ "$RUN_E2E" = "1" ]; then
 
   # pick free ports — the dashboard inlines the API URL at build time, so the
   # API port must be known BEFORE the build
-  pick_port() {
-    python3 - "$1" << 'PY'
-import socket, sys
-start = int(sys.argv[1])
-for candidate in range(start, start + 50):
-    with socket.socket() as s:
-        s.settimeout(0.2)
-        if s.connect_ex(("127.0.0.1", candidate)) != 0:
-            print(candidate)
-            break
-PY
-  }
   API_PORT="$(pick_port 8000)"
   DASH_PORT="$(pick_port 3000)"
   echo "  api on ${API_PORT}, dashboard on ${DASH_PORT}"

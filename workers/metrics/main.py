@@ -94,7 +94,40 @@ class MetricsWorker:
             log.warning("INSTAGRAM_* env missing — instagram metrics disabled")
         return adapters
 
+    def _acquire_sweep_lock(self, name: str, ttl_s: int = 300) -> bool:
+        """One metrics sweep at a time (v0.22) — two instances would pull the
+        same platform numbers twice. Fails OPEN when the lock endpoint is
+        unavailable."""
+        try:
+            res = self.api.post("/locks/acquire",
+                                 json={"name": name, "holder": f"{name}-worker", "ttl_s": ttl_s})
+        except Exception as exc:  # noqa: BLE001 — a lock must never stop the sweep
+            log.warning("sweep lock unavailable (%s) — continuing without it", exc)
+            return True
+        if res.status_code >= 300:
+            log.warning("sweep lock refused (%s) — continuing without it", res.status_code)
+            return True
+        # a response without the flag is treated as "proceed" (fail-open)
+        acquired = bool(res.json().get("acquired", True))
+        if not acquired:
+            log.info("another worker holds the %s lock — this sweep is skipped", name)
+        return acquired
+
+    def _release_sweep_lock(self, name: str) -> None:
+        try:
+            self.api.post("/locks/release", json={"name": name})
+        except Exception:  # noqa: BLE001 — the lock expires on its own
+            pass
+
     def run_once(self) -> int:
+        if not self._acquire_sweep_lock("metrics"):
+            return 0
+        try:
+            return self._sweep()
+        finally:
+            self._release_sweep_lock("metrics")
+
+    def _sweep(self) -> int:
         try:
             posts = self.api.get("/schedules", params={"state": "published", "limit": 200}).json()
         except httpx.HTTPError as exc:

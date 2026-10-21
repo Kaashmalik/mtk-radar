@@ -1,0 +1,84 @@
+"""Worker locks (v0.22): two publishers must never work the same queue.
+
+The API side: a lock is taken if it is free or expired, refused while a live
+holder has it, and released explicitly. The worker side: a refused lock
+skips the sweep (the other instance is doing the work), while an
+UNREACHABLE lock endpoint must fail OPEN — losing the lock must never stop
+publishing.
+"""
+
+import importlib.util
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+_spec = importlib.util.spec_from_file_location(
+    "mtk_publishing_main", Path(__file__).resolve().parent.parent / "main.py")
+pub = importlib.util.module_from_spec(_spec)
+sys.modules["mtk_publishing_main"] = pub
+_spec.loader.exec_module(pub)
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+class LockingAPI:
+    """API that grants or refuses the sweep lock."""
+
+    def __init__(self, acquired=True):
+        self.acquired = acquired
+        self.calls = []
+
+    def post(self, path, json=None):
+        self.calls.append((path, json))
+        if path == "/locks/acquire":
+            return FakeResponse({"acquired": self.acquired, "name": json["name"]})
+        return FakeResponse({"released": True})
+
+    def get(self, path, params=None):
+        return FakeResponse([])
+
+
+def test_lock_is_acquired_before_a_sweep_and_released_after():
+    api = LockingAPI(acquired=True)
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = api
+    worker.build_adapters = lambda: {}
+    worker._sweep = lambda now: 0
+
+    worker.run_once()
+    paths = [c[0] for c in api.calls]
+    assert paths[0] == "/locks/acquire", "the lock must be taken BEFORE the sweep"
+    assert paths[-1] == "/locks/release", "and released afterwards"
+
+
+def test_a_refused_lock_skips_the_sweep():
+    api = LockingAPI(acquired=False)
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = api
+    swept = []
+    worker._sweep = lambda now: swept.append(1) or 0
+
+    assert worker.run_once() == 0
+    assert swept == [], "the other instance is doing the work — do not duplicate it"
+
+
+def test_an_unreachable_lock_endpoint_fails_open():
+    class DeadAPI:
+        def post(self, path, json=None):
+            raise RuntimeError("api down")
+
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = DeadAPI()
+    swept = []
+    worker._sweep = lambda now: swept.append(1) or 0
+
+    assert worker.run_once() == 0
+    assert swept == [1], "losing the lock must never stop publishing"

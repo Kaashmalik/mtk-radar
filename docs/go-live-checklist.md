@@ -58,6 +58,9 @@ Services (compose file `infra/docker/docker-compose.yml`):
 | `publishing` | uploads due posts, retries, correction write-back | approval only |
 | `metrics` | pulls audience numbers per post | no |
 
+Redis is optional: it caches the dashboard's aggregate read for 30 s. If it
+is not running, everything still works (fresh numbers on every request).
+
 **Human gates that stay human (by design):** evidence verification (§3),
 capture recording (§4), redaction review (§4), publish approval (§17).
 

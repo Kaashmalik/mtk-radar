@@ -230,6 +230,7 @@ from offers_api import router as _offers_router
 from renders_api import router as _renders_router
 from schedules_api import router as _schedules_router
 from health_api import router as _health_router
+from locks_api import router as _locks_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
 from schedules_state import script_version_hash
@@ -288,7 +289,7 @@ def auth_client(client):
         await db.close()
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
-              _settings_router, _analytics_router, _health_router):
+              _settings_router, _analytics_router, _health_router, _locks_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -526,3 +527,40 @@ def test_health_reports_database_and_migration_readiness(auth_client):
     assert body["status"] == "ok" and body["database"] == "ok"
     assert body["migrations_applied"] == body["migrations_total"] > 0
     assert isinstance(body["version"], str) and body["version"]
+
+
+# ------------------------------------------------- v0.22: worker locks
+
+def test_worker_lock_is_exclusive_until_released(auth_client):
+    """Two publishers must never work the same queue: the second acquisition
+    is refused while the first holder is live."""
+    first = auth_client.post("/locks/acquire", headers=SVC,
+                             json={"name": "publishing-test", "holder": "worker-a", "ttl_s": 60})
+    assert first.status_code == 200, first.text
+    assert first.json()["acquired"] is True
+
+    second = auth_client.post("/locks/acquire", headers=SVC,
+                              json={"name": "publishing-test", "holder": "worker-b", "ttl_s": 60})
+    assert second.json()["acquired"] is False, "a live lock must not be handed out twice"
+    assert second.json()["holder"] == "worker-a"
+
+    listed = auth_client.get("/locks", headers=SVC).json()
+    assert any(l["name"] == "publishing-test" for l in listed)
+
+    released = auth_client.post("/locks/release", headers=SVC,
+                                json={"name": "publishing-test", "holder": "worker-a"})
+    assert released.status_code == 200
+
+    third = auth_client.post("/locks/acquire", headers=SVC,
+                             json={"name": "publishing-test", "holder": "worker-c", "ttl_s": 60})
+    assert third.json()["acquired"] is True, "after release the lock is free again"
+
+
+def test_expired_lock_is_taken_over(auth_client):
+    """A worker that died mid-sweep must not block the queue forever."""
+    _run("INSERT INTO worker_locks (name, holder, acquired_at, expires_at) "
+         "VALUES ('dead-worker', 'ghost', now() - interval '1 hour', now() - interval '30 minutes') "
+         "ON CONFLICT (name) DO UPDATE SET expires_at = EXCLUDED.expires_at")
+    res = auth_client.post("/locks/acquire", headers=SVC,
+                           json={"name": "dead-worker", "holder": "newcomer", "ttl_s": 60})
+    assert res.json()["acquired"] is True, "an expired lock must be taken over"

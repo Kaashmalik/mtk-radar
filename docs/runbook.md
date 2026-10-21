@@ -163,6 +163,16 @@ live), **Settings** (publish windows, pipeline status), **Queue** (what the
 automation renders vs what waits on you). Secrets never pass through the
 browser.
 
+Concurrency safety (v0.22): worker sweeps take a named lock
+(`POST /locks/acquire`) before working the queue, so a deploy overlap or a
+manually started second worker cannot upload the same post twice. A lock
+that ages out (worker died) is taken over automatically. `GET /locks` shows
+who holds what.
+
+Cache layer (v0.22): the dashboard's aggregate read is served from Redis for
+30 s when Redis is configured. Redis is OPTIONAL — without it (or with it
+down) every request computes fresh; the cache never fails a request.
+
 Health probe (v0.20): `GET /health` reports the database state AND the
 applied/total migration counts — a reachable database with a missing
 migration is visible instead of failing later under load. Use it as the
