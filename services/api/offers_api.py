@@ -191,6 +191,8 @@ async def audit_verified(limit: int = Query(default=200, le=2000)) -> dict:
             failures.append({
                 "id": row["id"], "title": row["title"], "provider": row["provider"],
                 "updated_at": row["updated_at"], "problems": problems,
+                # Blast radius: reclassifying this offer pauses/affects these.
+                "impact": await _impact_counts(pool, row["id"]),
             })
     return {
         "checked": len(rows),
@@ -200,6 +202,25 @@ async def audit_verified(limit: int = Query(default=200, le=2000)) -> dict:
             "fetch_provenance": _require_fetch_provenance(),
             "extraction_coverage": _require_extraction_coverage(),
         },
+    }
+
+
+async def _impact_counts(pool, offer_id: uuid.UUID) -> dict:
+    """What already depends on the offer: schedules, renders, captures."""
+    row = await pool.fetchrow(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM schedules WHERE offer_id = $1) AS schedules,
+          (SELECT COUNT(*) FROM schedules WHERE offer_id = $1 AND state = 'scheduled') AS scheduled,
+          (SELECT COUNT(*) FROM schedules WHERE offer_id = $1 AND state = 'published') AS published,
+          (SELECT COUNT(*) FROM renders WHERE offer_id = $1) AS renders,
+          (SELECT COUNT(*) FROM capture_sessions WHERE offer_id = $1) AS captures
+        """,
+        offer_id,
+    )
+    return {
+        key: int(row[key])
+        for key in ("schedules", "scheduled", "published", "renders", "captures")
     }
 
 

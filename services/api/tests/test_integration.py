@@ -674,17 +674,26 @@ def test_legacy_audit_reports_a_verified_offer_that_would_fail_today(client):
     good = _verified_offer(client)
     bad = _verified_offer(client)
     _run("UPDATE extractions SET coverage = NULL WHERE offer_id = $1", uuid.UUID(bad))
+    _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, "
+        "idempotency_key) VALUES ($1, 'youtube', 'scheduled', now(), 'private', $2)",
+        uuid.UUID(bad), f"audit-{uuid.uuid4()}",
+    )
 
     report = client.get("/offers/audit/verified").json()
-    failed = {row["id"]: row["problems"] for row in report["offers"]}
+    failed = {row["id"]: row for row in report["offers"]}
     assert bad in failed
     assert good not in failed
-    assert any("coverage" in problem for problem in failed[bad])
+    assert any("coverage" in problem for problem in failed[bad]["problems"])
+    assert failed[bad]["impact"]["schedules"] == 1
+    assert failed[bad]["impact"]["scheduled"] == 1
     assert report["checked"] >= 2
     assert report["failed"] == len(report["offers"])
     assert report["requirements"]["extraction_coverage"] is True
     # Read-only: the audit never demotes on its own.
     assert client.get(f"/offers/{bad}").json()["state"] == "verified"
+    assert _run("SELECT state::text AS state FROM schedules WHERE offer_id = $1",
+                uuid.UUID(bad))[0]["state"] == "scheduled"
 
 
 def test_legacy_audit_names_a_verified_offer_with_no_extraction(client):
