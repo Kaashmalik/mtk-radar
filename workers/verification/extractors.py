@@ -16,6 +16,8 @@ import os
 import re
 from typing import Any, Optional
 
+from document_sections import MAX_SECTION_CHARS, split_sections
+
 # ---------------------------------------------------------------------------
 # Rule-based extractor (deterministic baseline)
 
@@ -293,6 +295,62 @@ def extract(
                 fields = merged
 
     return fields, conflicts, model_used
+
+
+def extract_document(
+    text: str,
+    evidence_url: str,
+    *,
+    max_chars: int = MAX_SECTION_CHARS,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], Optional[str], int]:
+    """Sectioned extraction over the whole document (WP01 slice 8).
+
+    Every section is examined; the returned section count is what the API
+    recomputes from the stored snapshot before it accepts the record. Sections
+    that disagree about a value are kept as a conflict — the first value is
+    retained for display, never the more attractive one, and a conflict blocks
+    promotion for reviewer triage.
+    """
+    sections = split_sections(text, max_chars)
+    fields: dict[str, dict[str, Any]] = {}
+    first_seen: dict[str, int] = {}
+    conflicts: list[dict[str, Any]] = []
+    conflicted: set[str] = set()
+    model_used: Optional[str] = None
+
+    for section in sections:
+        section_fields, section_conflicts, model = extract(section.text, evidence_url)
+        model_used = model or model_used
+        for name, field in section_fields.items():
+            if name not in fields:
+                fields[name] = field
+                first_seen[name] = section.index
+                continue
+            same_value = (
+                str(fields[name].get("value", "")).strip().casefold()
+                == str(field.get("value", "")).strip().casefold()
+            )
+            if not same_value and name not in conflicted:
+                conflicted.add(name)
+                conflicts.append({
+                    "field": name,
+                    "reason": "document sections disagree",
+                    "sections": [first_seen[name], section.index],
+                })
+            if same_value and name == "regions":
+                # Union the exclusions so an earlier section cannot hide one.
+                merged = {
+                    *(fields[name].get("excluded_regions") or []),
+                    *(field.get("excluded_regions") or []),
+                }
+                fields[name] = {
+                    **fields[name],
+                    "excluded_regions": sorted(merged),
+                }
+        for conflict in section_conflicts:
+            conflicts.append({**conflict, "section": section.index})
+
+    return fields, conflicts, model_used, len(sections)
 
 
 def _compare(rules: dict, llm_fields: dict) -> list[dict[str, Any]]:

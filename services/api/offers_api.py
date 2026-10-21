@@ -25,12 +25,14 @@ from pydantic import BaseModel, Field, ValidationError
 import db
 from jsonb import decode
 from api_hardening import effective_reviewer
+from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
 from fetch_attestation import verify_provenance
 from redact import scan as scan_secrets
 from schedules_state import script_version_hash
 from schemas import (
     EvidenceIn,
     EvidenceProvenance,
+    ExtractionCoverage,
     ExtractionIn,
     OfferIn,
     OfferUpdate,
@@ -198,15 +200,18 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
     extraction = await pool.fetchrow(
         """
         SELECT fields::text AS fields, conflicts::text AS conflicts, complete, model, created_at,
-               fact_pack::text AS fact_pack, offer_type
+               fact_pack::text AS fact_pack, offer_type, coverage::text AS coverage
         FROM extractions WHERE offer_id = $1 ORDER BY created_at DESC LIMIT 1
         """,
         offer_id,
     )
+    extraction_payload = dict(extraction) if extraction else None
+    if extraction_payload is not None:
+        extraction_payload["coverage"] = decode(extraction_payload.get("coverage"))
     return {
         **dict(offer),
         "evidence": [dict(r) for r in evidence],
-        "extraction": dict(extraction) if extraction else None,
+        "extraction": extraction_payload,
     }
 
 
@@ -383,16 +388,19 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -
     complete, type_problems = derive_completeness(offer_type, fact_pack)
     problems = list(problems) + type_problems
     complete = complete and not problems
+    coverage = await _validate_coverage(pool, offer_id, extraction.coverage)
     serialized = extraction.model_dump(mode="json")
     row = await pool.fetchrow(
         """
         INSERT INTO extractions (offer_id, fields, conflicts, complete, model, created_at,
-                                   fact_pack, offer_type)
-        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp(), $6::jsonb, $7)
+                                   fact_pack, offer_type, coverage)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp(), $6::jsonb, $7,
+                $8::jsonb)
         RETURNING id
         """,
         offer_id, _json(serialized["fields"]), _json(extraction.conflicts),
         complete, extraction.model, _json(fact_pack), offer_type,
+        _json(coverage) if coverage else None,
     )
     if extraction.conflicts:
         await pool.execute(
@@ -416,7 +424,7 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -
                   entity_id=row["id"], detail={"complete": complete,
                                                "conflicts": len(extraction.conflicts)})
     return {"id": row["id"], "complete": complete, "validation_errors": problems,
-            "fact_pack": fact_pack}
+            "fact_pack": fact_pack, "coverage": coverage}
 
 
 # ---------------------------------------------------------------- transitions
@@ -777,6 +785,56 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
         problems = list(problems) + await _provenance_problems(pool, offer_id, extraction)
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
+
+
+async def _validate_coverage(pool, offer_id: uuid.UUID,
+                             coverage: Optional[ExtractionCoverage]) -> Optional[dict]:
+    """Verify that the extractor examined every section of the stored snapshots.
+
+    The section count depends only on the snapshot text and the boundary rule, so
+    the API can recompute it. A producer that silently truncated the document
+    reports fewer sections and is rejected here — a claim of coverage is not
+    accepted on the caller's word.
+    """
+    if coverage is None:
+        return None
+    if coverage.version != SECTIONS_VERSION:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported extraction coverage version; expected {SECTIONS_VERSION!r}",
+        )
+    if coverage.max_section_chars != MAX_SECTION_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"coverage max_section_chars must be {MAX_SECTION_CHARS}",
+        )
+    evidence_ids = list(dict.fromkeys(coverage.evidence_ids))
+    rows = await pool.fetch(
+        "SELECT id, captured_content FROM evidence "
+        "WHERE offer_id = $1 AND id = ANY($2::uuid[])",
+        offer_id, evidence_ids,
+    )
+    if len(rows) != len(evidence_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="coverage references evidence outside this offer",
+        )
+    expected = sum(len(split_sections(row["captured_content"] or "")) for row in rows)
+    if coverage.sections_total != expected:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "coverage section count does not match the stored snapshots "
+                f"({coverage.sections_total} claimed, {expected} expected); the "
+                "document may have been truncated"
+            ),
+        )
+    return {
+        "version": SECTIONS_VERSION,
+        "sections_total": expected,
+        "max_section_chars": MAX_SECTION_CHARS,
+        "evidence_ids": [str(item) for item in evidence_ids],
+    }
 
 
 async def _extraction_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> tuple[dict[str, list[str]], list[str], set[str]]:

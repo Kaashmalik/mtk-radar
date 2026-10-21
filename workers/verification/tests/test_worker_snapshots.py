@@ -45,14 +45,14 @@ def allow_robots(monkeypatch, *, allowed=True):
 
 
 def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, sources=None,
-             extra=None, robots_allowed=True):
+             extra=None, robots_allowed=True, text=TEXT, extract_fn=None):
     posts, fetched = [], []
     sources = sources or [SOURCE]
     allow_robots(monkeypatch, allowed=robots_allowed)
 
     def fetch(url, fetcher=None, max_text_chars=2000, policy=None, **kwargs):
         fetched.append((url, max_text_chars))
-        return [RawItem(external_item_id="snapshot-1", url=final_url, text=TEXT,
+        return [RawItem(external_item_id="snapshot-1", url=final_url, text=text,
                         extra=extra or {})]
 
     def transport(request):
@@ -68,12 +68,17 @@ def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, 
         return httpx.Response(200, json={"state": payload.get("to")})
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
-    monkeypatch.setattr(worker_main, "extract", lambda text, url: (
-        {
-            "promo_code": {"value": "SAVE2026", "evidence_url": url, "excerpt": text[-60:]},
-            "eligibility": {"value": "students", "evidence_url": url, "excerpt": text[-60:]},
-        }, [], None,
-    ))
+    if extract_fn is None:
+        monkeypatch.setattr(worker_main, "extract_document", lambda section_text, url: (
+            {
+                "promo_code": {"value": "SAVE2026", "evidence_url": url,
+                               "excerpt": section_text[-60:]},
+                "eligibility": {"value": "students", "evidence_url": url,
+                                "excerpt": section_text[-60:]},
+            }, [], None, 1,
+        ))
+    else:
+        monkeypatch.setattr(worker_main, "extract_document", extract_fn)
     worker = object.__new__(worker_main.Verifier)
     worker.api_url = "https://api.test"
     worker.fetcher = object()
@@ -92,6 +97,31 @@ def test_single_untruncated_snapshot_and_bound_evidence_id(monkeypatch):
     assert extraction["fields"]["promo_code"]["evidence_id"] == "evidence-1"
     assert "complete" not in extraction
     assert transition["to"] == "verified"
+    # WP01 slice 8: the extractor reports what it examined; the API re-derives it.
+    assert extraction["coverage"] == {
+        "version": "paragraph-groups/1",
+        "sections_total": 1,
+        "max_section_chars": 6000,
+        "evidence_ids": ["evidence-1"],
+    }
+
+
+def test_long_document_is_sectioned_not_refused(monkeypatch):
+    long_text = "Conditions apply to students only. Use code SAVE2026 at checkout.\n\n" * 8000
+    assert len(long_text) > 250_000
+    _, posts = exercise(monkeypatch, text=long_text, extract_fn=worker_main.extract_document)
+    evidence = posts[0][1]
+    extraction = posts[1][1]
+    assert evidence["captured_content"] == long_text
+    from document_sections import split_sections
+    assert extraction["coverage"]["sections_total"] == len(split_sections(long_text))
+    assert extraction["coverage"]["sections_total"] > 1
+
+
+def test_document_above_the_ceiling_is_refused(monkeypatch):
+    huge = "x" * (worker_main.MAX_DOCUMENT_CHARS + 1)
+    with pytest.raises(ValueError, match="sectioned-processing ceiling"):
+        exercise(monkeypatch, text=huge)
 
 
 def test_server_incomplete_result_never_promotes(monkeypatch):
@@ -227,7 +257,7 @@ def test_verification_fetch_uses_the_egress_policy(monkeypatch):
         return [RawItem(external_item_id="s", url=URL, text=TEXT)]
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
-    monkeypatch.setattr(worker_main, "extract", lambda text, url: ({}, [], None))
+    monkeypatch.setattr(worker_main, "extract_document", lambda text, url: ({}, [], None, 1))
     allow_robots(monkeypatch)
     posts = []
 
@@ -278,7 +308,8 @@ def test_conflict_is_retained_when_best_page_lacks_that_field(monkeypatch):
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", lambda url, **kwargs: [
         RawItem(external_item_id=url, url=url, text="Official terms")])
-    monkeypatch.setattr(worker_main, "extract", lambda text, url: (proposals[pages.index(url)], [], None))
+    monkeypatch.setattr(worker_main, "extract_document", lambda text, url: (
+        proposals[pages.index(url)], [], None, 1))
     allow_robots(monkeypatch)
     worker = object.__new__(worker_main.Verifier)
     worker.fetcher = object()

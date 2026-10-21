@@ -412,6 +412,59 @@ def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
     assert "captured_content" not in client.get(f"/offers/{oid}").json()["evidence"][0]
 
 
+def _long_snapshot(client, offer_id, source_id, repeats=300):
+    """A snapshot long enough to require more than one section."""
+    import uuid
+    text = "Conditions apply to students only. Use code SAVE2026 at checkout.\n\n" * repeats
+    url = f"https://example.com/wp01-long-{uuid.uuid4().hex}"
+    response = client.post(f"/offers/{offer_id}/evidence", json={
+        "url": url, "source_id": source_id, "official": True,
+        "captured_content": text, **_procured(url, text),
+    })
+    assert response.status_code == 201, response.text
+    return text, response.json()["id"]
+
+
+def test_extraction_coverage_is_recomputed_from_the_snapshot(client):
+    from document_sections import split_sections
+    oid, source_id, _, fields, _ = _verification_fixture(client)
+    text, long_id = _long_snapshot(client, oid, source_id)
+    expected = len(split_sections(text))
+    assert expected > 1
+    coverage = {
+        "version": "paragraph-groups/1", "sections_total": expected,
+        "max_section_chars": 6000, "evidence_ids": [long_id],
+    }
+    response = client.post(f"/offers/{oid}/extraction",
+                           json={"fields": fields, "coverage": coverage})
+    assert response.status_code == 201, response.text
+    assert response.json()["coverage"]["sections_total"] == expected
+    shown = client.get(f"/offers/{oid}").json()["extraction"]["coverage"]
+    assert shown["version"] == "paragraph-groups/1"
+    assert shown["sections_total"] == expected
+    assert shown["evidence_ids"] == [long_id]
+
+
+@pytest.mark.parametrize("override,needle", [
+    ({"sections_total": 1}, "section count"),
+    ({"version": "paragraph-groups/2"}, "coverage version"),
+    ({"max_section_chars": 5999}, "max_section_chars"),
+    ({"evidence_ids": ["00000000-0000-0000-0000-000000000000"]}, "outside this offer"),
+])
+def test_coverage_must_match_the_stored_snapshots(client, override, needle):
+    oid, source_id, _, fields, _ = _verification_fixture(client)
+    _, long_id = _long_snapshot(client, oid, source_id)
+    coverage = {
+        "version": "paragraph-groups/1", "sections_total": 2,
+        "max_section_chars": 6000, "evidence_ids": [long_id],
+    }
+    coverage.update(override)
+    response = client.post(f"/offers/{oid}/extraction",
+                           json={"fields": fields, "coverage": coverage})
+    assert response.status_code == 422, response.text
+    assert needle in response.json()["detail"]
+
+
 @pytest.mark.parametrize("case", ["empty", "conflicts", "foreign_id", "wrong_url", "quote", "value"])
 def test_unearned_complete_never_promotes_on_real_database(client, case):
     import uuid
@@ -935,6 +988,50 @@ def test_fetch_signature_migration_keeps_legacy_rows_unsigned(client):
                 "UPDATE evidence SET fetch_signature = $2 WHERE id = $1", eid, "b" * 64)
             assert await conn.fetchval(
                 "SELECT fetch_signature FROM evidence WHERE id = $1", eid) == "b" * 64
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
+
+
+def test_extraction_coverage_migration_keeps_legacy_rows_uncovered(client):
+    """Upgrade 016→017: pre-sectioned proposals carry no coverage claim."""
+    import json
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_coverage_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            target = next(p for p in paths if p.name.startswith("017_"))
+            for path in paths:
+                if path.name < target.name:
+                    await conn.execute(path.read_text(encoding="utf-8"))
+            oid = await conn.fetchval(
+                "INSERT INTO offers (title, provider, category, offer_type) "
+                "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
+            eid = await conn.fetchval(
+                "INSERT INTO extractions (offer_id, fields, conflicts, complete, model) "
+                "VALUES ($1, '{}'::jsonb, '[]'::jsonb, FALSE, 'rules/0.1') RETURNING id",
+                oid)
+            await conn.execute(target.read_text(encoding="utf-8"))
+            assert await conn.fetchval(
+                "SELECT coverage FROM extractions WHERE id = $1", eid) is None
+            await conn.execute(
+                "UPDATE extractions SET coverage = $2::jsonb WHERE id = $1", eid,
+                json.dumps({
+                    "version": "paragraph-groups/1", "sections_total": 1,
+                    "max_section_chars": 6000,
+                    "evidence_ids": [],
+                }))
+            stored = json.loads(await conn.fetchval(
+                "SELECT coverage FROM extractions WHERE id = $1", eid))
+            assert stored["version"] == "paragraph-groups/1"
         finally:
             await tx.rollback()
             await conn.close()
