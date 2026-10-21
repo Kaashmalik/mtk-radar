@@ -3,12 +3,12 @@
           margin: 0 auto;
           padding: 2rem 1.25rem;
           font-family: system-ui, sans-serif;
-          color: #e8eaf0;
-          background: #0d1117;
+          color: var(--text);
+          background: var(--bg);
           min-height: 100vh;
         }
         .back {
-          color: #58a6ff;
+          color: var(--accent);
           text-decoration: none;
           font-size: 0.85rem;
         }
@@ -17,29 +17,29 @@
           font-size: 1.6rem;
         }
         .tagline {
-          color: #8b949e;
+          color: var(--text-muted);
           margin-top: 0.3rem;
           font-size: 0.88rem;
         }
         .card {
-          background: #161b22;
-          border: 1px solid #30363d;
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
           border-radius: 10px;
           padding: 1.1rem 1.25rem;
           margin-top: 1.25rem;
         }
         .card.stale {
-          border-color: #f0883e;
+          border-color: var(--warn);
         }
         .card h2 {
           margin: 0 0 0.5rem;
           font-size: 1.05rem;
         }
         .card.stale h2 {
-          color: #f0883e;
+          color: var(--warn);
         }
         .offer {
-          border: 1px solid #21262d;
+          border: 1px solid var(--border-subtle);
           border-radius: 8px;
           padding: 0.8rem 1rem;
         }
@@ -62,17 +62,17 @@
           white-space: nowrap;
         }
         .muted {
-          color: #8b949e;
+          color: var(--text-muted);
         }
         .small {
           font-size: 0.78rem;
         }
         a {
-          color: #58a6ff;
+          color: var(--accent);
           text-decoration: none;
         }
         code {
-          background: #21262d;
+          background: var(--border-subtle);
           padding: 0.05rem 0.3rem;
           border-radius: 4px;
           font-size: 0.78rem;

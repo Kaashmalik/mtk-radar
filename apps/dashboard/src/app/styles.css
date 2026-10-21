@@ -3,8 +3,8 @@
           margin: 0 auto;
           padding: 2rem 1.25rem;
           font-family: system-ui, sans-serif;
-          color: #e8eaf0;
-          background: #0d1117;
+          color: var(--text);
+          background: var(--bg);
           min-height: 100vh;
         }
         .header h1 {
@@ -13,12 +13,12 @@
           letter-spacing: 0.02em;
         }
         .tagline {
-          color: #8b949e;
+          color: var(--text-muted);
           margin-top: 0.4rem;
         }
         .card {
-          background: #161b22;
-          border: 1px solid #30363d;
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
           border-radius: 10px;
           padding: 1.1rem 1.25rem;
           margin-top: 1.25rem;
@@ -28,13 +28,13 @@
           font-size: 1.05rem;
         }
         .ok {
-          color: #3fb950;
+          color: var(--ok);
         }
         .down {
-          color: #f85149;
+          color: var(--danger);
         }
         .muted {
-          color: #8b949e;
+          color: var(--text-muted);
         }
         .small {
           font-size: 0.78rem;
@@ -46,18 +46,18 @@
         }
         th {
           text-align: left;
-          color: #8b949e;
+          color: var(--text-muted);
           font-weight: 500;
           padding: 0.4rem 0.6rem;
-          border-bottom: 1px solid #30363d;
+          border-bottom: 1px solid var(--border);
         }
         td {
           padding: 0.55rem 0.6rem;
-          border-bottom: 1px solid #21262d;
+          border-bottom: 1px solid var(--border-subtle);
           vertical-align: top;
         }
         a {
-          color: #58a6ff;
+          color: var(--accent);
           text-decoration: none;
         }
         a:hover {
@@ -71,10 +71,10 @@
           font-weight: 600;
         }
         .tier-a {
-          background: #0f3520;
-          color: #3fb950;
+          background: var(--ok-bg);
+          color: var(--ok);
         }
         .tier-b {
-          background: #34250f;
-          color: #d29922;
+          background: var(--warn-bg);
+          color: var(--warn);
         }
