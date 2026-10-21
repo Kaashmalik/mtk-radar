@@ -41,10 +41,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from source_adapters import Fetcher, check_robots, fetch_page_snapshot  # noqa: E402
 from source_adapters.egress import EgressPolicy  # noqa: E402
+from document_sections import (  # noqa: E402
+    MAX_DOCUMENT_CHARS,
+    MAX_SECTION_CHARS,
+    SECTIONS_VERSION,
+)
 from fetch_attestation import sign_provenance  # noqa: E402
 
 from allowlist import build_allowlist, domain_ok, host_of  # noqa: E402
-from extractors import extract, is_complete  # noqa: E402
+from extractors import extract_document, is_complete  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 SWEEP_INTERVAL = 120  # seconds
@@ -148,6 +153,9 @@ class Verifier:
         model_used = None
         observed_values: dict[str, str] = {}
         usable_pages = 0
+        #: Sections examined per evidence row. The API recomputes this from the
+        #: stored snapshot text, so a truncated read is rejected, not trusted.
+        sections_by_evidence: dict[str, int] = {}
         for url in official_urls:
             # Permission first (master plan §3): a page may only be read when
             # the host's robots policy is readable and permits it. The decision
@@ -178,9 +186,16 @@ class Verifier:
                     offer_id, item.url, provenance["http_status"],
                 )
                 continue
-            if len(item.text) > 250_000:
-                raise ValueError("official snapshot too large; review rather than truncate terms")
-            fields, page_conflicts, page_model = extract(item.text, item.url)
+            if len(item.text) > MAX_DOCUMENT_CHARS:
+                # Refusing is honest; cutting the document is not. The egress
+                # bound normally makes this unreachable.
+                raise ValueError(
+                    "official snapshot exceeds the sectioned-processing ceiling; "
+                    "review rather than truncate terms"
+                )
+            fields, page_conflicts, page_model, sections_total = extract_document(
+                item.text, item.url,
+            )
             payload = {
                 "url": item.url, "captured_content": item.text,
                 "excerpt": item.title, "official": True,
@@ -204,6 +219,7 @@ class Verifier:
             evidence.raise_for_status()
             evidence_id = evidence.json()["id"]  # duplicates return the same identity
             usable_pages += 1
+            sections_by_evidence[evidence_id] = sections_total
             for field in fields.values():
                 field["evidence_id"] = evidence_id
             # Retain disagreement across official pages rather than picking the
@@ -229,6 +245,13 @@ class Verifier:
             "fields": best_fields,
             "conflicts": conflicts,
             "model": model_used or "rules/0.1",
+            # Everything the verifier actually read, section by section.
+            "coverage": {
+                "version": SECTIONS_VERSION,
+                "sections_total": sum(sections_by_evidence.values()),
+                "max_section_chars": MAX_SECTION_CHARS,
+                "evidence_ids": list(sections_by_evidence),
+            },
         })
         response.raise_for_status()
         complete = response.json().get("complete") is True

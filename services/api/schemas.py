@@ -8,6 +8,8 @@ from typing import Any, Final, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
+from document_sections import MAX_DOCUMENT_CHARS
+
 TrustTier = Literal["A_provider_owned", "B_discovery_lead", "C_excluded"]
 AdapterKind = Literal["rss", "github_releases", "page_watch", "extension", "manual"]
 OfferStateL = Literal[
@@ -179,7 +181,7 @@ class EvidenceIn(BaseModel):
     url: HttpUrl
     source_id: Optional[uuid.UUID] = None
     excerpt: Optional[str] = None  # supporting quote
-    captured_content: Optional[str] = Field(default=None, max_length=250_000)
+    captured_content: Optional[str] = Field(default=None, max_length=MAX_DOCUMENT_CHARS)
     raw_content_b64: Optional[str] = Field(default=None, max_length=2_800_000)
     provenance: Optional[EvidenceProvenance] = None
     screenshot_path: Optional[str] = None
@@ -279,6 +281,23 @@ class ExtractedField(BaseModel):
         return self
 
 
+class ExtractionCoverage(BaseModel):
+    """What the extractor actually examined (WP01 slice 8).
+
+    The API recomputes `sections_total` from the stored snapshot text, so a
+    truncated read cannot claim full coverage. `evidence_ids` must all belong to
+    the offer being extracted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(strict=True, min_length=1, max_length=40,
+                         pattern=r"^[a-z0-9-]+/\d+$")
+    sections_total: int = Field(strict=True, ge=0, le=100_000)
+    max_section_chars: int = Field(strict=True, ge=100, le=100_000)
+    evidence_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
 class ExtractionIn(BaseModel):
     """Extractor proposal. `complete` is a compatibility hint, never authority."""
 
@@ -288,6 +307,8 @@ class ExtractionIn(BaseModel):
     complete: bool = Field(default=False, strict=True)
     conflicts: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
     model: Optional[str] = Field(default=None, max_length=200)
+    #: Optional for legacy/manual callers; the acquisition worker always sends it.
+    coverage: Optional[ExtractionCoverage] = None
 
     @model_validator(mode="after")
     def typed_claim_values(self) -> "ExtractionIn":

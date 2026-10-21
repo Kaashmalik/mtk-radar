@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** seven WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record and signed fetch provenance. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md) and [slice 7](implementation-wp01-slice7-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** eight WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance and sectioned long-document extraction. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md) and [slice 8](implementation-wp01-slice8-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -134,7 +134,7 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 | [x] Partial | Metrics, monitor, health, auth, audit logs, backup scripts | Existing API/workers/infra; operational execution not demonstrated here |
 | [ ] | Trend/entity clustering, velocity, cross-source corroboration and watched topics | WP05–WP06 |
 | [x] | Retained hash-checked text snapshots, typed evidence binding, literal quote checks and server-derived core completeness | WP01 first integrity slice; 325 tests passed including isolated PostgreSQL integration; not semantic offer verification |
-| [ ] | Complete official offer confirmation: type-specific terms, signed fetch provenance, freshness and downstream fact-pack propagation | Remaining WP01 work |
+| [ ] | Complete official offer confirmation: type-specific terms, mandatory extraction coverage, freshness and downstream fact-pack propagation | Remaining WP01 work |
 | [ ] | Strict local GLM/MiniMax-compatible model gateway and evaluations | WP07 |
 | [ ] | Native Full HD capture, semantic edit plan, speech alignment and media QC | WP08–WP09 |
 | [ ] | Light manual in-app editing, revision history and selective rerender | WP10 |
@@ -622,14 +622,19 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Store `fetch_signature` in migration 016 with a hex-shape CHECK and require it at promotion for machine-collected official evidence; reviewer attestations stay exempt. `MTK_REQUIRE_FETCH_SIGNATURE=0` is the documented migration opt-out, and unsigned records stay explicitly unsigned.
 - [x] State the limit in code and docs: a valid signature proves a holder of the key produced the record, **not** that the bytes were fetched; the key is symmetric, so the API can forge it too. 28 new tests; full suite **548 passed, zero skips**. See [seventh-slice checkpoint](implementation-wp01-slice7-2026-10-21.md).
 
+**Completed — eighth slice, sectioned long-document extraction:**
+
+- [x] Replace the 250,000-character refusal and the silent `text[:8000]` LLM cut with a versioned, lossless splitter (`paragraph-groups/1`): sections are contiguous slices of the input, ≤ 6,000 characters, grouped by paragraph and cut at sentence/word boundaries when oversized; the whole-document ceiling is refused, never truncated.
+- [x] Extract every section (rules always, the model per section) and keep cross-section disagreement as a conflict, retaining the first value rather than the more attractive one; union region exclusions found in later sections.
+- [x] Send `coverage` with every extraction and have the API recompute the section count from the stored snapshot text, rejecting a truncated claim, a foreign evidence id, an unknown version or a different ceiling with a 422.
+- [x] Store the record in migration 017 (legacy rows stay `NULL`) and expose it on `GET /offers/{id}`; accept snapshots up to the egress bound (2,000,000 characters). 38 new tests; full suite **586 passed, zero skips**. See [eighth-slice checkpoint](implementation-wp01-slice8-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Implement trusted acquisition identities beyond a shared key: replace the
-  symmetric HMAC with asymmetric signing (API holds only a public key) or
-  server-side fetching, so the API cannot forge a record and a compromised
-  worker cannot sign bytes it never fetched.
+- [ ] Make `coverage` mandatory at promotion for machine evidence (reviewer-attested snapshots exempt), so an extraction that omits it cannot earn `verified`; legacy rows stay readable.
+- [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
 - [ ] Record a per-source terms-of-service review/attestation: robots.txt is machine-checkable, ToS consent is not, and no human attestation is captured yet.
-- [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
+- [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
 - [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary; no bulk production migration or legacy queue review has been performed.
@@ -822,7 +827,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record and signed fetch provenance implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md). Non-symmetric acquisition identity, ToS review attestation, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance and sectioned long-document extraction implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md). A mandatory coverage gate, non-symmetric acquisition identity, ToS review attestation, semantic applicable-terms proof, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -981,6 +986,43 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Next smallest task:** long-document section extraction — verification
   currently refuses a snapshot above 250k characters and the rules extractor
   reads one blob, so applicable terms on long pages can be missed.
+
+#### 21 October 2026, 19:12 UTC — WP01 eighth slice: sectioned long-document extraction
+
+- **Status:** implemented; locally VERIFIED for the section/coverage scope only.
+  Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `eeb5912`).
+- **Changes:** `services/api/document_sections.py` (`paragraph-groups/1`) splits a
+  document into contiguous sections of at most 6,000 characters, cutting at
+  sentence/word boundaries only when a paragraph is oversized, so joining the
+  sections reproduces the text exactly; `extractors.extract_document` runs the
+  extractor over every section and turns cross-section disagreement into a
+  conflict (first value kept, never the more attractive one); the worker sends a
+  `coverage` record and the API recomputes the section count from the stored
+  `captured_content`, rejecting a truncated claim, a foreign evidence id, an
+  unknown version or a different ceiling; migration 017 stores the record;
+  `captured_content` now accepts the 2,000,000-character egress bound and a
+  larger document is refused for review, never cut. See
+  [eighth-slice checkpoint](implementation-wp01-slice8-2026-10-21.md).
+- **Failing first:** at `eeb5912` the splitter module does not exist, the evidence
+  schema rejects a 300k-character snapshot, the worker raises above 250k, the
+  model prompt is cut at 8,000 characters, `ExtractionIn` rejects the unknown
+  `coverage` key and migration 017 has no column.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **586 passed, 26 warnings, zero skips**, exit 0 (was 548; +38 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The 016→017 upgrade
+  test confirms legacy extraction rows keep `coverage = NULL`.
+- **Not closed, and deliberately not ticked:** coverage is verified when sent but
+  is not yet required at promotion; sections are paragraph groups, not semantic
+  clauses, so applicable-terms coverage is not *proven*; per-section model cost
+  grows with document length; non-symmetric acquisition identity; ToS review
+  attestation; freshness; downstream invalidation; legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database received migrations; no LLM endpoint was called.
+- **Next smallest task:** require coverage at promotion for machine evidence
+  (reviewer-attested snapshots exempt), so an extraction that omits it cannot
+  earn `verified` while legacy rows stay readable.
 
 ## 13. Coding-model execution guide
 
