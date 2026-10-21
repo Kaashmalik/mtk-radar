@@ -11,6 +11,7 @@ import httpx
 
 from ._sigv4 import (
     EMPTY_PAYLOAD_SHA256,
+    _canonical_query,
     amz_date,
     object_url_encode,
     parse_s3_ref,
@@ -103,3 +104,59 @@ class S3Storage:
     def delete(self, ref: str) -> None:
         bucket, key = self.parse_ref(ref)
         self._signed("DELETE", bucket, key).raise_for_status()
+
+    def list(self, prefix: str = "") -> list[str]:
+        """List object refs under a prefix (ListObjectsV2).
+
+        Needed by the off-host backup copy (pruning old dumps). The query
+        string is built from the SAME canonical form that is signed, so the
+        signature always matches what the server receives.
+        """
+        query = {"list-type": "2"}
+        if prefix:
+            query["prefix"] = prefix
+        query_str = _canonical_query(query)
+        url = f"{self.endpoint}/{self.bucket}"
+        if query_str:
+            url = f"{url}?{query_str}"
+        host = httpx.URL(url).host
+        if httpx.URL(url).port:
+            host = f"{host}:{httpx.URL(url).port}"
+        headers = sign_request(
+            method="GET",
+            url_path=f"/{self.bucket}",
+            query=query,
+            headers={"Host": host},
+            payload_hash=EMPTY_PAYLOAD_SHA256,
+            access_key=self.access_key,
+            secret_key=self.secret_key,
+            region=self.region,
+            service=SERVICE,
+        )
+        resp = self._http.get(url, headers=headers)
+        resp.raise_for_status()
+        return self._parse_listing(resp)
+
+    def _parse_listing(self, resp: httpx.Response) -> list[str]:
+        """S3 ListObjectsV2 answers XML (some S3-compatible stores answer
+        JSON) — accept both, and always return refs like the other methods."""
+        body = resp.text or ""
+        keys: list[str] = []
+        if body.lstrip().startswith("{"):
+            payload = resp.json()
+            keys = [item["Key"] for item in payload.get("Contents", []) if item.get("Key")]
+        else:
+            import xml.etree.ElementTree as ET
+
+            try:
+                root = ET.fromstring(body)
+            except ET.ParseError:
+                return []
+            namespace = ""
+            if root.tag.startswith("{"):
+                namespace = root.tag[: root.tag.index("}") + 1]
+            for node in root.findall(f"{namespace}Contents"):
+                key = node.findtext(f"{namespace}Key")
+                if key:
+                    keys.append(key)
+        return [f"s3://{self.bucket}/{key}" for key in keys]

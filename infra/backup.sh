@@ -30,4 +30,17 @@ mv "$FILE.tmp" "$FILE"
 # retention: prune dumps older than KEEP_DAYS
 find "$BACKUP_DIR" -name 'mtk_radar_*.dump' -mtime +"$KEEP_DAYS" -delete
 
+# off-host copy (v0.24): a backup that only lives on the same disk as the
+# database is not a backup. When MTK_S3_* is configured, the dump is copied
+# to the object store with the repository's own zero-dependency S3 client.
+# A failed copy fails the backup (an unverified off-site copy is no copy).
+if [ -n "${MTK_S3_ENDPOINT:-}" ] && [ -n "${MTK_S3_BUCKET:-}" ]; then
+  if python3 scripts/upload_backup.py "$FILE" --keep-days "$KEEP_DAYS"; then
+    echo "off-host copy complete: $FILE -> s3://${MTK_S3_BUCKET}/backups/"
+  else
+    echo "OFF-HOST COPY FAILED — the local dump exists, but the off-site copy did not" >&2
+    exit 1
+  fi
+fi
+
 echo "backup complete: $FILE (retention ${KEEP_DAYS}d, $(ls "$BACKUP_DIR" | wc -l) files kept)"

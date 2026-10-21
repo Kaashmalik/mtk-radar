@@ -95,6 +95,7 @@ identity in `audit_log` (§15).
 | Key | Why |
 | --- | --- |
 | `GITHUB_TOKEN` | raises collector rate limits for GitHub sources |
+| `MTK_S3_*` (+ `MTK_STORAGE_BACKEND=s3`) | portable renders/captures **and** the off-host copy of every backup (recommended) |
 | `MTK_S3_*` + `MTK_STORAGE_BACKEND=s3` | portable renders/captures (any S3-compatible store) |
 | `MTK_PUBLIC_MEDIA_BASE_URL` | public CDN/bucket origin — **required for Instagram** |
 
@@ -189,7 +190,7 @@ adapter stays disabled (posts are skipped, not failed).
 | Task | Where |
 | --- | --- |
 | Nightly backup | `infra/systemd/mtk-radar-backup.timer` (daily 03:00) |
-| Monthly restore drill | `infra/systemd/mtk-radar-restore-drill.timer` — a red unit means backups are unusable |
+| Monthly restore drill | `infra/systemd/mtk-radar-restore-drill.timer` — a red unit means backups are unusable (the drill compares row counts, not just "it restored") |
 | Dead platform token | `ALERT token expiry …` in the publishing log → re-consent (§3) → account returns to `active` |
 | Offer expired | monitor sweep auto-pauses scheduled posts; the offer page shows the correction path |
 | Metrics empty | check the OAuth scope (`yt-analytics.readonly`) and the metrics worker log |

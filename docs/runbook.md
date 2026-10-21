@@ -54,6 +54,13 @@ continue the `NNN_name.sql` sequence.
   `mtk-radar-backup.timer` (daily 03:00, `Persistent=true` catch-up) and
   `mtk-radar-restore-drill.timer` (monthly, newest dump → throwaway DB). See
   `infra/systemd/README.md`; on hosts without systemd, cron lines are included.
+- Verified drills + off-host copy (v0.24): `infra/drill.sh` restores the
+  newest dump into a throwaway database and COMPARES ROW COUNTS (and the
+  applied-migration count) against production — a restore that "succeeds" but
+  restores the wrong data now fails the drill loudly. When `MTK_S3_*` is
+  configured, `infra/backup.sh` also copies every dump to the object store
+  (`scripts/upload_backup.py`, zero-dependency S3 client) and prunes old
+  copies with the same retention; a failed copy fails the backup.
 - **Monthly drill (mandatory):** restore the newest dump into a throwaway DB
   (`restore.sh` defaults to `mtk_radar_restore` so drills never touch prod),
   run the verification query it prints, and only then discard.

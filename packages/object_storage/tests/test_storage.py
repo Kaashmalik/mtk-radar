@@ -186,3 +186,47 @@ def test_materialize_semantics(tmp_path: Path, monkeypatch):
     # managed ref with no driver configured → None, never a crash
     monkeypatch.delenv("MTK_S3_ENDPOINT", raising=False)
     assert materialize("s3://b/k.mp4", tmp_path / "cache") is None
+
+
+def test_s3_list_returns_refs_under_a_prefix():
+    """The off-host backup copy prunes old dumps through this listing."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/mtk-bucket"
+        assert "list-type=2" in str(req.url)
+        assert "prefix=backups" in str(req.url)
+        assert req.headers["authorization"].startswith("AWS4-HMAC-SHA256")
+        # S3 ListObjectsV2 answers XML, not JSON
+        return httpx.Response(200, text=(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+            "<Contents><Key>backups/mtk_radar_20260101T000000Z.dump</Key></Contents>"
+            "<Contents><Key>backups/mtk_radar_20260102T000000Z.dump</Key></Contents>"
+            "</ListBucketResult>"
+        ))
+
+    st, _ = _s3_with(handler)
+    refs = st.list("backups")
+    assert refs == [
+        "s3://mtk-bucket/backups/mtk_radar_20260101T000000Z.dump",
+        "s3://mtk-bucket/backups/mtk_radar_20260102T000000Z.dump",
+    ]
+
+
+def test_s3_list_handles_an_empty_bucket():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>'
+        ))
+
+    st, _ = _s3_with(handler)
+    assert st.list("backups") == []
+
+
+def test_s3_list_also_accepts_json_stores():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Contents": [{"Key": "backups/x.dump"}]})
+
+    st, _ = _s3_with(handler)
+    assert st.list("backups") == ["s3://mtk-bucket/backups/x.dump"]
