@@ -118,7 +118,7 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 
 ## 3. Implemented versus remaining checklist
 
-**Legend:** `[x]` code exists and was inspected, not “production certified”; `[ ]` remains to implement or independently prove. “Partial” means useful existing code with gaps, not a completed feature. New implementation work is unchecked as of the plan date.
+**Legend:** `[x]` implemented for the stated scope, not “production certified”; `[ ]` remains to implement or independently prove. “Partial” means useful existing code with gaps, not a completed feature. Completed WP01 tasks are ticked individually in §12, with evidence from implementation commit [`0dbd7df`](https://github.com/Kaashmalik/mtk-radar/commit/0dbd7df).
 
 | Status | Capability | Evidence / remaining |
 |---|---|---|
@@ -133,7 +133,8 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 | [x] Partial | Calendar, approval hashes, retry/hold, four adapters | `schedules_api.py`, publishing worker; needs audit fixes, scopes, account binding and real tests |
 | [x] Partial | Metrics, monitor, health, auth, audit logs, backup scripts | Existing API/workers/infra; operational execution not demonstrated here |
 | [ ] | Trend/entity clustering, velocity, cross-source corroboration and watched topics | WP05–WP06 |
-| [ ] | Official confirmation with persisted snapshots and claim-level proof | WP01 |
+| [x] | Retained hash-checked text snapshots, typed evidence binding, literal quote checks and server-derived core completeness | WP01 first integrity slice; 325 tests passed including isolated PostgreSQL integration; not semantic offer verification |
+| [ ] | Complete official offer confirmation: type-specific terms, trusted fetch provenance, freshness and downstream fact-pack propagation | Remaining WP01 work |
 | [ ] | Strict local GLM/MiniMax-compatible model gateway and evaluations | WP07 |
 | [ ] | Native Full HD capture, semantic edit plan, speech alignment and media QC | WP08–WP09 |
 | [ ] | Light manual in-app editing, revision history and selective rerender | WP10 |
@@ -553,12 +554,31 @@ For each package: add targeted failing tests → implement the smallest vertical
 
 **Depends on:** none. **Addresses:** A01–A04, A09, A13 verification wording.
 
-- [ ] Add reproducible failing API tests for forged `complete`, unknown evidence ID, quote not in snapshot, cross-offer evidence, unresolved conflicts, disabled/Tier-B domain and missing critical terms.
-- [x] First integrity slice: reproduce forged-completeness gaps; retain hash-checked snapshot text; require typed snapshot-bound fields and literal quotes; recheck active Tier-A ownership/conflicts; serialize proposal/promotion and pause schedules on replacement. See [implementation checkpoint](implementation-wp01-2026-10-21.md). Missing critical/type-specific terms remain open.
-- [ ] Persist safe immutable snapshot content once; extract only that content; preserve final URL/identity and field-specific support.
-- [ ] Add strict typed claim validation and server-derived type-specific completeness/freshness. Make unknown states explicit; remove invented eligibility/zero-cost wording.
-- [ ] Revalidate/refuse at verification, schedule/resume and upload boundaries; establish evidence-change event that pauses dependent packages.
-- [ ] Migrate/backfill legacy evidence as `legacy_unverifiable`/review required when snapshot bytes cannot be recovered; never fabricate a matching historical snapshot.
+**Completed — first integrity slice, commit [`0dbd7df`](https://github.com/Kaashmalik/mtk-radar/commit/0dbd7df):**
+
+- [x] Reproduce the old gate failures before implementation: 12 failing regression cases and one passing valid case.
+- [x] Add API/regression tests for forged `complete`, unknown/foreign evidence IDs, unrelated URLs, invented quotes/values, unresolved conflicts, and disabled/downgraded/mismatched source ownership.
+- [x] Retain the exact bounded extraction text with SHA-256 validation through append-only migration 012; preserve historical hash-only rows without fabricating text.
+- [x] Fetch each verification page once, extract and persist the same untruncated text, record its final URL, and reject an off-provider final destination. Collector excerpts keep their existing default.
+- [x] Return stable evidence UUIDs on duplicate submission; keep URL, authority and source identity separate when equal text is observed.
+- [x] Require strict typed snapshot-bound extraction fields and validate every literal quote/value against the referenced same-offer, hash-checked official snapshot.
+- [x] Derive baseline core completeness on the server; reject conflicts and revalidate stored/legacy proposals during promotion instead of trusting their `complete` flag.
+- [x] Require currently enabled Tier-A ownership and exact provider matching, with HTTPS/IDN/subdomain-boundary checks.
+- [x] Preserve model-reported and cross-page conflicts; require successful evidence/extraction persistence and server acceptance before the worker attempts promotion.
+- [x] Serialize new extraction and promotion in short per-offer transactions; revoke prior verification, audit the change and pause scheduled posts when extraction is replaced.
+- [x] Test fresh database installation, upgrade from migrations 001–011, legacy preservation, database hash constraints, API round trips and concurrent replacement/promotion on isolated PostgreSQL 16.15.
+- [x] Pass the combined suite: **325 tests, zero skips**; Python lint/compilation and TypeScript typecheck also pass. See [checkpoint and rollout notes](implementation-wp01-2026-10-21.md).
+
+**Remaining — WP01 is not complete:**
+
+- [ ] Add semantic/type-specific terms tests, including negation, renewal versus initial price, excluded regions, ambiguous deadlines and missing critical restrictions.
+- [ ] Implement server-derived offer-type completeness and explicit unknown/conflict statuses; remove invented eligibility/zero-cost wording and synchronize approved facts with script/metadata fields.
+- [ ] Preserve original HTTP/HTML bytes and redirect/fetch provenance; implement trusted acquisition identities and full SSRF/egress protections. Retained extraction text alone is not proof a provider served it.
+- [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
+- [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
+- [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
+- [ ] Review/reclassify existing verified records and queued legacy releases as unverifiable where necessary; no bulk production migration or legacy queue review has been performed.
+- [ ] Deploy migration/API/worker together with owner approval and prove live acquisition/release behavior through the remaining safety gates; local tests are not production deployment.
 
 **Touchpoints:** `services/api/{schemas,offers_api,schedules_api,scriptgen}.py`, `workers/verification/*`, `packages/source_adapters/*`; new snapshot/claim modules and next migration(s).
 
@@ -746,7 +766,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 ### Implementation ledger — update after every accepted slice
 
-| Work | State on plan date | Proof / blocker |
+| Work | Current state | Proof / blocker |
 |---|---|---|
 | WP01 | IN_PROGRESS | First snapshot/quote/ownership integrity slice implemented; [proof and limitations](implementation-wp01-2026-10-21.md). Type-specific semantic completeness, fetch provenance, freshness and downstream invalidation remain open. |
 | WP02 | TODO | A05–A10/A18 open |
@@ -769,6 +789,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 #### 21 October 2026, 11:55 UTC — WP01 first integrity slice
 
 - **Status:** implemented; locally VERIFIED for snapshot/quote/ownership and proposal/promotion regression scope only. Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** [`0dbd7df`](https://github.com/Kaashmalik/mtk-radar/commit/0dbd7df), pushed to `origin/main`. Completed subtask checkboxes above reflect this commit; no other work package is marked complete.
 - **Changes:** API extraction/evidence contracts and verification checks; append-only migration 012; single-snapshot verification worker; active Tier-A filtering; final-URL/full-text collector option; model/cross-page conflict preservation; unit and real-Postgres regression/upgrade tests. See [checkpoint and compatibility notes](implementation-wp01-2026-10-21.md).
 - **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q --tb=short` against a newly created isolated PostgreSQL 16.15 database: **325 passed, 21 warnings, zero skips**, exit 0. Historical FastAPI/Starlette/UTC deprecation warnings remain.
 - **Additional checks:** `pnpm typecheck`, `.venv/Scripts/python.exe -m ruff check --select E9,F63,F7,F82,F821 services workers packages`, and `.venv/Scripts/python.exe -m compileall -q services workers packages`: all exit 0.
@@ -798,6 +819,8 @@ No model can be guaranteed never to produce garbage. Narrow tasks, validated con
 - [ ] Source registry permissions/ownership approved and capability/coverage gaps visible.
 - [ ] Fresh fact packs, actual snapshot bytes, quote checks and critical unknown/conflict handling proven.
 - [ ] Full-stack install and migrations tested on disposable empty and upgraded databases; no user data reset.
+  - [x] Database migration installation through 012 and upgrade from 001–011 tested on isolated PostgreSQL; no existing application database touched.
+  - [ ] Full container deployment, production dashboard/browser E2E and operational installation acceptance remain to prove.
 - [ ] Native Full HD source, landscape/portrait samples, readable captions and audio/timeline QC proven on real binaries and a phone preview.
 - [ ] Local model artifact/license/hardware/admission evaluation approved; deterministic fallback and injected-content containment tested.
 - [ ] Optional editor changes invalidate package approval; pause/upload races and multi-editor revision conflicts tested.
