@@ -20,7 +20,9 @@ class TestFfmpegConcatCmd:
         assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "libmp3lame"
         assert cmd[cmd.index("-ar") + 1] == "44100"
         assert ("-c", "copy") not in list(zip(cmd, cmd[1:])), "no blind stream-copy"
-        assert cmd[-1] == "/p/narration.mp3"
+        # Compare against the platform's own rendering of the path: the intent is
+        # "the output path is the last argument", not a POSIX separator.
+        assert cmd[-1] == str(Path("/p/narration.mp3"))
 
 
 class TestConcatList:
