@@ -116,6 +116,34 @@ class TransitionIn(BaseModel):
     note: Optional[str] = None
 
 
+class RobotsPermission(BaseModel):
+    """The provider's published robots policy at the moment of the fetch.
+
+    ``allowed`` is only meaningful together with a readable file: a 401/403,
+    429 or 5xx robots response means the policy is unknown or withheld, and the
+    worker never proceeds. The API re-checks the shape so a caller cannot
+    attest permission it never obtained.
+    """
+
+    robots_url: HttpUrl
+    checked_at: datetime
+    allowed: bool
+    status: Optional[int] = Field(default=None, ge=100, le=599)
+
+    @model_validator(mode="after")
+    def _allowed_needs_a_readable_policy(self) -> "RobotsPermission":
+        if self.allowed and (
+            self.status is None
+            or self.status in (401, 403, 429)
+            or self.status >= 500
+        ):
+            raise ValueError(
+                "an allowed robots decision requires a readable robots.txt "
+                "(not an auth wall, rate limit or server error)"
+            )
+        return self
+
+
 class EvidenceProvenance(BaseModel):
     """How the raw bytes were obtained (master plan §6 step 2).
 
@@ -133,6 +161,7 @@ class EvidenceProvenance(BaseModel):
     parser_version: str = Field(min_length=1, max_length=80)
     fetch_identity: Optional[str] = Field(default=None, max_length=120)
     encoding: Optional[str] = Field(default=None, max_length=40)
+    robots: Optional[RobotsPermission] = None
 
 
 class EvidenceIn(BaseModel):

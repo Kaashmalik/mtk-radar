@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,7 @@ from allowlist import build_allowlist
 from source_adapters.egress import EgressPolicy
 from source_adapters.models import RawItem
 from source_adapters.page_watch import fetch_page_snapshot
+from source_adapters.permissions import RobotsDecision
 
 _spec = importlib.util.spec_from_file_location(
     "mtk_verification_main", Path(__file__).resolve().parents[1] / "main.py")
@@ -29,10 +31,24 @@ SOURCE = {
 OFFER = {"id": "offer-1", "provider": "Acme", "state": "evidence_needed"}
 
 
+def allow_robots(monkeypatch, *, allowed=True):
+    """Stub the per-host robots check; no network in these tests."""
+    decision = RobotsDecision(
+        domain="example.com", robots_url="https://example.com/robots.txt",
+        checked_at=datetime(2026, 10, 21, tzinfo=timezone.utc),
+        allowed=allowed, status=200,
+        reason="robots.txt permits this fetch" if allowed
+        else "robots.txt disallows this fetch",
+    )
+    monkeypatch.setattr(worker_main, "check_robots", lambda domain, **kwargs: decision)
+    return decision
+
+
 def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, sources=None,
-             extra=None):
+             extra=None, robots_allowed=True):
     posts, fetched = [], []
     sources = sources or [SOURCE]
+    allow_robots(monkeypatch, allowed=robots_allowed)
 
     def fetch(url, fetcher=None, max_text_chars=2000, policy=None, **kwargs):
         fetched.append((url, max_text_chars))
@@ -112,6 +128,39 @@ def test_provenance_and_raw_bytes_are_forwarded_to_the_api(monkeypatch):
     assert evidence["raw_content_b64"] == "PGh0bWw+"
     assert evidence["provenance"]["parser_version"] == "page_watch/1"
     assert evidence["provenance"]["fetch_identity"] == worker_main.FETCH_IDENTITY
+    assert evidence["provenance"]["robots"] == {
+        "robots_url": "https://example.com/robots.txt",
+        "checked_at": "2026-10-21T00:00:00+00:00",
+        "allowed": True,
+        "status": 200,
+    }
+
+
+def test_robots_refusal_prevents_the_fetch_and_the_evidence(monkeypatch):
+    """No permission, no page, no evidence — even if the page would parse."""
+    fetched, posts = exercise(monkeypatch, robots_allowed=False)
+    assert fetched == [] and posts == []
+
+
+def test_robots_is_checked_once_per_host(monkeypatch):
+    calls = []
+
+    def check(domain, **kwargs):
+        calls.append(domain)
+        return RobotsDecision(
+            domain=domain, robots_url=f"https://{domain}/robots.txt",
+            checked_at=datetime(2026, 10, 21, tzinfo=timezone.utc),
+            allowed=True, status=200, reason="robots.txt permits this fetch",
+        )
+
+    monkeypatch.setattr(worker_main, "check_robots", check)
+    worker = object.__new__(worker_main.Verifier)
+    worker.fetcher = object()
+    worker.policy = EgressPolicy()
+    first = worker._permission("https://example.com/a")
+    second = worker._permission("https://example.com/b")
+    assert first is second
+    assert calls == ["example.com"]
 
 
 def test_unavailable_page_is_not_stored_as_terms(monkeypatch):
@@ -139,6 +188,7 @@ def test_verification_fetch_uses_the_egress_policy(monkeypatch):
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
     monkeypatch.setattr(worker_main, "extract", lambda text, url: ({}, [], None))
+    allow_robots(monkeypatch)
     posts = []
 
     def post(path, json):
@@ -189,6 +239,7 @@ def test_conflict_is_retained_when_best_page_lacks_that_field(monkeypatch):
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", lambda url, **kwargs: [
         RawItem(external_item_id=url, url=url, text="Official terms")])
     monkeypatch.setattr(worker_main, "extract", lambda text, url: (proposals[pages.index(url)], [], None))
+    allow_robots(monkeypatch)
     worker = object.__new__(worker_main.Verifier)
     worker.fetcher = object()
     worker.policy = EgressPolicy()

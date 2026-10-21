@@ -603,14 +603,23 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Disable keep-alive and ambient proxies on the verification client, because pooled connections are keyed by the pinned IP and a proxy would bypass the pin entirely.
 - [x] Prove the behaviour over a real socket (httpcore sends `Host: example.test` while connecting to loopback), not only through a mock transport; 9 new tests, **5 failing** at `a1dd206`. Full suite: **485 passed, zero skips**. See [fourth-slice checkpoint](implementation-wp01-slice4-2026-10-21.md).
 
-**Remaining — WP01 is not complete:**
+**Completed — fifth slice, collector-path egress:**
 
 - [x] Apply the egress policy to the collector adapters (`fetch_rss`,
   `fetch_github_releases`, collector `page_watch`) via `Fetcher.fetch_policy`;
   RSS/feed content itself is still unexamined — parsing trust is a later slice.
+
+**Completed — sixth slice, robots/terms permission record:**
+
+- [x] Read `robots.txt` through the same egress policy before an official page, and fail closed on `401/403/429/5xx`, transport failure, egress refusal and an unparseable file (`404/410` means "no published policy").
+- [x] Record `robots_url`, `checked_at`, `allowed` and `status` with every machine-collected snapshot; the API re-checks the host, path and ordering and rejects a missing or disallowed decision.
+- [x] Persist the record in migration 015 (`raw_content` implies a permitted decision; pre-015 rows stay readable but are re-checked by the gate) and re-check it at promotion; reviewer-attested snapshots remain exempt. 28 new tests; full suite **520 passed, zero skips**. See [sixth-slice checkpoint](implementation-wp01-slice6-2026-10-21.md).
+
+**Remaining — WP01 is not complete:**
+
 - [ ] Implement trusted acquisition identities: the API cannot yet prove which
   process fetched the bytes, so `fetch_identity` is a claim, not an attestation.
-- [ ] Record a per-source robots/terms permission decision alongside each fetch.
+- [ ] Record a per-source terms-of-service review/attestation: robots.txt is machine-checkable, ToS consent is not, and no human attestation is captured yet.
 - [ ] Replace long-document model truncation with versioned section-based extraction and complete applicable-terms coverage.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
@@ -804,7 +813,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, and collector-path egress implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md). Trusted acquisition identity, robots/terms permission record, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress and a robots.txt permission record implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md). Trusted acquisition identity, ToS review attestation, long-document extraction, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -889,6 +898,42 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   database received migrations.
 - **Next smallest task:** the per-source robots/terms permission record, or
   trusted acquisition identity.
+
+
+#### 21 October 2026, 17:56 UTC — WP01 sixth slice: robots.txt permission record
+
+- **Status:** implemented; locally VERIFIED for the robots-permission scope only.
+  Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** `82be2b7` plus this slice's changes (committed
+  separately).
+- **Changes:** `source_adapters.permissions.check_robots` reads the host's
+  `robots.txt` through `safe_fetch` (same egress policy as the page) and returns
+  a frozen `RobotsDecision`; `Verifier._permission` caches one decision per host
+  per run and skips a page when the decision denies it; the decision is sent as
+  `provenance.robots`; `EvidenceProvenance.robots` validates it server-side;
+  migration 015 stores `robots_url/robots_checked_at/robots_allowed/robots_status`;
+  the promotion gate requires a permitted decision for machine-collected official
+  evidence. See [sixth-slice checkpoint](implementation-wp01-slice6-2026-10-21.md).
+- **Fail-closed:** `401/403/429` and every `5xx` are refusals, as are transport
+  failure, egress refusal, an unparseable file and a non-bare host; `400/404/410/451`
+  mean "no published policy" and permit the read.
+- **Failing first:** at `82be2b7` the permission module does not exist
+  (`ModuleNotFoundError`), and the schema/migration/gate columns are absent.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **520 passed, 26 warnings, zero skips**, exit 0 (was 492; +28 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The 014→015 upgrade
+  test confirms legacy rows keep `robots_* = NULL` while new raw-byte rows must
+  carry a permitted decision.
+- **Not closed, and deliberately not ticked:** terms-of-service review
+  attestation (a human/legal decision, not an automated check); trusted
+  acquisition identity (`fetch_identity` is a claim, not an attestation); the
+  robots decision is re-fetched per run rather than stored in the registry;
+  long-document extraction; risk-based freshness; downstream invalidation;
+  legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database received migrations; the `robots.txt` reads in tests are stubbed.
+- **Next smallest task:** trusted acquisition identity.
 
 ## 13. Coding-model execution guide
 

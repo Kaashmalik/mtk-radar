@@ -43,8 +43,10 @@ class GatePool:
             "content_hash": hashlib.sha256(TEXT.encode()).hexdigest(),
             "provider": "Acme", "source_id": None,
             # WP01 slice 3: machine evidence must carry raw bytes + provenance.
+            # WP01 slice 6: and a permitted robots.txt decision.
             "reviewer": None, "raw_preserved": True, "requested_url": URL,
             "parser_version": "page_watch/1",
+            "robots_url": "https://example.com/robots.txt", "robots_allowed": True,
         }]
 
     async def fetchrow(self, query, *args):
@@ -217,7 +219,8 @@ class TestFetchProvenanceGate:
         with pytest.raises(HTTPException) as exc:
             gate(pool)
         assert exc.value.status_code == 422
-        assert "raw page bytes and fetch provenance" in exc.value.detail
+        assert "raw page bytes" in exc.value.detail
+        assert "robots.txt" in exc.value.detail
         assert "recapture" in exc.value.detail
 
     def test_reviewer_attested_snapshot_is_exempt(self):
@@ -226,6 +229,22 @@ class TestFetchProvenanceGate:
         pool.evidence[0].update(raw_preserved=False, requested_url=None,
                                 parser_version=None, reviewer="Kashi")
         gate(pool)  # must not raise
+
+    def test_missing_robots_permission_blocks_promotion(self):
+        """WP01 slice 6: bytes without a permission record are not evidence."""
+        pool = GatePool()
+        pool.evidence[0].update(robots_url=None, robots_allowed=None)
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "robots.txt" in exc.value.detail
+
+    def test_disallowed_robots_blocks_promotion(self):
+        pool = GatePool()
+        pool.evidence[0].update(robots_allowed=False)
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert "robots.txt" in exc.value.detail
 
     def test_explicit_opt_out_disables_only_the_provenance_check(self, monkeypatch):
         monkeypatch.setenv("MTK_REQUIRE_FETCH_PROVENANCE", "0")

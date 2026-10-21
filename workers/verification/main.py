@@ -36,12 +36,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from source_adapters import Fetcher, fetch_page_snapshot  # noqa: E402
+from source_adapters import Fetcher, check_robots, fetch_page_snapshot  # noqa: E402
 from source_adapters.egress import EgressPolicy  # noqa: E402
 
-from allowlist import build_allowlist  # noqa: E402
+from allowlist import build_allowlist, domain_ok, host_of  # noqa: E402
 from extractors import extract, is_complete  # noqa: E402
-from allowlist import domain_ok  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 SWEEP_INTERVAL = 120  # seconds
@@ -132,6 +131,16 @@ class Verifier:
         observed_values: dict[str, str] = {}
         usable_pages = 0
         for url in official_urls:
+            # Permission first (master plan §3): a page may only be read when
+            # the host's robots policy is readable and permits it. The decision
+            # is recorded with the evidence, not inferred later.
+            permission = self._permission(url)
+            if not permission.allowed:
+                log.warning(
+                    "offer %s: %s — not fetching %s",
+                    offer_id, permission.reason, url,
+                )
+                continue
             snapshot = fetch_page_snapshot(
                 url, fetcher=self.fetcher, max_text_chars=None, policy=self.policy,
             )
@@ -162,7 +171,11 @@ class Verifier:
             # Exact bytes + how they were fetched. The API re-hashes and
             # re-checks every URL in the chain; it never trusts these.
             if provenance:
-                provenance = {**provenance, "fetch_identity": FETCH_IDENTITY}
+                provenance = {
+                    **provenance,
+                    "fetch_identity": FETCH_IDENTITY,
+                    "robots": permission.as_provenance(),
+                }
                 payload["raw_content_b64"] = item.extra["raw_content_b64"]
                 payload["provenance"] = provenance
             evidence = self._post(f"/offers/{offer_id}/evidence", json=payload)
@@ -214,6 +227,16 @@ class Verifier:
                      offer_id, complete, len(conflicts))
 
     # -------------------------------------------------------------- helpers
+
+    def _permission(self, url: str):
+        """Per-host robots decision, cached for the life of one worker run."""
+        cache = getattr(self, "_permission_cache", None)
+        if cache is None:
+            cache = self._permission_cache = {}
+        host = host_of(url)
+        if host not in cache:
+            cache[host] = check_robots(host, fetcher=self.fetcher, policy=self.policy)
+        return cache[host]
 
     def _official_pages(self, provider: str, allowlist: dict) -> list[str]:
         """Registered page_watch URLs belonging to the provider's domains."""

@@ -3,6 +3,7 @@ from .egress import EgressError, EgressPolicy, FetchResult, safe_fetch
 from .github_releases import fetch_github_releases
 from .models import RawItem
 from .page_watch import PARSER_VERSION, fetch_page_snapshot
+from .permissions import RobotsDecision, check_robots
 from .rss import fetch_rss
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "Fetcher",
     "PARSER_VERSION",
     "RawItem",
+    "RobotsDecision",
+    "check_robots",
     "fetch_rss",
     "fetch_github_releases",
     "fetch_page_snapshot",
