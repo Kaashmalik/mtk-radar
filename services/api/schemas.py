@@ -76,6 +76,20 @@ class PollResult(BaseModel):
     detail: Optional[str] = None
 
 
+class TosReviewIn(BaseModel):
+    """A human attestation that automated reading of a source is permitted.
+
+    `reference` points at the terms/contract the reviewer read (a URL, ticket or
+    document id) so the decision is auditable later; free text with no reference
+    is not an attestation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reference: str = Field(strict=True, min_length=3, max_length=500, pattern=r"\S")
+    reviewer: Optional[str] = Field(default=None, min_length=1, max_length=200, pattern=r"\S")
+
+
 # ---------------------------------------------------------------- offers
 
 

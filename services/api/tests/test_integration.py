@@ -84,7 +84,11 @@ def client():
 
 @pytest.fixture()
 def source(client):
-    """A Tier-A provider whose canonical domain covers example.com."""
+    """A Tier-A provider whose canonical domain covers example.com.
+
+    The source is attested as reviewed because machine collection now requires a
+    recorded terms-of-service decision (WP01 slice 10).
+    """
     res = client.post("/sources", json={
         "provider": "Acme Domains",
         "canonical_domain": "example.com",
@@ -93,7 +97,12 @@ def source(client):
         "trust_tier": "A_provider_owned",
     })
     assert res.status_code == 201, res.text
-    return res.json()["id"]
+    source_id = res.json()["id"]
+    review = client.post(f"/sources/{source_id}/tos-review", json={
+        "reference": "https://example.com/terms", "reviewer": "pytest",
+    })
+    assert review.status_code == 200, review.text
+    return source_id
 
 
 # ------------------------------------------------------------- the pipeline
@@ -158,6 +167,7 @@ def test_full_review_pipeline(client, source):
 
     ev = client.post(f"/offers/{offer_id}/evidence", json={
         "url": "https://example.com/terms/free-domain",
+        "source_id": source,
         "official": True,
         "excerpt": "Twelve months free, then standard renewal. New accounts only.",
         "captured_content": "Twelve months free, then standard renewal. New accounts only.",
@@ -372,6 +382,15 @@ def _coverage(*evidence_ids, sections=1):
     }
 
 
+def _attest(client, source_id):
+    """Record the terms-of-service review machine collection now requires."""
+    response = client.post(f"/sources/{source_id}/tos-review", json={
+        "reference": "https://example.com/terms", "reviewer": "pytest",
+    })
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _verification_fixture(client):
     import uuid
     provider = f"WP01 {uuid.uuid4()}"
@@ -380,6 +399,7 @@ def _verification_fixture(client):
         "adapter": "manual", "trust_tier": "A_provider_owned",
     })
     assert source.status_code == 201, source.text
+    _attest(client, source.json()["id"])
     offer = client.post("/offers", json={
         "provider": provider, "category": "student_programs", "offer_type": "coupon",
     })
@@ -1074,6 +1094,7 @@ def _typed_fixture(client, offer_type, text=FACT_PACK_TEXT):
         "trust_tier": "A_provider_owned",
     })
     assert source.status_code == 201, source.text
+    _attest(client, source.json()["id"])
     offer = client.post("/offers", json={
         "provider": provider, "category": "student_programs", "offer_type": offer_type,
     })
@@ -1097,6 +1118,155 @@ def _typed_fixture(client, offer_type, text=FACT_PACK_TEXT):
 
     field.evidence_id = eid
     return oid, field
+
+
+def _new_source(client, provider):
+    response = client.post("/sources", json={
+        "provider": provider, "canonical_domain": "example.com",
+        "category": "student_programs", "adapter": "manual",
+        "trust_tier": "A_provider_owned",
+    })
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+def _new_offer(client, provider):
+    offer = client.post("/offers", json={
+        "provider": provider, "category": "student_programs", "offer_type": "coupon",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    assert client.post(f"/offers/{offer_id}/transition",
+                       json={"to": "evidence_needed"}).status_code == 200
+    return offer_id
+
+
+def test_machine_evidence_requires_a_tos_attested_source(client):
+    import uuid
+    provider = f"WP01TOS {uuid.uuid4()}"
+    source_id = _new_source(client, provider)
+    offer_id = _new_offer(client, provider)
+    url = "https://example.com/tos-terms"
+    payload = {
+        "url": url, "source_id": source_id, "official": True,
+        "captured_content": SNAPSHOT_TEXT,
+        **_procured(url, SNAPSHOT_TEXT),
+    }
+    blocked = client.post(f"/offers/{offer_id}/evidence", json=payload)
+    assert blocked.status_code == 422, blocked.text
+    assert "terms-of-service review" in blocked.json()["detail"]
+
+    review = client.post(f"/sources/{source_id}/tos-review", json={
+        "reference": "provider terms v3", "reviewer": "pytest",
+    })
+    assert review.status_code == 200, review.text
+    assert review.json()["tos_reviewer"] == "pytest"
+
+    allowed = client.post(f"/offers/{offer_id}/evidence", json=payload)
+    assert allowed.status_code == 201, allowed.text
+    listed = next(s for s in client.get("/sources").json() if s["id"] == source_id)
+    assert listed["tos_reviewer"] == "pytest"
+    assert listed["tos_reference"] == "provider terms v3"
+    assert listed["tos_reviewed_at"] is not None
+
+
+def test_tos_requirement_opt_out_allows_legacy_sources(client, monkeypatch):
+    import uuid
+    monkeypatch.setenv("MTK_REQUIRE_TOS_ATTESTATION", "0")
+    provider = f"WP01TOSLEGACY {uuid.uuid4()}"
+    source_id = _new_source(client, provider)
+    offer_id = _new_offer(client, provider)
+    response = client.post(f"/offers/{offer_id}/evidence", json={
+        "url": "https://example.com/legacy-tos", "source_id": source_id,
+        "official": True, "captured_content": SNAPSHOT_TEXT,
+        **_procured("https://example.com/legacy-tos", SNAPSHOT_TEXT),
+    })
+    assert response.status_code == 201, response.text
+
+
+def test_tos_review_requires_a_recorded_reviewer(client):
+    import uuid
+    source_id = _new_source(client, f"WP01TOSR {uuid.uuid4()}")
+    missing = client.post(f"/sources/{source_id}/tos-review",
+                          json={"reference": "terms v1"})
+    assert missing.status_code == 403
+    blank = client.post(f"/sources/{source_id}/tos-review",
+                        json={"reference": "   ", "reviewer": "Kashi"})
+    assert blank.status_code == 422
+    assert client.post(f"/sources/{source_id}/tos-review", json={
+        "reference": "terms v1", "reviewer": "Kashi",
+    }).status_code == 200
+    unknown = client.post(f"/sources/{uuid.uuid4()}/tos-review", json={
+        "reference": "terms v1", "reviewer": "Kashi",
+    })
+    assert unknown.status_code == 404
+
+
+def test_machine_evidence_must_name_its_source(client):
+    oid, _, _, _, payload = _verification_fixture(client)
+    response = client.post(f"/offers/{oid}/evidence",
+                           json={**payload, "source_id": None})
+    assert response.status_code == 422, response.text
+    assert "registered source" in response.json()["detail"]
+
+
+def test_reviewer_attested_snapshot_needs_no_tos_attestation(client):
+    import uuid
+    provider = f"WP01HUMAN {uuid.uuid4()}"
+    source_id = _new_source(client, provider)
+    offer_id = _new_offer(client, provider)
+    response = client.post(f"/offers/{offer_id}/evidence", json={
+        "url": "https://example.com/human-terms", "source_id": source_id,
+        "official": True, "captured_content": SNAPSHOT_TEXT,
+        "excerpt": "reviewed by hand", "reviewer": "Kashi",
+    })
+    assert response.status_code == 201, response.text
+
+
+def test_tos_review_migration_enforces_a_complete_attestation(client):
+    """Upgrade 017→018: no attestation until all three fields are set."""
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_tos_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            target = next(p for p in paths if p.name.startswith("018_"))
+            for path in paths:
+                if path.name < target.name:
+                    await conn.execute(path.read_text(encoding="utf-8"))
+            source_id = await conn.fetchval(
+                "INSERT INTO sources (provider, canonical_domain, category, adapter, trust_tier) "
+                "VALUES ('TOS', 'example.com', 'student_programs', 'manual', "
+                "'A_provider_owned') RETURNING id")
+            await conn.execute(target.read_text(encoding="utf-8"))
+            row = await conn.fetchrow(
+                "SELECT tos_reviewed_at, tos_reviewer, tos_reference "
+                "FROM sources WHERE id = $1", source_id)
+            assert row["tos_reviewed_at"] is None and row["tos_reviewer"] is None
+            with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                # A savepoint: the failed CHECK must not abort the outer test
+                # transaction that is rolled back at the end.
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE sources SET tos_reviewed_at = now(), tos_reviewer = 'Kashi' "
+                        "WHERE id = $1", source_id)
+            await conn.execute(
+                "UPDATE sources SET tos_reviewed_at = now(), tos_reviewer = 'Kashi', "
+                "tos_reference = 'terms v1' WHERE id = $1", source_id)
+            row = await conn.fetchrow(
+                "SELECT tos_reviewer, tos_reference FROM sources WHERE id = $1",
+                source_id)
+            assert row["tos_reviewer"] == "Kashi" and row["tos_reference"] == "terms v1"
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
 
 
 def test_fact_pack_is_persisted_and_returned(client):

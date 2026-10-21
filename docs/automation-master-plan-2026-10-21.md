@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** nine WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction and a mandatory extraction-coverage gate. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md) and [slice 9](implementation-wp01-slice9-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** ten WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate and per-source terms-of-service review attestation. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md) and [slice 10](implementation-wp01-slice10-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -134,7 +134,7 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 | [x] Partial | Metrics, monitor, health, auth, audit logs, backup scripts | Existing API/workers/infra; operational execution not demonstrated here |
 | [ ] | Trend/entity clustering, velocity, cross-source corroboration and watched topics | WP05–WP06 |
 | [x] | Retained hash-checked text snapshots, typed evidence binding, literal quote checks and server-derived core completeness | WP01 first integrity slice; 325 tests passed including isolated PostgreSQL integration; not semantic offer verification |
-| [ ] | Complete official offer confirmation: type-specific terms, mandatory extraction coverage, freshness and downstream fact-pack propagation | Remaining WP01 work |
+| [ ] | Complete official offer confirmation: type-specific terms, mandatory extraction coverage, attestation expiry, freshness and downstream fact-pack propagation | Remaining WP01 work |
 | [ ] | Strict local GLM/MiniMax-compatible model gateway and evaluations | WP07 |
 | [ ] | Native Full HD capture, semantic edit plan, speech alignment and media QC | WP08–WP09 |
 | [ ] | Light manual in-app editing, revision history and selective rerender | WP10 |
@@ -635,11 +635,18 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Require the record to list every machine snapshot the claims use, so a truncated run cannot examine one page and cite another; reviewer-attested snapshots remain exempt because a human attested them.
 - [x] Keep the opt-out explicit and documented for legacy deployments only; all successful promotion paths in the integration suite now send coverage. 5 new tests; full suite **591 passed, zero skips**. See [ninth-slice checkpoint](implementation-wp01-slice9-2026-10-21.md).
 
+**Completed — tenth slice, per-source terms-of-service review attestation:**
+
+- [x] Record a human terms-of-service decision per source in migration 018 (`tos_reviewed_at`, `tos_reviewer`, `tos_reference`), with an all-or-nothing CHECK: a timestamp without a named reviewer and a reference is not an attestation.
+- [x] Add `POST /sources/{id}/tos-review`: the authenticated reviewer token binds identity first, the body field is the service-caller fallback, no identity is a 403, an unknown source a 404, and the audit log keeps each recording.
+- [x] Refuse new machine-collected evidence (raw bytes + provenance) for a source with no recorded review, or with no named source at all; reviewer-attested snapshots remain exempt. `MTK_REQUIRE_TOS_ATTESTATION` defaults on with a documented legacy opt-out.
+- [x] Make the verification worker skip unattested sources with a log entry instead of fetching bytes it may not keep, and send `source_id` with every evidence record. 8 new tests; full suite **599 passed, zero skips**. See [tenth-slice checkpoint](implementation-wp01-slice10-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
 - [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
 - [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
-- [ ] Record a per-source terms-of-service review/attestation: robots.txt is machine-checkable, ToS consent is not, and no human attestation is captured yet.
+- [ ] Give the ToS attestation a bounded validity and a revocation/re-attestation path; today a review never expires and changed terms are invisible to the system.
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
 - [ ] Add risk-based freshness checks and revalidate/refuse at scheduling, resume, capture and upload boundaries.
 - [ ] Propagate evidence/source/terms changes to all affected approved packages and published-content correction tasks, not only replacement-extraction schedule pausing.
@@ -833,7 +840,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction and a mandatory extraction-coverage gate implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md). Non-symmetric acquisition identity, ToS review attestation, semantic applicable-terms proof, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate and per-source terms-of-service attestation implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md). Non-symmetric acquisition identity, attestation expiry/revocation, semantic applicable-terms proof, coverage for claim-free pages, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1061,6 +1068,41 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Next smallest task:** a per-source terms-of-service review attestation, since
   robots.txt permission is machine-checked but no human sign-off that automated
   reading is permitted by the provider's terms is recorded.
+
+#### 21 October 2026, 20:35 UTC — WP01 tenth slice: per-source ToS attestation
+
+- **Status:** implemented; locally VERIFIED for the attestation scope only. Whole
+  WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `ccf9761`).
+- **Changes:** migration 018 adds `tos_reviewed_at`, `tos_reviewer`,
+  `tos_reference` to `sources` with an all-or-nothing CHECK; `POST
+  /sources/{id}/tos-review` records the decision (token-bound reviewer first,
+  body fallback, 403 without one, 404 for an unknown source, audit-logged) and
+  `GET /sources` exposes it; evidence ingest refuses machine provenance (raw
+  bytes + fetch chain + signature) when the source has no recorded review or the
+  record names no source, with reviewer-attested snapshots exempt and
+  `MTK_REQUIRE_TOS_ATTESTATION` on by default; the worker skips unattested
+  sources and sends `source_id` with each snapshot. See
+  [tenth-slice checkpoint](implementation-wp01-slice10-2026-10-21.md).
+- **Failing first:** at `ccf9761` there is no endpoint, column or flag, so machine
+  evidence for a source with no review is stored with 201; `_official_pages`
+  returns bare URLs and the payload has no `source_id`.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **599 passed, 26 warnings, zero skips**, exit 0 (was 591; +8 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. The 017→018 upgrade
+  test confirms legacy sources stay unattested and the CHECK refuses a partial
+  attestation.
+- **Not closed, and deliberately not ticked:** attestations never expire and
+  there is no revocation flow, so changed terms stay invisible; the reviewer's
+  judgment is not machine-checkable; permission is per source, not per URL;
+  coverage cannot see claim-free pages; non-symmetric acquisition identity;
+  semantic applicable-terms coverage; freshness; downstream invalidation; legacy
+  review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database received migrations; no network fetch was performed.
+- **Next smallest task:** bound the attestation's validity and re-check it at
+  collection time, so a stale review stops authorising new reads.
 
 ## 13. Coding-model execution guide
 
