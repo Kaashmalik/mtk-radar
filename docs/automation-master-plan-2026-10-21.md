@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** eight WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance and sectioned long-document extraction. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md) and [slice 8](implementation-wp01-slice8-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 21 October 2026:** nine WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction and a mandatory extraction-coverage gate. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md) and [slice 9](implementation-wp01-slice9-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -629,9 +629,15 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Send `coverage` with every extraction and have the API recompute the section count from the stored snapshot text, rejecting a truncated claim, a foreign evidence id, an unknown version or a different ceiling with a 422.
 - [x] Store the record in migration 017 (legacy rows stay `NULL`) and expose it on `GET /offers/{id}`; accept snapshots up to the egress bound (2,000,000 characters). 38 new tests; full suite **586 passed, zero skips**. See [eighth-slice checkpoint](implementation-wp01-slice8-2026-10-21.md).
 
+**Completed — ninth slice, mandatory extraction coverage at promotion:**
+
+- [x] Require the stored `coverage` record at promotion for machine-collected official evidence (`MTK_REQUIRE_EXTRACTION_COVERAGE`, default on): a missing or empty record blocks `verified` even when the fact pack is complete.
+- [x] Require the record to list every machine snapshot the claims use, so a truncated run cannot examine one page and cite another; reviewer-attested snapshots remain exempt because a human attested them.
+- [x] Keep the opt-out explicit and documented for legacy deployments only; all successful promotion paths in the integration suite now send coverage. 5 new tests; full suite **591 passed, zero skips**. See [ninth-slice checkpoint](implementation-wp01-slice9-2026-10-21.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Make `coverage` mandatory at promotion for machine evidence (reviewer-attested snapshots exempt), so an extraction that omits it cannot earn `verified`; legacy rows stay readable.
+- [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
 - [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
 - [ ] Record a per-source terms-of-service review/attestation: robots.txt is machine-checkable, ToS consent is not, and no human attestation is captured yet.
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
@@ -827,7 +833,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance and sectioned long-document extraction implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md). A mandatory coverage gate, non-symmetric acquisition identity, ToS review attestation, semantic applicable-terms proof, freshness, downstream invalidation and legacy review remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction and a mandatory extraction-coverage gate implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md). Non-symmetric acquisition identity, ToS review attestation, semantic applicable-terms proof, freshness, downstream invalidation and legacy review remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1023,6 +1029,38 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Next smallest task:** require coverage at promotion for machine evidence
   (reviewer-attested snapshots exempt), so an extraction that omits it cannot
   earn `verified` while legacy rows stay readable.
+
+#### 21 October 2026, 19:47 UTC — WP01 ninth slice: mandatory extraction coverage
+
+- **Status:** implemented; locally VERIFIED for the coverage-gate scope only.
+  Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `cec97fd`).
+- **Changes:** `_gate_verified` reads the stored extraction's `coverage` and runs
+  `_coverage_problems` when `MTK_REQUIRE_EXTRACTION_COVERAGE` is on (default on).
+  The check resolves the machine-collected official evidence the claims use: a
+  missing or empty coverage record blocks promotion, and the record must list
+  every such snapshot. Reviewer-attested snapshots are exempt. The opt-out is
+  documented in `.env.example` and the compose file as a legacy-migration setting
+  only. See [ninth-slice checkpoint](implementation-wp01-slice9-2026-10-21.md).
+- **Failing first:** at `cec97fd` the gate ignores `coverage`, so a machine
+  extraction with `coverage = NULL` promotes; `test_missing_coverage_blocks_promotion`
+  fails because no exception is raised, and the helper/flag do not exist.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **591 passed, 26 warnings, zero skips**, exit 0 (was 586; +5 new tests);
+  `ruff check`, `compileall`, `pnpm typecheck` all exit 0. All successful
+  promotion paths in the integration suite send coverage; existing 422 cases
+  still fail for their original reasons.
+- **Not closed, and deliberately not ticked:** the gate only checks evidence the
+  claims use, so a fetched page with no claims is invisible to it; coverage is a
+  structural section count, not proof of semantic applicable-terms comprehension;
+  non-symmetric acquisition identity; ToS review attestation; freshness;
+  downstream invalidation; legacy review.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database was used.
+- **Next smallest task:** a per-source terms-of-service review attestation, since
+  robots.txt permission is machine-checked but no human sign-off that automated
+  reading is permitted by the provider's terms is recorded.
 
 ## 13. Coding-model execution guide
 

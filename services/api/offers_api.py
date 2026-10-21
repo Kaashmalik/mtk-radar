@@ -759,7 +759,7 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
     """Revalidate stored proposals, including legacy rows, never trust complete."""
     latest = await pool.fetchrow(
         """
-        SELECT fields, conflicts FROM extractions
+        SELECT fields, conflicts, coverage::text AS coverage FROM extractions
         WHERE offer_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         offer_id,
@@ -783,6 +783,10 @@ async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
     problems = list(problems) + type_problems
     if _require_fetch_provenance():
         problems = list(problems) + await _provenance_problems(pool, offer_id, extraction)
+    if _require_extraction_coverage():
+        problems = list(problems) + await _coverage_problems(
+            pool, offer_id, extraction, latest["coverage"],
+        )
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 
@@ -985,6 +989,41 @@ def _require_fetch_signature() -> bool:
     """Signed provenance is required by default for the same reason."""
     value = os.environ.get("MTK_REQUIRE_FETCH_SIGNATURE", "1")
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _require_extraction_coverage() -> bool:
+    """Machine evidence must record what the extractor examined (slice 9)."""
+    value = os.environ.get("MTK_REQUIRE_EXTRACTION_COVERAGE", "1")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+async def _coverage_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
+                             coverage_text) -> list[str]:
+    """Every machine snapshot a claim uses must be listed as examined."""
+    ids = list({field.evidence_id for field in extraction.fields.values()})
+    rows = await pool.fetch(
+        "SELECT id, reviewer FROM evidence "
+        "WHERE offer_id = $1 AND id = ANY($2::uuid[]) AND official AND domain_ok",
+        offer_id, ids,
+    )
+    machine = {str(row["id"]) for row in rows if row["reviewer"] is None}
+    if not machine:
+        # Reviewer-attested snapshots are a recorded human action; there is no
+        # acquisition run to account for.
+        return []
+    coverage = decode(coverage_text)
+    if not isinstance(coverage, dict) or not coverage.get("evidence_ids"):
+        return [
+            "verified requires an extraction coverage record for "
+            "machine-collected evidence; re-run sectioned extraction"
+        ]
+    listed = {str(item) for item in coverage["evidence_ids"]}
+    if machine - listed:
+        return [
+            "extraction coverage does not include every machine-collected "
+            "snapshot its claims use"
+        ]
+    return []
 
 
 def _verified_signature(provenance: EvidenceProvenance) -> Optional[str]:

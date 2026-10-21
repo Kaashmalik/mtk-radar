@@ -182,6 +182,7 @@ def test_full_review_pipeline(client, source):
         },
         "complete": True,
         "model": "pytest",
+        "coverage": _coverage(ev.json()["id"]),
     })
     assert ext.status_code == 201, ext.text
 
@@ -362,6 +363,15 @@ def _procured(url, text, *, fetched_at=None, redirects=(), robots=None):
     }
 
 
+def _coverage(*evidence_ids, sections=1):
+    """A coverage record for short (single-section) snapshots."""
+    return {
+        "version": "paragraph-groups/1", "sections_total": sections,
+        "max_section_chars": 6000,
+        "evidence_ids": [str(item) for item in evidence_ids],
+    }
+
+
 def _verification_fixture(client):
     import uuid
     provider = f"WP01 {uuid.uuid4()}"
@@ -402,7 +412,9 @@ def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
     assert row["captured_content"] == SNAPSHOT_TEXT
     assert row["content_hash"] == hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest()
     # False or omitted caller hints cannot override the server's calculation.
-    response = client.post(f"/offers/{oid}/extraction", json={"fields": fields, "complete": False})
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "complete": False, "coverage": _coverage(eid),
+    })
     assert response.status_code == 201, response.text
     assert response.json()["complete"] is True
     assert response.json()["validation_errors"] == []
@@ -513,8 +525,10 @@ def test_current_source_authorization_is_rechecked(client, change):
 @pytest.mark.parametrize("valid_replacement", [False, True])
 def test_new_extraction_revokes_verification_and_pauses_posts(client, valid_replacement):
     import uuid
-    oid, _, _, fields, _ = _verification_fixture(client)
-    assert client.post(f"/offers/{oid}/extraction", json={"fields": fields}).json()["complete"] is True
+    oid, _, eid, fields, _ = _verification_fixture(client)
+    assert client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    }).json()["complete"] is True
     assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 200
     sid = _run(
         "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, idempotency_key) "
@@ -523,6 +537,7 @@ def test_new_extraction_revokes_verification_and_pauses_posts(client, valid_repl
     )[0]["id"]
     response = client.post(f"/offers/{oid}/extraction", json={
         "fields": fields if valid_replacement else {}, "complete": True,
+        "coverage": _coverage(eid),
     })
     assert response.status_code == 201 and response.json()["complete"] is valid_replacement
     assert client.get(f"/offers/{oid}").json()["state"] == "evidence_needed"
@@ -789,8 +804,10 @@ def test_raw_snapshot_database_check_rejects_alteration(client):
 
 def test_simultaneous_proposal_and_promotion_cannot_leave_verified(client):
     from concurrent.futures import ThreadPoolExecutor
-    oid, _, _, fields, _ = _verification_fixture(client)
-    assert client.post(f"/offers/{oid}/extraction", json={"fields": fields}).json()["complete"] is True
+    oid, _, eid, fields, _ = _verification_fixture(client)
+    assert client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    }).json()["complete"] is True
     with ThreadPoolExecutor(max_workers=2) as executor:
         promote = executor.submit(client.post, f"/offers/{oid}/transition", json={"to": "verified"})
         replace = executor.submit(client.post, f"/offers/{oid}/extraction", json={"fields": {}})
@@ -1078,6 +1095,7 @@ def _typed_fixture(client, offer_type, text=FACT_PACK_TEXT):
             "evidence_id": eid, "confidence": 0.8, **extra,
         }
 
+    field.evidence_id = eid
     return oid, field
 
 
@@ -1149,6 +1167,7 @@ def test_complete_typed_offer_promotes(client):
             "auto_renew": field("yes"),
         },
         "complete": False,
+        "coverage": _coverage(field.evidence_id),
     })
     assert response.status_code == 201, response.text
     assert response.json()["complete"] is True, response.json()["validation_errors"]
@@ -1176,7 +1195,7 @@ def test_retyping_an_offer_rechecks_against_the_new_contract(client):
     extracted = client.post(f"/offers/{oid}/extraction", json={"fields": {
         "promo_code": field("SAVE2026"),
         "eligibility": field("students"),
-    }})
+    }, "coverage": _coverage(field.evidence_id)})
     assert extracted.json()["complete"] is True
     assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 200
 

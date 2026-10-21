@@ -88,6 +88,9 @@ services:
       # refused by default. Unset ⇒ machine evidence cannot be accepted (503).
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
       MTK_REQUIRE_FETCH_SIGNATURE: ${MTK_REQUIRE_FETCH_SIGNATURE:-1}
+      # WP01: promotion refuses machine evidence without an extraction coverage
+      # record. Unset defaults to required; 0 is a legacy-migration opt-out.
+      MTK_REQUIRE_EXTRACTION_COVERAGE: ${MTK_REQUIRE_EXTRACTION_COVERAGE:-1}
       # public origin of the dashboard — enables §11 correction links in
       # scheduled captions (schedules_state.platform_metadata)
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
