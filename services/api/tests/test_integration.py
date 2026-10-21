@@ -669,6 +669,39 @@ def test_legacy_complete_flag_is_revalidated_not_grandfathered(client):
     assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
 
 
+def test_legacy_audit_reports_a_verified_offer_that_would_fail_today(client):
+    import uuid
+    good = _verified_offer(client)
+    bad = _verified_offer(client)
+    _run("UPDATE extractions SET coverage = NULL WHERE offer_id = $1", uuid.UUID(bad))
+
+    report = client.get("/offers/audit/verified").json()
+    failed = {row["id"]: row["problems"] for row in report["offers"]}
+    assert bad in failed
+    assert good not in failed
+    assert any("coverage" in problem for problem in failed[bad])
+    assert report["checked"] >= 2
+    assert report["failed"] == len(report["offers"])
+    assert report["requirements"]["extraction_coverage"] is True
+    # Read-only: the audit never demotes on its own.
+    assert client.get(f"/offers/{bad}").json()["state"] == "verified"
+
+
+def test_legacy_audit_names_a_verified_offer_with_no_extraction(client):
+    import uuid
+    offer = client.post("/offers", json={
+        "provider": "Legacy Audit Co", "category": "domains", "offer_type": "coupon",
+    })
+    oid = offer.json()["id"]
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", uuid.UUID(oid))
+
+    report = client.get("/offers/audit/verified").json()
+    row = next(item for item in report["offers"] if item["id"] == oid)
+    assert row["problems"] == [
+        "requires structured extraction with official snapshot evidence"
+    ]
+
+
 def test_hash_only_legacy_snapshot_cannot_support_new_verification(client):
     import hashlib
     import uuid
