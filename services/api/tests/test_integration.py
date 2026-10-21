@@ -787,7 +787,7 @@ def test_robots_permission_migration_never_invents_permission(client):
             await conn.execute(f'CREATE SCHEMA "{schema}"')
             await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
             paths = db_migrate.migration_files()
-            for path in paths[:14]:
+            for path in paths[:-1]:
                 await conn.execute(path.read_text(encoding="utf-8"))
             oid = await conn.fetchval(
                 "INSERT INTO offers (title, provider, category, offer_type) "
@@ -800,7 +800,7 @@ def test_robots_permission_migration_never_invents_permission(client):
                 "VALUES ($1,$2,$3,$4,$5,$6, now(), 'page_watch/1') RETURNING id",
                 oid, SNAPSHOT_URL, digest, raw,
                 hashlib.sha256(raw).hexdigest(), SNAPSHOT_URL)
-            await conn.execute(paths[14].read_text(encoding="utf-8"))
+            await conn.execute(paths[-1].read_text(encoding="utf-8"))
             row = await conn.fetchrow(
                 "SELECT robots_url, robots_checked_at, robots_allowed, robots_status "
                 "FROM evidence WHERE id = $1", eid)
