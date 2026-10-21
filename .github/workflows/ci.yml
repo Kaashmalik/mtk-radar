@@ -49,7 +49,7 @@ jobs:
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests
-        run: pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests -v
+        run: pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -v
       - name: Integration tests (real Postgres, real migrations, full pipeline)
         env:
           MTK_TEST_DATABASE_URL: postgresql://mtk:mtk@localhost:5432/mtk_radar_ci

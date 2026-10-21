@@ -87,6 +87,10 @@ services:
       # public origin of the dashboard — enables §11 correction links in
       # scheduled captions (schedules_state.platform_metadata)
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
+      # browser origins allowed to call the API (comma separated). The
+      # dashboard's client islands are subject to CORS — a wrong allowlist
+      # breaks every interactive action in the browser.
+      MTK_CORS_ORIGINS: ${MTK_CORS_ORIGINS:-}
     ports:
       - "8000:8000"
     depends_on:

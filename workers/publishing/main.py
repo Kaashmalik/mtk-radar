@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -155,6 +156,10 @@ class Publisher:
 
         published = 0
         for post in due:
+            if _STOP:
+                log.info("stop requested — %d scheduled post(s) left for the next run",
+                         len(due) - published)
+                break
             try:
                 self._publish(post, adapters)
                 published += 1
@@ -394,9 +399,12 @@ class Publisher:
 
     def run_forever(self, interval_s: int = SWEEP_INTERVAL_S) -> None:
         log.info("publishing worker started against %s", self.api.base_url)
-        while True:
+        _install_stop_handlers()
+        while not _STOP:
             try:
                 self.run_once()
+                if _STOP:
+                    break
                 time.sleep(interval_s)
             except httpx.HTTPError as exc:
                 log.error("API unreachable, retrying in %ss: %s", interval_s, exc)
@@ -434,6 +442,25 @@ def public_media_url(ref: str) -> str | None:
             key = ref[len(scheme):].lstrip("/")
             return f"{base}/{key}" if key else None
     return None
+
+
+# ---------------------------------------------------------- graceful stop
+# SIGTERM (docker stop / systemd) must NOT abandon a post mid-upload: the
+# worker finishes the item it is on, reports the outcome, then exits.
+_STOP = False
+
+
+def _install_stop_handlers() -> None:
+    def _handler(signum, _frame):
+        global _STOP
+        _STOP = True
+        log.info("signal %s received — finishing the current item, then exiting", signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover — non-main thread
+            pass
 
 
 def main() -> None:

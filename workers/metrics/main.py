@@ -23,6 +23,7 @@ Usage:
 import argparse
 import logging
 import os
+import signal
 import sys
 import time
 
@@ -170,14 +171,35 @@ class MetricsWorker:
 
     def run_forever(self, interval: int) -> None:
         gap = int(os.environ.get("MTK_METRICS_INTERVAL", str(interval)))
-        while True:
+        while not _STOP:
             started = time.monotonic()
             try:
                 self.run_once()
             except httpx.HTTPError as exc:
                 log.warning("sweep aborted (API unreachable): %s", exc)
+            if _STOP:
+                break
             elapsed = time.monotonic() - started
             time.sleep(max(5, gap - elapsed))
+
+
+# ---------------------------------------------------------- graceful stop
+# SIGTERM (docker stop / systemd) must NOT abandon a post mid-upload: the
+# worker finishes the item it is on, reports the outcome, then exits.
+_STOP = False
+
+
+def _install_stop_handlers() -> None:
+    def _handler(signum, _frame):
+        global _STOP
+        _STOP = True
+        log.info("signal %s received — finishing the current item, then exiting", signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover — non-main thread
+            pass
 
 
 def main() -> None:
@@ -188,6 +210,7 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=3600)
     args = parser.parse_args()
 
+    _install_stop_handlers()
     worker = MetricsWorker(args.api)
     if args.once:
         worker.run_once()

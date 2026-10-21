@@ -15,6 +15,7 @@ const LINKS: [string, string][] = [
   ["/", "Inbox"],
   ["/review", "Review desk"],
   ["/queue", "Queue"],
+  ["/sources", "Sources"],
   ["/calendar", "Calendar"],
   ["/analytics", "Analytics"],
   ["/connections", "Connections"],

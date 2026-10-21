@@ -229,6 +229,7 @@ from captures_api import router as _captures_router
 from offers_api import router as _offers_router
 from renders_api import router as _renders_router
 from schedules_api import router as _schedules_router
+from health_api import router as _health_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
 from schedules_state import script_version_hash
@@ -287,7 +288,7 @@ def auth_client(client):
         await db.close()
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
-              _settings_router, _analytics_router):
+              _settings_router, _analytics_router, _health_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -514,3 +515,14 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     assert not [c for c in candidates if c["offer_id"] == other["id"]], \
         "footage that failed redaction review must never reach the renderer"
+
+
+def test_health_reports_database_and_migration_readiness(auth_client):
+    """Deploy probes need more than 'the process answers': a reachable
+    database with a missing migration must be visible, not a 200 that lies."""
+    res = auth_client.get("/health", headers=SVC)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "ok" and body["database"] == "ok"
+    assert body["migrations_applied"] == body["migrations_total"] > 0
+    assert isinstance(body["version"], str) and body["version"]

@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import db
 import api_hardening
 from captures_api import router as captures_router
+import health_api
+from health_api import router as health_router
 from jsonb import decode_mapping
 from normalize import canonicalize_url, hash_parts
 from offers_api import router as offers_router
@@ -33,11 +35,33 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.19.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.20.0")
+health_api.APP_VERSION = app.version
+
+
+def _cors_origins() -> list[str]:
+    """Browser origins allowed to call the API.
+
+    The dashboard's client-side islands (identity, corrections, settings,
+    connections, sources) are same-origin-agnostic: the browser enforces
+    CORS. A hardcoded localhost list would break every real deployment
+    (127.0.0.1, a domain, a reverse proxy), so the allowlist is
+    configurable and seeded from the public base URL.
+    """
+    raw = os.environ.get("MTK_CORS_ORIGINS", "").strip()
+    origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    for default in ("http://localhost:3000", "http://127.0.0.1:3000"):
+        if default not in origins:
+            origins.append(default)
+    public = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if public and public not in origins:
+        origins.append(public)
+    return origins
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # dashboard
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +72,7 @@ app.include_router(captures_router)
 app.include_router(renders_router)
 app.include_router(schedules_router)
 app.include_router(settings_router)
+app.include_router(health_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 
@@ -69,17 +94,6 @@ async def shutdown() -> None:
 
 
 # ---------------------------------------------------------------- health
-
-
-@app.get("/health")
-async def health() -> dict:
-    """Liveness + DB connectivity probe."""
-    pool = db.get()
-    try:
-        await pool.fetchval("SELECT 1")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
-    return {"status": "ok", "service": "api", "version": app.version}
 
 
 # ---------------------------------------------------------------- sources

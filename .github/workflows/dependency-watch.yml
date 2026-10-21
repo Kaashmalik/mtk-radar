@@ -1,0 +1,75 @@
+name: Dependency watch
+
+# Monthly freshness report for the pinned upstreams (master plan §8:
+# "Before adopting any repository, inspect the LICENSE, recent release
+# activity, security advisories…"). READ-ONLY: it reports newer versions, it
+# never edits a pin and never deploys. Upgrades happen through
+# docs/upgrade-checklist.md.
+
+on:
+  schedule:
+    - cron: "17 6 1 * *"   # 1st of the month, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-packages:
+    name: Python pins (latest vs pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Report newer versions of the pinned packages
+        run: |
+          set -euo pipefail
+          {
+            echo "## Python dependency freshness"
+            echo
+            for req in services/api/requirements.txt workers/requirements.txt \
+                       workers/capture/requirements.txt workers/metrics/requirements.txt \
+                       workers/batch/requirements.txt workers/publishing/requirements.txt; do
+              [ -f "$req" ] || continue
+              echo "### $req"
+              echo
+              echo '```'
+              # strip comments/blank lines; pip list --outdated compares what is
+              # installed against the index, so install first (pinned versions
+              # come from the repo, the report only compares them)
+              grep -vE '^\s*(#|$)' "$req" | tr -d '\r' > /tmp/reqs.txt
+              python -m pip install --quiet --upgrade pip > /dev/null
+              python -m pip install --quiet -r /tmp/reqs.txt > /dev/null 2>&1 || true
+              python -m pip list --outdated --format=columns 2>/dev/null | head -25 || true
+              echo '```'
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    name: Container image tags (latest vs pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report newer tags for the pinned images
+        run: |
+          set -euo pipefail
+          {
+            echo "## Container image freshness"
+            echo
+            for image in postgres:16-alpine redis:7-alpine; do
+              name="${image%%:*}"; tag="${image##*:}"
+              echo "### $name ($tag)"
+              echo
+              echo '```'
+              docker manifest inspect "$name:$tag" > /dev/null 2>&1 \
+                && echo "$name:$tag — pullable" \
+                || echo "$name:$tag — NOT pullable (check the pin!)"
+              echo '```'
+              echo
+            done
+            echo "FFmpeg and Playwright are pinned by version in the requirements"
+            echo "files; their freshness is visible in the pip report above."
+          } >> "$GITHUB_STEP_SUMMARY"

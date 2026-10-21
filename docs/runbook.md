@@ -5,6 +5,16 @@ recovery, and the first production review. This file is the source of truth
 for operating the platform; the master plan remains the source of truth for
 *why* these rules exist.
 
+Companion documents:
+- [`go-live-checklist.md`](go-live-checklist.md) — what the operator adds
+  (keys, social connections) and the first real post.
+- [`master-plan-traceability.md`](master-plan-traceability.md) — every master
+  plan item mapped to its code and its proof.
+- [`third-party-notices.md`](third-party-notices.md) / [`upgrade-checklist.md`](upgrade-checklist.md)
+  — the open-source inventory and how it is upgraded.
+- [`open-source-integrations.md`](open-source-integrations.md) — why each
+  external project was adopted or not.
+
 ---
 
 ## 1. Deployment
@@ -146,6 +156,26 @@ Save-link extension (v0.17): configure API URL + worker token via its options
 page (right-click icon → Options). The page gesture sends `POST /items` with
 the Bearer token; 401s surface on the toolbar badge with a hint.
 
+Operator console (v0.19/v0.20): every configuration surface lives in the
+dashboard — **Sources** (register what the collectors poll, see poll
+health), **Connections** (register social accounts + where their credentials
+live), **Settings** (publish windows, pipeline status), **Queue** (what the
+automation renders vs what waits on you). Secrets never pass through the
+browser.
+
+Health probe (v0.20): `GET /health` reports the database state AND the
+applied/total migration counts — a reachable database with a missing
+migration is visible instead of failing later under load. Use it as the
+readiness gate in your deploy pipeline.
+
+Full local verification (one command, same steps as CI):
+
+```bash
+pnpm verify          # lint → compile → tests (real Postgres) → typecheck →
+                     # dashboard build → compose/CI/extension checks → browser E2E
+pnpm verify --fast  # same, without the browser smoke test
+```
+
 ## 6. Retention policy (§13)
 
 - `schema_migrations`: forever (it *is* the schema history).
@@ -211,17 +241,17 @@ before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
 rows to refs.
 
 ## 9. Known gaps (explicit, not hidden)
-- **Automation (v0.19)**: the pipeline now runs itself around the human gates
-  — the batch worker generates scripts for earned offers and reports
+- **Automation (v0.19/v0.20)**: the pipeline runs itself around the human
+  gates — the batch worker generates scripts for earned offers and reports
   readiness, the render service renders the ready queue (script +
   redaction-reviewed capture, idempotent per script version), and the
   collector/publishing/metrics/monitor services run continuously under
   compose. The human gates are deliberate and stay human: evidence
   verification (§3), capture recording (§4), redaction review (§4), publish
-  approval (§17). Operator console: **Connections** (register accounts and
-  see where each credential lives), **Settings** (publish windows),
+  approval (§17). Operator console: **Sources**, **Connections** (register
+  accounts and where their credentials live), **Settings** (publish windows),
   **Queue** (what is rendering, what is waiting on you). Go-live procedure:
-  `docs/go-live-checklist.md`.
+  `docs/go-live-checklist.md`; one-command verification: `pnpm verify`.
 - **Instagram (v0.19)**: adapter implemented (Graph content publishing:
   container → transcoding wait → publish) and wired into publishing + metrics.
   Needs a professional (business/creator) account bound to a Page AND a

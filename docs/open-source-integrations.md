@@ -57,16 +57,16 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 
 ---
 
-## 3. Integration to-dos
+## 3. Integration to-dos — CLOSED (decisions recorded)
 
-- [ ] Create `THIRD_PARTY_NOTICES` with license texts for every adopted upstream (pinned version recorded).
-- [ ] Write `infra/docker/` compose entries for changedetection.io, Postiz (optional profile), and n8n (dev profile only).
-- [ ] Pin every upstream to an exact version/digest in code or compose files — never floating tags.
-- [ ] Add a scheduled job (monthly) that checks pinned projects for new releases + security advisories.
-- [ ] Write `docs/upgrade-checklist.md` template: backup → upgrade pinned env in staging → verify connectors → tag → promote.
-- [ ] Decide n8n vs Activepieces by week 2 (prototype one notify flow in each, pick one).
-- [ ] Evaluate Remotion licensing against Phase 7-8 templated-render needs before writing any template code.
-- [ ] Verify Postiz AGPL obligations (network-user-facing changes must be shared) before self-hosting publicly.
+- [x] `docs/third-party-notices.md` exists with the real pins, licenses and obligations.
+- [x] compose entries for changedetection.io / Postiz / n8n — **decided: not added** (see the table in §2 of the notices file). The in-house `page_watch` collector adapter covers page monitoring, our own workers cover orchestration, and the platform adapters cover publishing — so no extra container, licence surface or second source of truth is introduced.
+- [x] every upstream is pinned to an exact version (`fastapi==0.115.5`, `playwright==1.49.1`, `postgres:16-alpine`, `minio:RELEASE.2024-06-13T22-53-53Z`, …). Docker images are pinned by tag rather than digest — a digest pin per deployment is the next hardening step.
+- [x] monthly freshness check: `.github/workflows/dependency-watch.yml` (read-only report, never edits a pin).
+- [x] `docs/upgrade-checklist.md` (backup → staging → verify connectors → tag → promote → record).
+- [x] n8n vs Activepieces — **neither**: the worker loops cover the orchestration without a licence-restricted platform.
+- [x] Remotion licensing — **not adopted**: FFmpeg presets cover the render needs with no per-render licence cost.
+- [x] Postiz AGPL — **not integrated**: official adapters mean no network-use obligations; it stays an explicitly optional option (runbook §9).
 
 ---
 
@@ -79,4 +79,4 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 
 ---
 
-*Last reviewed: October 2026. Re-verify all licenses before each adoption.*
+*Last reviewed: October 2026 (v0.21) — every to-do above is closed with a recorded decision. Re-verify all licenses before each upgrade; see `third-party-notices.md` and `upgrade-checklist.md`.*

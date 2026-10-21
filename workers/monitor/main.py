@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timezone
 
 import os
+import signal
 import httpx
 
 
@@ -33,6 +34,7 @@ def _api_auth_headers() -> dict:
 API_URL_DEFAULT = "http://localhost:8000"
 INTERVAL_S = 300
 TOKEN_WARN_DAYS = 3
+METRICS_STALE_HOURS = 48  # audience numbers older than this are an alert
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 log = logging.getLogger("monitor")
@@ -79,9 +81,65 @@ def check_platform_accounts(client: httpx.Client) -> None:
                 pass
 
 
+def check_metrics_freshness(client: httpx.Client) -> None:
+    """Audience-metrics freshness (v0.20): published posts that nobody
+    measures are a silent blind spot — the operator thinks reach is known
+    while the numbers are days old (or missing because a scope/reason
+    stopped the pull)."""
+    try:
+        data = client.get("/analytics").json()
+    except httpx.HTTPError as exc:
+        log.warning("cannot read analytics for metrics freshness: %s", exc)
+        return
+
+    totals = data.get("metrics_totals") or {}
+    published = int(totals.get("published_total") or 0)
+    if published == 0:
+        return
+    measured = int(totals.get("posts_measured") or 0)
+    if measured == 0:
+        log.error("ALERT %d published post(s) but no audience metrics at all — "
+                  "the metrics worker has no access (OAuth scope / credentials) "
+                  "or has not run yet", published)
+        return
+    last = totals.get("last_captured_at")
+    if not last:
+        return
+    try:
+        captured = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if captured.tzinfo is None:
+        captured = captured.replace(tzinfo=timezone.utc)
+    hours = (datetime.now(timezone.utc) - captured).total_seconds() / 3600
+    if hours > METRICS_STALE_HOURS:
+        log.warning("ALERT audience metrics are %.0fh old (%d/%d posts measured) — "
+                    "the metrics sweep may have stopped", hours, measured, published)
+
+
 def run_once(client: httpx.Client) -> None:
     sweep_offers(client)
     check_platform_accounts(client)
+    check_metrics_freshness(client)
+
+
+# ---------------------------------------------------------- graceful stop
+# SIGTERM (docker stop / systemd) must NOT abandon a post mid-upload: the
+# worker finishes the item it is on, reports the outcome, then exits.
+_STOP = False
+
+
+def _install_stop_handlers() -> None:
+    def _handler(signum, _frame):
+        global _STOP
+        _STOP = True
+        log.info("signal %s received — finishing the current item, then exiting", signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover — non-main thread
+            pass
 
 
 def main() -> None:
@@ -92,15 +150,18 @@ def main() -> None:
     args = parser.parse_args()
 
     client = httpx.Client(timeout=60, base_url=args.api.rstrip("/"), headers=_api_auth_headers())
+    _install_stop_handlers()
     if args.once:
         run_once(client)
         log.info("monitor sweep complete")
         return
 
     log.info("monitor started against %s (interval %ss)", client.base_url, args.interval)
-    while True:
+    while not _STOP:
         try:
             run_once(client)
+            if _STOP:
+                break
             time.sleep(args.interval)
         except Exception as exc:  # noqa: BLE001 — monitor must never die
             log.exception("monitor tick failed: %s", exc)

@@ -15,6 +15,7 @@ test("app shell: brand, primary nav, and a green API health dot", async ({ page 
     "Inbox",
     "Review desk",
     "Queue",
+    "Sources",
     "Calendar",
     "Analytics",
     "Connections",
@@ -56,4 +57,14 @@ test("operator console: queue, connections and settings render live data", async
   await page.goto("/settings");
   await expect(page.locator("h1")).toContainText("Settings");
   await expect(page.locator("main")).not.toContainText("unreachable");
+});
+
+test("sources page lists registered sources and the add form", async ({ page }) => {
+  // v0.20: without a source there is nothing to collect — registering one
+  // must be possible from the desk, not from curl.
+  await page.goto("/sources");
+  await expect(page.locator("h1")).toContainText("Sources");
+  await expect(page.locator("main")).not.toContainText("unreachable");
+  await expect(page.locator("#src-provider")).toBeVisible();
+  await expect(page.locator("#src-adapter")).toBeVisible();
 });

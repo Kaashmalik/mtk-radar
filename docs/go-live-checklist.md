@@ -16,8 +16,8 @@ the database, never in the browser, never in git. The database only records
 
 | Area | How it is proven |
 | --- | --- |
-| API + DB | 12 integration tests against real Postgres 16, migrations 001→011 applied by the real runner |
-| State machine (§3) | 199 unit/integration tests — illegal transitions, expiry, hash-binding, redaction gates |
+| API + DB | 12 integration tests against real Postgres 16, migrations 001→010 applied by the real runner |
+| State machine (§3) | 224 unit/integration tests — illegal transitions, expiry, hash-binding, redaction gates |
 | Workers | collector, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
 | Dashboard | production build + Playwright smoke against the real API (3 browser tests) |
 | Object storage | S3-compatible driver tested against a real S3 mock (moto) |
@@ -30,7 +30,7 @@ Run everything yourself:
 cp .env.example .env          # then fill in the keys from §2/§3
 docker compose -f infra/docker/docker-compose.yml up -d
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
-corepack pnpm test            # 199 tests
+pnpm verify                    # the full pipeline (same steps as CI)
 ```
 
 ---
@@ -146,8 +146,10 @@ adapter stays disabled (posts are skipped, not failed).
 
 ## 4. First real run (15 minutes, no risk)
 
-1. **Seed a source** — Dashboard → Sources → add a Tier-A provider
-   (`provider`, `canonical_domain`, `trust_tier: A_provider_owned`).
+1. **Seed a source** — Dashboard → **Sources** → add a Tier-A provider
+   (`provider`, `canonical_domain`, `trust_tier: A_provider_owned`). This is
+   where the collectors find their work; without a source nothing is
+   collected. (CLI alternative: `python services/api/scripts/seed_sources.py`.)
 2. **Collect** — `docker compose … run --rm collectors` (or wait for the
    service). Items land in the Inbox.
 3. **Review** — Inbox → *Review desk*: attach an **official** evidence URL
@@ -191,4 +193,5 @@ adapter stays disabled (posts are skipped, not failed).
 | Reviewer token lost | `python -m scripts.mint_reviewer --name "Kashi"` → mint a new one |
 
 Full incident procedures: `docs/runbook.md` (§3 recovery, §5 daily ops,
-§6 retention, §9 known gaps).
+§6 retention, §9 known gaps). What each master-plan item maps to:
+`docs/master-plan-traceability.md`.

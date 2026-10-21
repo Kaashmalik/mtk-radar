@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import re
 import sys
 import time
@@ -121,9 +122,11 @@ class Collector:
 
     def run_forever(self) -> None:
         log.info("collector started against %s", self.api_url)
-        while True:
+        while not _STOP:
             try:
                 asyncio.run(self.sweep())
+                if _STOP:
+                    break
                 time.sleep(HOUSEKEEPING_INTERVAL)
             except httpx.HTTPError as exc:
                 log.error("API unreachable, retrying in %ss: %s", HOUSEKEEPING_INTERVAL, exc)
@@ -175,6 +178,25 @@ class Collector:
             log.warning("failed to report poll result for source %s", sid)
 
 
+# ---------------------------------------------------------- graceful stop
+# SIGTERM (docker stop / systemd) must NOT abandon a post mid-upload: the
+# worker finishes the item it is on, reports the outcome, then exits.
+_STOP = False
+
+
+def _install_stop_handlers() -> None:
+    def _handler(signum, _frame):
+        global _STOP
+        _STOP = True
+        log.info("signal %s received — finishing the current item, then exiting", signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover — non-main thread
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MTK RADAR collector worker")
     parser.add_argument("--once", action="store_true",
@@ -184,6 +206,7 @@ def main() -> None:
     parser.add_argument("--api", default=API_URL)
     args = parser.parse_args()
 
+    _install_stop_handlers()
     collector = Collector(args.api)
     if args.once:
         asyncio.run(collector.sweep())
