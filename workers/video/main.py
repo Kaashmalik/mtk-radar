@@ -1,23 +1,38 @@
-"""Video worker — FFmpeg-driven rendering pipeline.
+"""Video worker — compatibility entry point (v0.25).
 
-Weeks 7-8 target (master plan §18): a full video project can be regenerated
-from versioned source assets (16:9 + 9:16, captions, thumbnail).
+The master plan's repo layout (§12) names `workers/video/` for rendering
+jobs, but the pipeline ended up in `workers/render/` (it grew: captions,
+narration mixing, project manifests, the auto-render queue). This module
+keeps the documented path working instead of leaving a stub that raises
+NotImplementedError: every argument is forwarded to the render worker.
 
-Hard rules (master plan §4):
-- Commands come from official docs, tested in a clean environment, with
-  expected output documented in the command card.
-- Never bake secrets into frames, audio, or project bundles.
-- Preserve the versioned project so it can be revised when the offer changes.
+    python workers/video/main.py --offer <OFFER_ID> [...]   # → workers/render
+    python workers/video/main.py --sweep [--watch]          # → auto-render queue
+
+Nothing is implemented here on purpose — one implementation, two doors.
 """
 
-# Rendering stages (to be implemented):
-#   1. assemble: capture video + narration audio + captions (.srt/.vtt)
-#   2. brand: intro/outro template, summary card with steps, expiry, source links
-#   3. export: FFmpeg → 16:9 master, 9:16 Shorts/Reels/TikTok cut, thumbnail
-#   4. manifest: edit manifest recording every asset + version used
-#
-# Optional (license review required first — see docs/open-source-integrations.md):
-#   Remotion templated React rendering.
+import os
+import runpy
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RENDER_MAIN = REPO_ROOT / "workers" / "render" / "main.py"
+
+
+def main() -> None:
+    if not RENDER_MAIN.is_file():  # pragma: no cover — broken checkout
+        print(f"render worker not found at {RENDER_MAIN}", file=sys.stderr)
+        raise SystemExit(1)
+    sys.path.insert(0, str(REPO_ROOT / "workers" / "render"))
+    sys.path.insert(0, str(REPO_ROOT / "packages"))
+    print("note: workers/video/ is an alias for workers/render/ "
+          "(the master plan §12 layout) — forwarding the arguments.",
+          file=sys.stderr)
+    os.chdir(REPO_ROOT)
+    runpy.run_path(str(RENDER_MAIN), run_name="__main__")
+
 
 if __name__ == "__main__":
-    raise NotImplementedError("render pipeline not implemented yet (weeks 7-8)")
+    main()

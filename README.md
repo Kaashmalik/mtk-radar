@@ -44,13 +44,14 @@ Video generation is **blocked** from `Candidate` or `Evidence needed` states. If
 ```
 ┌─────────────────────┐   ┌──────────────────────┐   ┌────────────────────────┐
 │  Dashboard (Next.js │   │  Browser Extension   │   │  Background Workers    │
-│  React + TypeScript)│   │  (Manifest V3        │   │  collectors · verify · │
-│  offers · evidence  │   │   save-current-page) │   │  video · publishing    │
-│  editor · calendar  │   └──────────────────────┘   └────────────────────────┘
+│  React + TypeScript)│   │  (Manifest V3        │   │  collectors · batch ·  │
+│  inbox · review ·   │   │   save-current-page) │   │  render · publishing · │
+│  queue · calendar   │   └──────────────────────┘   │  metrics · monitor     │
+│  connections · …    │                              └────────────────────────┘
 └─────────┬───────────┘                                          │
 ┌─────────┴──────────────────────────────────────────────────────┴─────────┐
-│  PostgreSQL (offers, evidence, projects, schedules) · Object storage      │
-│  Redis + BullMQ job queue · Structured logs · Dead-letter queue           │
+│  PostgreSQL (offers, evidence, projects, schedules, metrics, audit)      │
+│  Object storage (S3-compatible) · Redis (optional cache) · worker locks  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -61,11 +62,11 @@ Video generation is **blocked** from `Candidate` or `Evidence needed` states. If
 | Dashboard | Next.js / React + TypeScript |
 | Extension | Chrome Manifest V3 |
 | API & workers | FastAPI (Python) or NestJS (TypeScript) |
-| Data & storage | PostgreSQL · Redis · BullMQ · object storage |
-| Collectors | RSS/Atom, official APIs, GitHub releases, changedetection.io |
+| Data & storage | PostgreSQL 16 · Redis (optional cache) · S3-compatible object storage |
+| Collectors | RSS/Atom, GitHub releases, official-page watch (all in-house adapters) |
 | Capture | Playwright (human-operated claim sessions) |
-| Video | FFmpeg · optional Remotion templates · Kdenlive/CapCut handoff |
-| Publishing | Official platform APIs (YouTube Data, Meta Graph, TikTok Content Posting) · optional Postiz |
+| Video | FFmpeg (captions, narration, 16:9/9:16) · Kdenlive/CapCut asset handoff |
+| Publishing | Official platform APIs (YouTube Data, Meta Graph, Instagram Graph, TikTok Content Posting) |
 
 ## Project Layout
 
@@ -74,27 +75,41 @@ apps/dashboard/            # Web admin console (Next.js)
 apps/extension/            # Save-current-page extension (Manifest V3)
 services/api/              # API service (FastAPI + Postgres)
 services/api/db/migrations/001_init.sql
-workers/collectors/        # Source collection jobs
+workers/collectors/        # Source collection jobs (RSS, GitHub, page watch)
 workers/verification/      # Extraction & evidence jobs
-workers/video/             # Rendering jobs
-workers/publishing/        # Platform upload jobs
+workers/batch/             # Script generation + pipeline readiness
+workers/capture/           # Playwright capture session (human-operated)
+workers/render/            # FFmpeg renders, captions, narration, handoff
+workers/video/             # Alias for workers/render (master plan §12 layout)
+workers/publishing/        # Platform upload jobs (+ platform adapters)
+workers/metrics/           # Audience metrics (YouTube Analytics, Graph)
+workers/monitor/           # Expiry, token and freshness alerts
 packages/offer-schema/     # Shared offer life-cycle + validation schemas
-packages/source_adapters/  # Per-source collection adapters (planned)
-packages/video-templates/  # Templated video configs (planned)
-infra/docker/              # Docker Compose dev environment
-docs/                      # Master plan, source registry, security, notices
+packages/source_adapters/  # Per-source collection adapters
+packages/object_storage/   # S3-compatible storage driver (httpx + SigV4)
+apps/extension/            # Save-current-page extension (Manifest V3)
+infra/docker/              # Docker Compose dev environment (api, dashboard, workers)
+infra/systemd/             # Backup + restore-drill timers
+scripts/verify.sh          # One-command verification (same steps as CI)
+docs/                      # Master plan, runbook, go-live checklist, notices
 ```
 
 ## Quick Start
 
 ```bash
 cp .env.example .env                  # never commit the real .env
-docker compose -f infra/docker/docker-compose.yml up   # postgres + redis + api + dashboard
+docker compose -f infra/docker/docker-compose.yml up -d \
+  --profile workers --profile storage  # postgres + redis + api + dashboard + workers
+docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
 ```
 
-- Dashboard (review inbox): http://localhost:3000 · API health: http://localhost:8000/health
-- DB schema initializes from `services/api/db/migrations/` on first boot
+- Dashboard (operator console): http://localhost:3000 · API health: http://localhost:8000/health
+- The schema is owned by the migration runner (`db_migrate.py`) — run it once
+  after the first boot; it records what it applied in `schema_migrations`
 - Extension: load `apps/extension/` via `chrome://extensions` → Developer mode → Load unpacked
+- Verify the whole system in one command: `pnpm verify`
+- Operator procedure (keys, social connections, first real post):
+  [`docs/go-live-checklist.md`](docs/go-live-checklist.md)
 
 ### Run the collectors (Week 2)
 
@@ -125,7 +140,7 @@ python -m venv .venv
     -r workers/render/requirements.txt pytest
 
 # 2. Postgres on 5432 with role `mtk` / password `mtk` and database `mtk_radar`
-#    (Redis is optional — no Python code depends on it yet)
+#    (Redis is optional — it only caches the dashboard's aggregate read)
 
 # 3. Schema + source registry
 cp .env.example .env
@@ -149,18 +164,21 @@ build script, already approved via `allowBuilds` in `pnpm-workspace.yaml`.
 ### Tests & checks
 
 ```bash
-pip install pytest -r services/api/requirements.txt
-pytest services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests -v
-pnpm install && pnpm typecheck   # offer-schema types + dashboard
+pnpm install
+pnpm verify      # EVERYTHING: lint → compile → unit+integration tests on a
+                 # real Postgres → typecheck → dashboard build → compose/CI/
+                 # extension checks → browser E2E (Playwright)
 ```
 
-CI runs both on every push (`.github/workflows/ci.yml`).
+`pnpm verify` is the same pipeline CI runs (`.github/workflows/ci.yml`), so a
+green local run means a green CI run. Use `pnpm verify --fast` to skip the
+browser step.
 
 ### Operations (Week 12)
 
 - **Analytics** — dashboard `/analytics` page + `GET /api/analytics`: pipeline funnel, verification load, publishing outcomes, source freshness.
 - **Migrations** — `pnpm migrate` (or `python services/api/db_migrate.py`); numbered SQL, applied once, recorded in `schema_migrations`.
-- **Backup/restore** — `pnpm backup` (`infra/backup.sh`, pg_dump custom format + retention); monthly restore drill via `infra/restore.sh`.
+- **Backup/restore** — `pnpm backup` (`infra/backup.sh`: pg_dump custom format, retention, optional off-host copy to S3); monthly **verified** drill via `infra/drill.sh` (restores into a throwaway DB and compares row counts) driven by `infra/systemd/` timers.
 - See [`docs/runbook.md`](docs/runbook.md) for deployment hardening, token-expiry recovery, incident playbooks, and the first production review.
 
 ## Documentation
@@ -172,20 +190,27 @@ CI runs both on every push (`.github/workflows/ci.yml`).
 - [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
 - [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
 - [`docs/runbook.md`](docs/runbook.md) — **operational runbook**: deployment, migrations, backup/restore drills, credential & source recovery, incident playbooks, retention policy, first production review.
-- [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, and obligations.
+- [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, obligations, and the evaluated-but-not-adopted list.
+- [`docs/go-live-checklist.md`](docs/go-live-checklist.md) — **the operator procedure**: which keys to add, how to connect each social account, the first real post, and the daily/weekly operations.
+- [`docs/master-plan-traceability.md`](docs/master-plan-traceability.md) — every master-plan item mapped to its code and its proof.
+- [`docs/upgrade-checklist.md`](docs/upgrade-checklist.md) — how a pinned dependency or image is upgraded safely.
 
 ## Delivery Roadmap
 
-| Phase | Focus | Exit criteria |
-|---|---|---|
-| 0. Foundation | Source registry, offer schema, roles, audit trail | Sources can be added/disabled; every offer field explained |
-| 1. Offer radar | RSS, GitHub releases, extension save-link, dedup | Candidate appears once with source/time, reviewable |
-| 2. Verification desk | Structured extraction, evidence snapshots, staleness rules | No unverified offer enters script generation |
-| 3. Script & checklist | Claim guide, command cards, citations | Every factual claim traceable to evidence |
-| 4. Capture & video | Screen recording, redaction, captions, FFmpeg exports | One complete video package reproducible |
-| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely |
-| 6. Publishing integrations | YouTube, Meta, TikTok, optional Postiz | Each connector passes private/test posting |
-| 7. Analytics & scale | Views, retention, corrections, source freshness | Data improves packaging without weakening verification |
+| Phase | Focus | Exit criteria | Status |
+|---|---|---|---|
+| 0. Foundation | Source registry, offer schema, roles, audit trail | Sources can be added/disabled; every offer field explained | ✅ v0.1–v0.5 |
+| 1. Offer radar | RSS, GitHub releases, extension save-link, dedup | Candidate appears once with source/time, reviewable | ✅ v0.6–v0.13 |
+| 2. Verification desk | Structured extraction, evidence snapshots, staleness rules | No unverified offer enters script generation | ✅ v0.7–v0.9 |
+| 3. Script & checklist | Claim guide, command cards, citations | Every factual claim traceable to evidence | ✅ v0.10 |
+| 4. Capture & video | Screen recording, redaction, captions, FFmpeg exports | One complete video package reproducible | ✅ v0.11–v0.14, v0.17 |
+| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 |
+| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ✅ v0.19 (needs your keys) |
+| 7. Analytics & scale | Views, corrections, source freshness | Data improves packaging without weakening verification | ✅ v0.18, v0.22, v0.24 |
+
+Remaining, with reasons: SSO/self-serve logins (single-operator token model is
+sufficient — see runbook §9), Postgres HA (single instance at this scale), and
+TikTok publishing (requires an approved developer app).
 
 For the detailed twelve-week implementation sequence, see the [master plan](docs/master%20plan.md).
 
