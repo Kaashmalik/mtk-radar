@@ -183,6 +183,7 @@ browser step.
 
 ## Documentation
 
+- [`docs/implementation-wp01-2026-10-21.md`](docs/implementation-wp01-2026-10-21.md) — first implemented verification-integrity checkpoint, migration 012/API rollout notes, test coverage and explicit remaining safety limitations.
 - [`docs/automation-master-plan-2026-10-21.md`](docs/automation-master-plan-2026-10-21.md) — **dated 2026–2027 enhancement roadmap and code audit**: actual test results, implemented/remaining checklist, safety gaps, trend radar, premium video, light editor, local-model controls and ordered work packages. Use this for new enhancement work; historical completion claims below are not production certification.
 - [`docs/coding-model-handoff-2026-10-21.md`](docs/coding-model-handoff-2026-10-21.md) — compact implementation instructions and acceptance/report rules for GLM, MiniMax or other coding assistants.
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.

@@ -17,7 +17,9 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def fetch_page_snapshot(url: str, fetcher: Optional[Fetcher] = None) -> list[RawItem]:
+def fetch_page_snapshot(url: str, fetcher: Optional[Fetcher] = None,
+                        max_text_chars: Optional[int] = 2000) -> list[RawItem]:
+    """Collectors use excerpts; verification requests untruncated snapshot text."""
     own_fetcher = fetcher is None
     fetcher = fetcher or Fetcher()
     try:
@@ -29,12 +31,14 @@ def fetch_page_snapshot(url: str, fetcher: Optional[Fetcher] = None) -> list[Raw
         title_match = _TITLE_RE.search(html)
         title = title_match.group(1).strip() if title_match else None
         body = _TAG_RE.sub(" ", html)
-        body = re.sub(r"\s+", " ", body).strip()[:2000]
+        body = re.sub(r"\s+", " ", body).strip()
+        if max_text_chars is not None:
+            body = body[:max_text_chars]
 
         return [
             RawItem(
                 external_item_id=f"page:{digest[:16]}",
-                url=url,
+                url=str(resp.url),
                 title=title,
                 text=body,
             )

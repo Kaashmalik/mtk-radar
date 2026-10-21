@@ -2,14 +2,15 @@
 
 from allowlist import build_allowlist, domain_ok, host_of
 from extractors import extract_fields_rules, is_complete
+import extractors
 
 
 def _sources():
     return [
         {"id": "s1", "provider": "Hugging Face", "canonical_domain": "huggingface.co",
-         "account_handle": "@huggingface"},
+         "account_handle": "@huggingface", "enabled": True, "trust_tier": "A_provider_owned"},
         {"id": "s2", "provider": ".TECH Domains", "canonical_domain": "get.tech",
-         "account_handle": None},
+         "account_handle": None, "enabled": True, "trust_tier": "A_provider_owned"},
     ]
 
 
@@ -37,6 +38,12 @@ class TestAllowlist:
 
     def test_host_of_strips(self):
         assert host_of("https://WWW.Example.com/a") == "www.example.com"
+
+    def test_disabled_or_untrusted_sources_cannot_authorize(self):
+        for override in ({"enabled": False}, {"trust_tier": "B_discovery_lead"},
+                         {"trust_tier": "C_excluded"}):
+            sources = [{**s, **override} for s in _sources()]
+            assert build_allowlist(sources) == {}
 
 
 class TestRuleExtractor:
@@ -76,3 +83,15 @@ class TestRuleExtractor:
         )
         fields = extract_fields_rules(text, "https://get.tech/terms")
         assert is_complete(fields)
+
+
+def test_model_reported_conflicts_are_not_discarded(monkeypatch):
+    text = "Use code SAVE2026 at checkout for students."
+    fields = extract_fields_rules(text, "https://example.com/terms")
+    conflict = {"field": "eligibility", "reason": "terms ambiguous"}
+    monkeypatch.setattr(extractors, "llm_configured", lambda: True)
+    monkeypatch.setattr(extractors, "extract_fields_llm", lambda *args: {
+        "fields": fields, "conflicts": [conflict],
+    })
+    _, conflicts, _ = extractors.extract(text, "https://example.com/terms")
+    assert conflict in conflicts

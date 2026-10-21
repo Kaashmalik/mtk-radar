@@ -155,6 +155,7 @@ def test_full_review_pipeline(client, source):
         "url": "https://example.com/terms/free-domain",
         "official": True,
         "excerpt": "Twelve months free, then standard renewal. New accounts only.",
+        "captured_content": "Twelve months free, then standard renewal. New accounts only.",
         "supported_fields": ["value", "eligibility"],
     })
     assert ev.status_code == 201, ev.text
@@ -163,8 +164,12 @@ def test_full_review_pipeline(client, source):
     # extraction: every field maps to its evidence URL (complete = True)
     ext = client.post(f"/offers/{offer_id}/extraction", json={
         "fields": {
-            "value": {"value": "12 months free", "evidence_url": "https://example.com/terms/free-domain"},
-            "eligibility": {"value": "new accounts", "evidence_url": "https://example.com/terms/free-domain"},
+            "value": {"value": "Twelve months free", "evidence_id": ev.json()["id"],
+                      "excerpt": "Twelve months free, then standard renewal.",
+                      "evidence_url": "https://example.com/terms/free-domain"},
+            "eligibility": {"value": "New accounts", "evidence_id": ev.json()["id"],
+                            "excerpt": "New accounts only.",
+                            "evidence_url": "https://example.com/terms/free-domain"},
         },
         "complete": True,
         "model": "pytest",
@@ -306,6 +311,211 @@ def _run(sql, *args):
         finally:
             await conn.close()
     return asyncio.run(go())
+
+
+# --------------------------------------- WP01: literal snapshot verification
+
+SNAPSHOT_TEXT = "Use promo code SAVE2026 for verified students only."
+SNAPSHOT_URL = "https://example.com/wp01-terms"
+
+
+def _verification_fixture(client):
+    import uuid
+    provider = f"WP01 {uuid.uuid4()}"
+    source = client.post("/sources", json={
+        "provider": provider, "canonical_domain": "example.com", "category": "student_programs",
+        "adapter": "manual", "trust_tier": "A_provider_owned",
+    })
+    assert source.status_code == 201, source.text
+    offer = client.post("/offers", json={
+        "provider": provider, "category": "student_programs", "offer_type": "coupon",
+    })
+    assert offer.status_code == 201, offer.text
+    oid = offer.json()["id"]
+    response = client.post(f"/offers/{oid}/transition", json={"to": "evidence_needed"})
+    assert response.status_code == 200, response.text
+    payload = {
+        "url": SNAPSHOT_URL, "source_id": source.json()["id"],
+        "official": True, "captured_content": SNAPSHOT_TEXT,
+    }
+    evidence = client.post(f"/offers/{oid}/evidence", json=payload)
+    assert evidence.status_code == 201, evidence.text
+    fields = {name: {
+        "value": value, "excerpt": SNAPSHOT_TEXT, "evidence_url": SNAPSHOT_URL,
+        "evidence_id": evidence.json()["id"], "confidence": 0.8,
+    } for name, value in (("promo_code", "SAVE2026"), ("eligibility", "students"))}
+    return oid, source.json()["id"], evidence.json()["id"], fields, payload
+
+
+def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
+    import hashlib
+    import uuid
+    oid, _, eid, fields, payload = _verification_fixture(client)
+    duplicate = client.post(f"/offers/{oid}/evidence", json=payload)
+    assert duplicate.status_code == 201, duplicate.text
+    assert duplicate.json()["id"] == eid and duplicate.json()["duplicate"] is True
+    row = _run("SELECT captured_content, content_hash FROM evidence WHERE id = $1", uuid.UUID(eid))[0]
+    assert row["captured_content"] == SNAPSHOT_TEXT
+    assert row["content_hash"] == hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest()
+    # False or omitted caller hints cannot override the server's calculation.
+    response = client.post(f"/offers/{oid}/extraction", json={"fields": fields, "complete": False})
+    assert response.status_code == 201, response.text
+    assert response.json()["complete"] is True
+    assert response.json()["validation_errors"] == []
+    verified = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert verified.status_code == 200, verified.text
+    # Text is retained privately, not added to the general workspace response.
+    assert "captured_content" not in client.get(f"/offers/{oid}").json()["evidence"][0]
+
+
+@pytest.mark.parametrize("case", ["empty", "conflicts", "foreign_id", "wrong_url", "quote", "value"])
+def test_unearned_complete_never_promotes_on_real_database(client, case):
+    import uuid
+    oid, _, _, fields, _ = _verification_fixture(client)
+    conflicts = []
+    if case == "empty":
+        fields = {}
+    elif case == "conflicts":
+        conflicts = [{"field": "eligibility", "reason": "official terms disagree"}]
+    elif case == "foreign_id":
+        other = _verification_fixture(client)
+        fields["promo_code"]["evidence_id"] = other[2]
+    elif case == "wrong_url":
+        fields["promo_code"]["evidence_url"] = "https://example.com/unrelated"
+    elif case == "quote":
+        fields["promo_code"]["excerpt"] = "Use promo code SAVE2026 for everyone forever."
+    elif case == "value":
+        fields["promo_code"]["value"] = "INVENTED"
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "complete": True, "conflicts": conflicts,
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["complete"] is False
+    stored = _run("SELECT complete FROM extractions WHERE id = $1", uuid.UUID(response.json()["id"]))[0]
+    assert stored["complete"] is False
+    result = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert result.status_code == 422, result.text
+    assert client.get(f"/offers/{oid}").json()["state"] == "evidence_needed"
+
+
+@pytest.mark.parametrize("change", ["disabled", "downgraded", "renamed_provider"])
+def test_current_source_authorization_is_rechecked(client, change):
+    import uuid
+    oid, sid, _, fields, payload = _verification_fixture(client)
+    assert client.post(f"/offers/{oid}/extraction", json={"fields": fields}).json()["complete"] is True
+    sql = {
+        "disabled": "UPDATE sources SET enabled = FALSE WHERE id = $1",
+        "downgraded": "UPDATE sources SET trust_tier = 'B_discovery_lead' WHERE id = $1",
+        "renamed_provider": "UPDATE sources SET provider = 'Different owner' WHERE id = $1",
+    }[change]
+    _run(sql, uuid.UUID(sid))
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
+    assert client.post(f"/offers/{oid}/evidence", json=payload).status_code == 422
+
+
+@pytest.mark.parametrize("valid_replacement", [False, True])
+def test_new_extraction_revokes_verification_and_pauses_posts(client, valid_replacement):
+    import uuid
+    oid, _, _, fields, _ = _verification_fixture(client)
+    assert client.post(f"/offers/{oid}/extraction", json={"fields": fields}).json()["complete"] is True
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 200
+    sid = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, idempotency_key) "
+        "VALUES ($1, 'youtube', 'scheduled', now(), 'private', $2) RETURNING id",
+        uuid.UUID(oid), f"wp01-{uuid.uuid4()}",
+    )[0]["id"]
+    response = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields if valid_replacement else {}, "complete": True,
+    })
+    assert response.status_code == 201 and response.json()["complete"] is valid_replacement
+    assert client.get(f"/offers/{oid}").json()["state"] == "evidence_needed"
+    assert _run("SELECT state::text AS state FROM schedules WHERE id = $1", sid)[0]["state"] == "paused"
+
+
+def test_legacy_complete_flag_is_revalidated_not_grandfathered(client):
+    import uuid
+    oid, _, _, _, _ = _verification_fixture(client)
+    _run("INSERT INTO extractions (offer_id, fields, complete) VALUES ($1, '{}', TRUE)", uuid.UUID(oid))
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
+
+
+def test_hash_only_legacy_snapshot_cannot_support_new_verification(client):
+    import hashlib
+    import uuid
+    oid, _, _, fields, _ = _verification_fixture(client)
+    eid = _run(
+        "INSERT INTO evidence (offer_id, url, content_hash, official, domain_ok) "
+        "VALUES ($1,$2,$3,TRUE,TRUE) RETURNING id",
+        uuid.UUID(oid), SNAPSHOT_URL, hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest(),
+    )[0]["id"]
+    for field in fields.values():
+        field["evidence_id"] = str(eid)
+    response = client.post(f"/offers/{oid}/extraction", json={"fields": fields, "complete": True})
+    assert response.status_code == 201 and response.json()["complete"] is False
+    assert any("recapture" in error for error in response.json()["validation_errors"])
+    assert client.post(f"/offers/{oid}/transition", json={"to": "verified"}).status_code == 422
+
+
+def test_evidence_identity_includes_url_and_authority(client):
+    oid, _, eid, _, payload = _verification_fixture(client)
+    different_url = client.post(f"/offers/{oid}/evidence", json={**payload, "url": SNAPSHOT_URL + "/other"})
+    assert different_url.status_code == 201 and different_url.json()["id"] != eid
+    unofficial = client.post(f"/offers/{oid}/evidence", json={**payload, "official": False})
+    assert unofficial.status_code == 201 and unofficial.json()["id"] != eid
+    # Equal bytes do not silently inherit a different evidence row's authority.
+    again = client.post(f"/offers/{oid}/evidence", json=payload)
+    assert again.json()["id"] == eid and again.json()["created"] is False
+
+
+def test_simultaneous_proposal_and_promotion_cannot_leave_verified(client):
+    from concurrent.futures import ThreadPoolExecutor
+    oid, _, _, fields, _ = _verification_fixture(client)
+    assert client.post(f"/offers/{oid}/extraction", json={"fields": fields}).json()["complete"] is True
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        promote = executor.submit(client.post, f"/offers/{oid}/transition", json={"to": "verified"})
+        replace = executor.submit(client.post, f"/offers/{oid}/extraction", json={"fields": {}})
+        assert promote.result().status_code in (200, 422)
+        assert replace.result().status_code == 201
+    assert client.get(f"/offers/{oid}").json()["state"] == "evidence_needed"
+
+
+def test_snapshot_migration_preserves_legacy_and_checks_new_text(client):
+    """Upgrade real 001..011 tables in a new rollback-only schema, not user data."""
+    import hashlib
+    import uuid
+
+    async def check():
+        conn = await asyncpg.connect(DSN)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            schema = "wp01_upgrade_" + uuid.uuid4().hex
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET LOCAL search_path TO "{schema}", public')
+            paths = db_migrate.migration_files()
+            for path in paths[:11]:
+                await conn.execute(path.read_text(encoding="utf-8"))
+            oid = await conn.fetchval(
+                "INSERT INTO offers (title, provider, category, offer_type) "
+                "VALUES ('legacy', 'Legacy', 'domains', 'coupon') RETURNING id")
+            digest = hashlib.sha256(SNAPSHOT_TEXT.encode()).hexdigest()
+            eid = await conn.fetchval(
+                "INSERT INTO evidence (offer_id, url, content_hash) VALUES ($1, $2, $3) RETURNING id",
+                oid, SNAPSHOT_URL, digest)
+            await conn.execute(paths[11].read_text(encoding="utf-8"))
+            assert await conn.fetchval("SELECT captured_content FROM evidence WHERE id = $1", eid) is None
+            await conn.execute(
+                "INSERT INTO evidence (offer_id, url, content_hash, captured_content) VALUES ($1,$2,$3,$4)",
+                oid, SNAPSHOT_URL, digest, SNAPSHOT_TEXT)
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO evidence (offer_id, url, content_hash, captured_content) VALUES ($1,$2,$3,$4)",
+                        oid, SNAPSHOT_URL + "/bad", "0" * 64, SNAPSHOT_TEXT)
+        finally:
+            await tx.rollback()
+            await conn.close()
+    asyncio.run(check())
 
 
 AUTH = {"Authorization": f"Bearer {AUTH_TOKEN}"}

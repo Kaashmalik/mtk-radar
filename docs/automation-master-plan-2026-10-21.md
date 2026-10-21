@@ -6,6 +6,8 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
+**Implementation update, 21 October 2026:** the first WP01 snapshot-bound verification slice is now implemented; WP01 remains in progress. See [the checkpoint, rollout requirements and remaining limitations](implementation-wp01-2026-10-21.md). The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
 ### Contents
@@ -543,7 +545,7 @@ Keep source-media rights/license/attribution records and music/voice consent. Or
 
 ## 12. Ordered implementation work packages
 
-**All work packages below are TODO as of 21 October 2026.** Existing foundational code is listed in §3. Do not tick a work package because a file exists or a mocked demo passes.
+**Initial work-package states were TODO on 21 October 2026.** The dated ledger below tracks accepted implementation slices; WP01 is now in progress. Existing foundational code is listed in §3. Do not tick a whole work package because one slice or mocked demo passes.
 
 For each package: add targeted failing tests → implement the smallest vertical slice → run relevant checks → record proof/blockers → update this ledger. File paths marked **new** are proposed, not existing commands/endpoints.
 
@@ -552,6 +554,7 @@ For each package: add targeted failing tests → implement the smallest vertical
 **Depends on:** none. **Addresses:** A01–A04, A09, A13 verification wording.
 
 - [ ] Add reproducible failing API tests for forged `complete`, unknown evidence ID, quote not in snapshot, cross-offer evidence, unresolved conflicts, disabled/Tier-B domain and missing critical terms.
+- [x] First integrity slice: reproduce forged-completeness gaps; retain hash-checked snapshot text; require typed snapshot-bound fields and literal quotes; recheck active Tier-A ownership/conflicts; serialize proposal/promotion and pause schedules on replacement. See [implementation checkpoint](implementation-wp01-2026-10-21.md). Missing critical/type-specific terms remain open.
 - [ ] Persist safe immutable snapshot content once; extract only that content; preserve final URL/identity and field-specific support.
 - [ ] Add strict typed claim validation and server-derived type-specific completeness/freshness. Make unknown states explicit; remove invented eligibility/zero-cost wording.
 - [ ] Revalidate/refuse at verification, schedule/resume and upload boundaries; establish evidence-change event that pauses dependent packages.
@@ -745,7 +748,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | State on plan date | Proof / blocker |
 |---|---|---|
-| WP01 | TODO | A01–A04/A09 open |
+| WP01 | IN_PROGRESS | First snapshot/quote/ownership integrity slice implemented; [proof and limitations](implementation-wp01-2026-10-21.md). Type-specific semantic completeness, fetch provenance, freshness and downstream invalidation remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -762,6 +765,16 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 | WP15 | TODO / optional | Basic metrics exist; experiment evidence missing |
 
 For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLOCKED/IMPLEMENTED_UNVERIFIED/VERIFIED`), files, commands with exact exit/result, artifact/report location, remaining blockers, next smallest task and relevant commit if one exists. Never mark `VERIFIED` from a status message alone.
+
+#### 21 October 2026, 11:55 UTC — WP01 first integrity slice
+
+- **Status:** implemented; locally VERIFIED for snapshot/quote/ownership and proposal/promotion regression scope only. Whole WP01 stays **IN_PROGRESS**.
+- **Changes:** API extraction/evidence contracts and verification checks; append-only migration 012; single-snapshot verification worker; active Tier-A filtering; final-URL/full-text collector option; model/cross-page conflict preservation; unit and real-Postgres regression/upgrade tests. See [checkpoint and compatibility notes](implementation-wp01-2026-10-21.md).
+- **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q --tb=short` against a newly created isolated PostgreSQL 16.15 database: **325 passed, 21 warnings, zero skips**, exit 0. Historical FastAPI/Starlette/UTC deprecation warnings remain.
+- **Additional checks:** `pnpm typecheck`, `.venv/Scripts/python.exe -m ruff check --select E9,F63,F7,F82,F821 services workers packages`, and `.venv/Scripts/python.exe -m compileall -q services workers packages`: all exit 0.
+- **Safety:** no real `.env`, existing application database, live offer/model/OAuth service or publishing account touched. Only the isolated test database received migrations; remote Git publication is separate from application deployment.
+- **Remaining:** offer-type semantic completeness and unknown states, original-byte/trusted-fetch provenance and full SSRF protection, long-document extraction, freshness checks, legacy release review, approved fact-pack propagation, service/reviewer separation and publication integrity. Browser/media/live-posting acceptance not run.
+- **Next smallest task:** add type-specific negative/region/deadline/renewal fixtures and server rules; do not expand unattended publishing based on literal text checks alone.
 
 ## 13. Coding-model execution guide
 

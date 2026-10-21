@@ -14,13 +14,13 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urlsplit
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
 import db
+from jsonb import decode
 from api_hardening import effective_reviewer
 from redact import scan as scan_secrets
 from schedules_state import script_version_hash
@@ -40,6 +40,7 @@ from state import (
     can_transition,
     requires_review,
 )
+from verification_checks import core_complete, domain_matches, extraction_problems
 
 router = APIRouter(prefix="/offers", tags=["offers"])
 
@@ -266,9 +267,11 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
 
+    if evidence.official and not evidence.captured_content:
+        raise HTTPException(status_code=422, detail="official evidence requires captured snapshot text")
     captured = evidence.captured_content or evidence.excerpt or ""
     content_hash = hashlib.sha256(captured.encode("utf-8")).hexdigest()
-    domain_ok = await _provider_domain_ok(pool, offer["provider"], str(evidence.url))
+    domain_ok = await _provider_domain_ok(pool, offer["provider"], str(evidence.url), evidence.source_id)
 
     if evidence.official and not domain_ok:
         raise HTTPException(
@@ -281,22 +284,30 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
     row = await pool.fetchrow(
         """
         INSERT INTO evidence (offer_id, source_id, url, content_hash, excerpt,
-                              screenshot_path, supported_fields, official, domain_ok, reviewer)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+                              screenshot_path, supported_fields, official, domain_ok, reviewer,
+                              captured_content)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
         offer_id, evidence.source_id, str(evidence.url), content_hash,
         evidence.excerpt, evidence.screenshot_path, _json(evidence.supported_fields),
-        evidence.official, domain_ok, evidence_reviewer,
+        evidence.official, domain_ok, evidence_reviewer, evidence.captured_content,
     )
+    created = row is not None
+    if row is None:
+        row = await pool.fetchrow(
+            "SELECT id FROM evidence WHERE offer_id = $1 AND url = $2 AND content_hash = $3 "
+            "AND (captured_content IS NOT NULL) = $4 AND official = $5 "
+            "AND source_id IS NOT DISTINCT FROM $6::uuid",
+            offer_id, str(evidence.url), content_hash, evidence.captured_content is not None,
+            evidence.official, evidence.source_id,
+        )
     await _audit(pool, actor=evidence_reviewer or "worker", action="add_evidence",
-                 entity="evidence", entity_id=row["id"] if row else None,
+                 entity="evidence", entity_id=row["id"],
                  detail={"offer_id": str(offer_id), "official": evidence.official,
                          "domain_ok": domain_ok, "content_hash": content_hash})
-    if not row:
-        return {"created": False, "duplicate": True, "content_hash": content_hash, "domain_ok": domain_ok}
-    return {"id": row["id"], "created": True, "duplicate": False,
+    return {"id": row["id"], "created": created, "duplicate": not created,
             "content_hash": content_hash, "domain_ok": domain_ok}
 
 
@@ -306,26 +317,54 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
 @router.post("/{offer_id}/extraction", status_code=201)
 async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
     pool = db.get()
-    if not await pool.fetchrow("SELECT id FROM offers WHERE id = $1", offer_id):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _add_extraction(conn, offer_id, extraction)
+
+
+async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
+    # Serialize new proposals with verification transitions for this offer.
+    offer = await pool.fetchrow(
+        "SELECT id, state::text AS state FROM offers WHERE id = $1 FOR UPDATE", offer_id,
+    )
+    if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
+    problems = await _extraction_problems(pool, offer_id, extraction)
+    if not core_complete(extraction):
+        problems.append("requires incentive and eligibility/expiry context")
+    complete = core_complete(extraction) and not problems
+    serialized = extraction.model_dump(mode="json")
     row = await pool.fetchrow(
         """
-        INSERT INTO extractions (offer_id, fields, conflicts, complete, model)
-        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5)
+        INSERT INTO extractions (offer_id, fields, conflicts, complete, model, created_at)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp())
         RETURNING id
         """,
-        offer_id, _json(extraction.fields), _json(extraction.conflicts),
-        extraction.complete, extraction.model,
+        offer_id, _json(serialized["fields"]), _json(extraction.conflicts),
+        complete, extraction.model,
     )
     if extraction.conflicts:
         await pool.execute(
             "UPDATE offers SET correction_note = $2, updated_at = now() WHERE id = $1",
             offer_id, f"{len(extraction.conflicts)} extraction conflict(s) need review",
         )
+    # A new proposal supersedes the old verification even if its core passes;
+    # approval of old content must not survive replacement extraction inputs.
+    # The existing DB trigger pauses scheduled posts on this revocation.
+    await pool.execute(
+        "UPDATE offers SET state = 'evidence_needed', recheck_at = now(), updated_at = now(), "
+        "correction_note = 'new extraction requires re-verification' "
+        "WHERE id = $1 AND state IN ('verified', 'approved_for_video', 'published')",
+        offer_id,
+    )
+    if offer["state"] in ("verified", "approved_for_video", "published"):
+        await _audit(pool, actor="worker", action=f"transition:{offer['state']}->evidence_needed",
+                     entity="offers", entity_id=offer_id,
+                     detail={"reason": "new extraction", "extraction_id": str(row["id"])})
     await _audit(pool, actor="worker", action="add_extraction", entity="extractions",
-                 entity_id=row["id"], detail={"complete": extraction.complete,
-                                              "conflicts": len(extraction.conflicts)})
-    return {"id": row["id"]}
+                  entity_id=row["id"], detail={"complete": complete,
+                                               "conflicts": len(extraction.conflicts)})
+    return {"id": row["id"], "complete": complete, "validation_errors": problems}
 
 
 # ---------------------------------------------------------------- transitions
@@ -334,8 +373,14 @@ async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
 @router.post("/{offer_id}/transition")
 async def transition(offer_id: uuid.UUID, t: TransitionIn, request: Request) -> dict:
     pool = db.get()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _transition(conn, offer_id, t, request)
+
+
+async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Request) -> dict:
     offer = await pool.fetchrow(
-        "SELECT state::text AS state, title, provider FROM offers WHERE id = $1", offer_id
+        "SELECT state::text AS state, title, provider FROM offers WHERE id = $1 FOR UPDATE", offer_id
     )
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
@@ -639,50 +684,54 @@ async def sweep_stale() -> dict:
 
 
 async def _gate_verified(pool: asyncpg.Pool, offer_id: uuid.UUID) -> None:
-    """'verified' requires official, domain-checked evidence AND a complete
-    extraction with every field linked to its evidence URL (§3)."""
-    stats = await pool.fetchrow(
+    """Revalidate stored proposals, including legacy rows, never trust complete."""
+    latest = await pool.fetchrow(
         """
-        SELECT
-          (SELECT COUNT(*) FROM evidence e
-            WHERE e.offer_id = $1 AND e.official AND e.domain_ok) AS official_ok,
-          (SELECT COUNT(*) FROM evidence e WHERE e.offer_id = $1) AS total_evidence,
-          (SELECT x.complete FROM extractions x
-            WHERE x.offer_id = $1 ORDER BY x.created_at DESC LIMIT 1) AS extraction_complete
+        SELECT fields, conflicts FROM extractions
+        WHERE offer_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         offer_id,
     )
-    problems = []
-    if not stats["official_ok"]:
-        problems.append("requires at least one official, provider-domain-checked evidence snapshot")
-    if stats["total_evidence"] == 0:
-        problems.append("requires evidence snapshots")
-    if stats["extraction_complete"] is not True:
-        problems.append("requires a complete structured extraction (fields → evidence URLs)")
-
+    if latest is None:
+        raise HTTPException(status_code=422, detail="requires structured extraction with official snapshot evidence")
+    try:
+        extraction = ExtractionIn.model_validate({
+            "fields": decode(latest["fields"]), "conflicts": decode(latest["conflicts"]),
+        })
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="legacy or invalid extraction; recapture and re-extract") from None
+    problems = await _extraction_problems(pool, offer_id, extraction)
+    if not core_complete(extraction):
+        problems.append("requires a complete structured extraction: incentive and eligibility/expiry context")
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 
 
-async def _provider_domain_ok(pool: asyncpg.Pool, provider: str, url: str) -> bool:
-    """Allowlist check: URL host must be (a subdomain of) a canonical domain
-    registered for this provider in the source registry (§3)."""
-    rows = await pool.fetch(
-        "SELECT canonical_domain, account_handle FROM sources WHERE provider ILIKE $1",
-        provider,
+async def _extraction_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> list[str]:
+    ids = list({field.evidence_id for field in extraction.fields.values()})
+    evidence = await pool.fetch(
+        "SELECT e.id, e.url, e.official, e.domain_ok, e.captured_content, e.content_hash, "
+        "o.provider, e.source_id FROM evidence e JOIN offers o ON o.id = e.offer_id "
+        "WHERE e.offer_id = $1 AND e.id = ANY($2::uuid[]) AND e.official AND e.domain_ok",
+        offer_id, ids,
     )
-    domains = {
-        r["canonical_domain"].lower()
-        for r in rows
-        if r["canonical_domain"]
-    }
-    if not domains:
-        return False
-    host = (urlsplit(url).hostname or "").lower()
-    for domain in domains:
-        if host == domain or host.endswith(f".{domain}"):
-            return True
-    return False
+    authorized = []
+    for row in evidence:
+        if await _provider_domain_ok(pool, row["provider"], row["url"], row["source_id"]):
+            authorized.append(row)
+    return extraction_problems(extraction, authorized)
+
+
+async def _provider_domain_ok(pool: asyncpg.Pool, provider: str, url: str,
+                              source_id: Optional[uuid.UUID] = None) -> bool:
+    """Only currently enabled Tier-A sources can confer official ownership."""
+    rows = await pool.fetch(
+        "SELECT canonical_domain FROM sources WHERE lower(btrim(provider)) = lower(btrim($1)) "
+        "AND enabled AND trust_tier = 'A_provider_owned' "
+        "AND ($2::uuid IS NULL OR id = $2)",
+        provider, source_id,
+    )
+    return domain_matches(url, [r["canonical_domain"] for r in rows if r["canonical_domain"]])
 
 
 async def _audit(pool: asyncpg.Pool, *, actor: str, action: str, entity: str,

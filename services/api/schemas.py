@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 TrustTier = Literal["A_provider_owned", "B_discovery_lead", "C_excluded"]
 AdapterKind = Literal["rss", "github_releases", "page_watch", "extension", "manual"]
@@ -121,17 +121,55 @@ class EvidenceIn(BaseModel):
     url: HttpUrl
     source_id: Optional[uuid.UUID] = None
     excerpt: Optional[str] = None  # supporting quote
-    captured_content: Optional[str] = None  # raw fetched content to hash
+    captured_content: Optional[str] = Field(default=None, max_length=250_000)
     screenshot_path: Optional[str] = None
     supported_fields: list[str] = Field(default_factory=list)
     official: bool = False  # Tier-A / provider-owned claim (verified requires it)
     reviewer: Optional[str] = None
 
+    @field_validator("captured_content")
+    @classmethod
+    def bounded_snapshot(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (not value.strip() or "\x00" in value):
+            raise ValueError("snapshot must be nonblank text without NUL characters")
+        return value
+
+
+ExtractionFieldName = Literal["promo_code", "price", "expiry", "eligibility", "renewal", "value"]
+
+
+class ExtractedField(BaseModel):
+    """A literal claim bound to one immutable snapshot, not just a URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(strict=True, min_length=1, max_length=2000, pattern=r"\S")
+    evidence_id: uuid.UUID
+    evidence_url: HttpUrl
+    excerpt: str = Field(strict=True, min_length=1, max_length=4000, pattern=r"\S")
+    confidence: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+
+    @field_validator("value", "excerpt")
+    @classmethod
+    def no_nul(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("claim text must not contain NUL characters")
+        return value
+
+    @field_validator("evidence_url")
+    @classmethod
+    def safe_evidence_url(cls, value: HttpUrl) -> HttpUrl:
+        if value.scheme != "https" or value.username or value.password or value.fragment:
+            raise ValueError("evidence must use a credential-free HTTPS URL without fragment")
+        return value
+
 
 class ExtractionIn(BaseModel):
-    """Structured extraction result; each field maps to its evidence URL."""
+    """Extractor proposal. `complete` is a compatibility hint, never authority."""
 
-    fields: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    complete: bool = False
-    conflicts: list[dict[str, Any]] = Field(default_factory=list)
-    model: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    fields: dict[ExtractionFieldName, ExtractedField] = Field(default_factory=dict, max_length=6)
+    complete: bool = Field(default=False, strict=True)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    model: Optional[str] = Field(default=None, max_length=200)

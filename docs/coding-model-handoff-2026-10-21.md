@@ -14,6 +14,8 @@ Current code includes discovery, evidence/extraction, scripts, human-operated ca
 
 Audit results: 239 Python tests passed, one database integration module skipped, TypeScript typecheck and narrow Python lint passed. Real database, browser, media and platform release verification still need proof. Do not copy these counts as your own new test results.
 
+**Implementation update:** the first WP01 integrity slice is implemented; its latest local result is 325 passing tests including isolated PostgreSQL integration. Read [the checkpoint](implementation-wp01-2026-10-21.md) and the master-plan ledger before choosing a task. The preceding counts are the original audit baseline, not the current test total.
+
 ## 2. Copy/paste prompt for one implementation session
 
 ```text
@@ -47,7 +49,7 @@ Fill the brackets before execution. If the model has a small context window, pro
 
 ## 3. Recommended first task
 
-**WP01 / A01:** server-derived verification completeness and conflict/evidence binding rejection.
+**Next WP01 slice:** type-specific semantic completeness, critical unknowns and applicability. The first snapshot-binding/server-derived core-completeness slice is already implemented; do not rebuild it.
 
 Read:
 
@@ -56,7 +58,7 @@ Read:
 - `services/api/tests/test_integration.py` (destructive disposable DB warning)
 - `workers/verification/extractors.py` and its tests
 
-First slice: add a regression test that `complete=true` plus unresolved conflicts or unrelated evidence cannot promote an offer to verified. Agree the typed validation contract before implementing it. Do not claim full WP01 completion from this one test. Snapshot-byte storage and all other WP01 checks remain separate slices.
+Next slice: agree the offer-type terms contract and add fixtures where literal price/eligibility words occur but do not establish a claimable benefit (negation, renewal price, excluded country, ambiguous deadline). Missing critical facts must remain unknown and block automatic verification. Retained extraction text is implemented; original HTTP/HTML bytes and trusted fetch provenance remain separate work. Do not mark full WP01 complete from one slice.
 
 ## 4. Non-negotiable acceptance rules
 

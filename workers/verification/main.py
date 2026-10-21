@@ -17,6 +17,7 @@ API is the source of truth — the worker holds no durable state.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -39,6 +40,7 @@ from source_adapters import Fetcher, fetch_page_snapshot  # noqa: E402
 
 from allowlist import build_allowlist  # noqa: E402
 from extractors import extract, is_complete  # noqa: E402
+from allowlist import domain_ok  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 SWEEP_INTERVAL = 120  # seconds
@@ -113,32 +115,55 @@ class Verifier:
 
         # candidate → evidence_needed (verification has begun)
         if offer.get("state") == "candidate":
-            self._post(f"/offers/{offer_id}/transition",
-                       json={"to": "evidence_needed", "note": "verification pipeline started"})
+            response = self._post(f"/offers/{offer_id}/transition",
+                                  json={"to": "evidence_needed", "note": "verification pipeline started"})
+            response.raise_for_status()
 
         # 2-3. capture official pages → evidence → extraction
         best_fields: dict = {}
         conflicts: list = []
         model_used = None
+        observed_values: dict[str, str] = {}
         for url in official_urls:
-            self._capture_evidence(offer_id, url, provider)
-            snapshot = fetch_page_snapshot(url, fetcher=self.fetcher)
-            body = snapshot[0].text if snapshot else ""
-            if not body:
+            snapshot = fetch_page_snapshot(url, fetcher=self.fetcher, max_text_chars=None)
+            if not snapshot or not snapshot[0].text:
                 continue
-            fields, page_conflicts, model_used = extract(body, url)
-            if len(fields) > len(best_fields):
+            item = snapshot[0]
+            # Never certify a provider URL that redirected to a different owner.
+            if not domain_ok(allowlist, provider, item.url):
+                raise ValueError("official page redirected outside the provider allowlist")
+            if len(item.text) > 250_000:
+                raise ValueError("official snapshot too large; review rather than truncate terms")
+            fields, page_conflicts, page_model = extract(item.text, item.url)
+            evidence = self._post(f"/offers/{offer_id}/evidence", json={
+                "url": item.url, "captured_content": item.text,
+                "excerpt": item.title, "official": True,
+                "supported_fields": sorted(fields),
+            })
+            evidence.raise_for_status()
+            evidence_id = evidence.json()["id"]  # duplicates return the same identity
+            for field in fields.values():
+                field["evidence_id"] = evidence_id
+            # Retain disagreement across official pages rather than picking the
+            # most attractive source. The server also checks every quote/value.
+            for name, field in fields.items():
+                value = str(field["value"]).strip().casefold()
+                if name in observed_values and observed_values[name] != value:
+                    conflicts.append({"field": name, "reason": "official pages disagree"})
+                observed_values.setdefault(name, value)
+            if (is_complete(fields), len(fields)) > (is_complete(best_fields), len(best_fields)):
                 best_fields = fields
+                model_used = page_model
             if page_conflicts:
                 conflicts.extend(page_conflicts)
 
-        complete = is_complete(best_fields)
-        self._post(f"/offers/{offer_id}/extraction", json={
+        response = self._post(f"/offers/{offer_id}/extraction", json={
             "fields": best_fields,
-            "complete": complete,
             "conflicts": conflicts,
             "model": model_used or "rules/0.1",
         })
+        response.raise_for_status()
+        complete = response.json().get("complete") is True
 
         # 4. attempt promotion to verified — the API re-checks all gates.
         if complete and not conflicts:
@@ -162,7 +187,11 @@ class Verifier:
         sources = self._get("/sources")
         urls = []
         for s in sources:
+            if not s.get("enabled") or s.get("trust_tier") != "A_provider_owned":
+                continue
             config = s.get("config") or {}
+            if isinstance(config, str):
+                config = json.loads(config)
             if s.get("adapter") != "page_watch":
                 continue
             if (s.get("provider") or "").strip().lower() != provider.strip().lower():
@@ -170,30 +199,9 @@ class Verifier:
             url = config.get("url") or s.get("canonical_domain")
             if not url:
                 continue
-            from allowlist import domain_ok  # local import: module under test too
-
             if domain_ok(allowlist, provider, url):
                 urls.append(url)
         return urls
-
-    def _capture_evidence(self, offer_id: str, url: str, provider: str) -> None:
-        """POST the page snapshot as OFFICIAL evidence. The API enforces the
-        domain allowlist — an unregistered domain raises 422 and is logged."""
-        try:
-            snapshot = fetch_page_snapshot(url, fetcher=self.fetcher)
-            item = snapshot[0]
-            resp = self._post(f"/offers/{offer_id}/evidence", json={
-                "url": url,
-                "captured_content": item.text,
-                "excerpt": item.title,
-                "official": True,
-                "supported_fields": ["expiry", "price", "eligibility", "promo_code", "renewal"],
-            })
-            if resp.status_code == 422:
-                log.error("evidence rejected for offer %s (%s): %s",
-                          offer_id, provider, resp.json().get("detail"))
-        except Exception:  # noqa: BLE001
-            log.exception("official page capture failed: %s", url)
 
 
 def main() -> None:
