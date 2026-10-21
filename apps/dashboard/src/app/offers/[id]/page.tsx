@@ -1,3 +1,4 @@
+import "./styles.css";
 import GenerateScriptButton from "./GenerateScriptButton";
 import ScheduleForm from "./ScheduleForm";
 
@@ -351,106 +352,6 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         </ul>
       </section>
 
-      <style jsx global>{`
-        .page {
-          max-width: 960px;
-          margin: 0 auto;
-          padding: 2rem 1.25rem;
-          font-family: system-ui, sans-serif;
-          color: #e8eaf0;
-          background: #0d1117;
-          min-height: 100vh;
-        }
-        .back {
-          color: #58a6ff;
-          text-decoration: none;
-          font-size: 0.85rem;
-        }
-        h1 {
-          margin: 0.5rem 0 0;
-          font-size: 1.5rem;
-        }
-        .tagline {
-          color: #8b949e;
-          margin: 0.3rem 0 0;
-          font-size: 0.88rem;
-        }
-        .card {
-          background: #161b22;
-          border: 1px solid #30363d;
-          border-radius: 10px;
-          padding: 1.1rem 1.25rem;
-          margin-top: 1.25rem;
-        }
-        .card h2 {
-          margin: 0 0 0.6rem;
-          font-size: 1.05rem;
-        }
-        .warnbox {
-          margin-top: 0.6rem;
-          border: 1px solid #f0883e;
-          border-radius: 8px;
-          padding: 0.6rem 0.8rem;
-          font-size: 0.8rem;
-        }
-        .entry {
-          border: 1px solid #21262d;
-          border-radius: 8px;
-          padding: 0.7rem 0.9rem;
-        }
-        .script {
-          background: #0d1117;
-          border: 1px solid #21262d;
-          border-radius: 8px;
-          padding: 0.8rem 1rem;
-          font-size: 0.8rem;
-          white-space: pre-wrap;
-          max-height: 480px;
-          overflow: auto;
-        }
-        .pill {
-          border-radius: 999px;
-          padding: 0.05rem 0.45rem;
-          font-size: 0.68rem;
-          font-weight: 600;
-        }
-        .ok-pill {
-          background: #0f3520;
-          color: #3fb950;
-        }
-        .bad-pill {
-          background: #3d1418;
-          color: #f85149;
-        }
-        .muted {
-          color: #8b949e;
-        }
-        .small {
-          font-size: 0.78rem;
-        }
-        a {
-          color: #58a6ff;
-          text-decoration: none;
-        }
-        code {
-          background: #21262d;
-          padding: 0.05rem 0.3rem;
-          border-radius: 4px;
-          font-size: 0.78rem;
-        }
-        ul {
-          padding-left: 1.1rem;
-          margin: 0.3rem 0;
-        }
-        li {
-          margin: 0.35rem 0;
-        }
-        summary {
-          cursor: pointer;
-          font-size: 0.85rem;
-          margin: 0.6rem 0;
-        }
-      `}</style>
     </main>
   );
 }

@@ -1,0 +1,25 @@
+/* Global baseline for the MTK RADAR dashboard.
+   Page-level styling lives in each route's <style jsx global> block; this
+   file only sets the shell (background, text colour, box sizing). */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0d1117;
+  color: #e8eaf0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font: inherit;
+}
