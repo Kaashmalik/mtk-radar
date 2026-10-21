@@ -29,6 +29,8 @@ class RenderIn(BaseModel):
     video_path: str = Field(min_length=3)
     captions_path: Optional[str] = None
     script_version: Optional[int] = None
+    # §17 approval pin: hash of the exact script markdown the render used
+    script_version_hash: Optional[str] = None
     capture_id: Optional[uuid.UUID] = None
     disclosure: dict = Field(default_factory=dict)
 
@@ -60,13 +62,14 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
 
     row = await pool.fetchrow(
         """
-        INSERT INTO renders (offer_id, capture_id, script_version, preset, width, height,
-                             duration_s, video_path, captions_path, disclosure)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash,
+                             preset, width, height, duration_s, video_path, captions_path,
+                             disclosure)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
         RETURNING id, created_at
         """,
-        offer_id, render.capture_id, render.script_version, render.preset,
-        render.width, render.height, render.duration_s, render.video_path,
+        offer_id, render.capture_id, render.script_version, render.script_version_hash,
+        render.preset, render.width, render.height, render.duration_s, render.video_path,
         render.captions_path, _json(render.disclosure),
     )
     return {
@@ -86,6 +89,7 @@ async def list_renders(
         """
         SELECT r.id, r.offer_id, o.title AS offer_title, r.preset, r.width, r.height,
                r.duration_s, r.video_path, r.captions_path, r.script_version,
+               r.script_version_hash,
                r.disclosure::text AS disclosure, r.status, r.created_at
         FROM renders r JOIN offers o ON o.id = r.offer_id
         WHERE ($1::uuid IS NULL OR r.offer_id = $1)

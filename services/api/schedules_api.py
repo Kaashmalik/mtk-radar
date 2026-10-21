@@ -16,10 +16,11 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import effective_reviewer
 from schedules_state import (
     PLATFORMS,
     ScheduleTransitionError,
@@ -59,7 +60,7 @@ class ScheduleResultIn(BaseModel):
 
 
 @router.post("/offers/{offer_id}/schedules", status_code=201)
-async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn) -> dict:
+async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Request) -> dict:
     pool = db.get()
     offer = await pool.fetchrow(
         """
@@ -146,7 +147,8 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn) -> dict:
         return {"id": existing["id"], "state": existing["state"], "created": False,
                 "idempotency_key": idempotency_key}
 
-    await _audit(pool, actor="reviewer", action="create_schedule", entity="schedules",
+    await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+                 action="create_schedule", entity="schedules",
                  entity_id=row["id"], detail={"platform": body.platform,
                                               "privacy": body.privacy})
     return {"id": row["id"], "state": row["state"], "created": True,
@@ -202,12 +204,13 @@ async def get_schedule(schedule_id: uuid.UUID) -> dict:
 
 
 @router.post("/schedules/{schedule_id}/transition")
-async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn) -> dict:
+async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request: Request) -> dict:
     pool = db.get()
     schedule = await _load(pool, schedule_id)
+    reviewer_on_record = effective_reviewer(request, body.reviewer)
     try:
         validate_transition(schedule["state"], body.to,
-                            reviewer=body.reviewer, version_hash=schedule["version_hash"])
+                            reviewer=reviewer_on_record, version_hash=schedule["version_hash"])
     except ScheduleTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -221,8 +224,8 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn) -> dict
             raise HTTPException(status_code=409, detail="no script exists to approve")
         params.append(current_hash)
         sets.append(f"version_hash = ${len(params)}")
-        if body.reviewer:
-            params.append(body.reviewer)
+        if reviewer_on_record:
+            params.append(reviewer_on_record)
             sets.append(f"approved_by = ${len(params)}")
 
     if body.to == "scheduled":
@@ -242,14 +245,15 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn) -> dict
         f"WHERE id = $1 RETURNING state::text AS state, version_hash",
         *params,
     )
-    await _audit(pool, actor=body.reviewer or "operator",
+    await _audit(pool, actor=reviewer_on_record or "operator",
                  action=f"schedule:{schedule['state']}->{body.to}",
                  entity="schedules", entity_id=schedule_id, detail={"note": body.note})
     return {"id": schedule_id, "state": row["state"], "version_hash": row["version_hash"]}
 
 
 @router.post("/schedules/{schedule_id}/pause")
-async def pause(schedule_id: uuid.UUID, note: Optional[str] = None) -> dict:
+async def pause(schedule_id: uuid.UUID, note: Optional[str] = None,
+                request: Request = None) -> dict:
     """Operator-visible pause — available from approved or scheduled states."""
     pool = db.get()
     schedule = await _load(pool, schedule_id)
@@ -262,13 +266,15 @@ async def pause(schedule_id: uuid.UUID, note: Optional[str] = None) -> dict:
         "UPDATE schedules SET state = 'paused', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
     )
-    await _audit(pool, actor="operator", action="schedule:pause", entity="schedules",
+    await _audit(pool, actor=effective_reviewer(request, None, default="operator"),
+                 action="schedule:pause", entity="schedules",
                  entity_id=schedule_id, detail={"note": note})
     return {"id": schedule_id, "state": row["state"]}
 
 
 @router.post("/schedules/{schedule_id}/resume")
-async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator")) -> dict:
+async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator"),
+                 request: Request = None) -> dict:
     """Resume revalidates the version hash — modified content stays paused."""
     pool = db.get()
     schedule = await _load(pool, schedule_id)
@@ -284,7 +290,8 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
         "UPDATE schedules SET state = 'scheduled', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
     )
-    await _audit(pool, actor=reviewer, action="schedule:resume", entity="schedules", entity_id=schedule_id)
+    await _audit(pool, actor=effective_reviewer(request, reviewer, default="operator"),
+                 action="schedule:resume", entity="schedules", entity_id=schedule_id)
     return {"id": schedule_id, "state": row["state"]}
 
 

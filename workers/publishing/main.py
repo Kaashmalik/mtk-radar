@@ -12,6 +12,9 @@ Sweep (every tick, or once with --once):
      pause the queue, raise an operator-visible alert. On later successful
      refresh, accounts auto-return to 'active' via the on_refresh hook —
      schedules stay paused for explicit operator resume (human gate, §17).
+  5. Approval + validity gates (v0.16): the render's script hash must match
+     the schedule's approved version hash (§17), and the offer must not be
+     expired / recheck-overdue (§11) — otherwise the post is auto-paused.
 
 Usage:
     pip install -r workers/publishing/requirements.txt
@@ -169,8 +172,42 @@ class Publisher:
                 self._report(post["id"], ok=False,
                              detail=f"offer state '{offer.get('state')}' — publish blocked (§17 recheck)")
                 return
+            # v0.16 defense-in-depth (§11: "if a deal expires or changes, pause
+            # queued posts automatically"): the sweep-stale monitor flips offer
+            # states on its cadence; these direct timestamp checks close the
+            # window between sweeps. Pausing (not failing) keeps the post
+            # recoverable the moment the offer is re-verified.
+            now = datetime.now(timezone.utc)
+            for field, label in (("expires_at", "offer expired"),
+                                 ("recheck_at", "offer recheck overdue")):
+                due = offer.get(field)
+                if not due:
+                    continue
+                due_dt = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
+                if due_dt.tzinfo is None:
+                    due_dt = due_dt.replace(tzinfo=timezone.utc)
+                if due_dt <= now:
+                    self.api.post(f"/schedules/{post['id']}/pause")
+                    self._report(post["id"], ok=False,
+                                 detail=f"{label} ({field}={due}) — publish blocked, auto-paused (§11 recheck)")
+                    return
         except httpx.HTTPError as exc:
             self._report(post["id"], ok=False, detail=f"cannot verify offer state: {exc}")
+            return
+
+        # §17 Approved rule: "A reviewer approved this exact version hash."
+        # The uploaded render must have been produced from the exact script the
+        # approval pins — a script edit after scheduling requires re-approval
+        # AND a re-render. FAIL-CLOSED: renders without a bound hash (pre-v0.16
+        # rows) cannot be published blind; re-render to bind the approval hash.
+        rendered_hash = render.get("script_version_hash")
+        approved_hash = post.get("version_hash")
+        if not rendered_hash or rendered_hash != approved_hash:
+            self.api.post(f"/schedules/{post['id']}/pause")
+            self._report(post["id"], ok=False,
+                         detail="approval integrity: render script hash does not match the "
+                                "approved version hash (script changed after approval or "
+                                "legacy render) — re-render, re-approve, re-schedule (§17)")
             return
 
         video_path = render["video_path"]

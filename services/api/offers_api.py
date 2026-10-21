@@ -17,11 +17,13 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
 import db
+from api_hardening import effective_reviewer
 from redact import scan as scan_secrets
+from schedules_state import script_version_hash
 from schemas import (
     EvidenceIn,
     ExtractionIn,
@@ -52,7 +54,7 @@ RECHECK_INTERVAL = "2 days"  # verified offers must be rechecked before this ela
 
 
 @router.post("/from-item/{item_id}", status_code=201)
-async def promote_item(item_id: uuid.UUID, offer: OfferIn) -> dict:
+async def promote_item(item_id: uuid.UUID, offer: OfferIn, request: Request) -> dict:
     """Reviewer promotes an inbox item to a tracked offer (state: candidate)."""
     pool = db.get()
     item = await pool.fetchrow(
@@ -79,13 +81,14 @@ async def promote_item(item_id: uuid.UUID, offer: OfferIn) -> dict:
         _json(offer.eligibility), _json(offer.value), _json(offer.claim_steps),
     )
     await pool.execute("UPDATE items SET processed = TRUE WHERE id = $1", item_id)
-    await _audit(pool, actor="reviewer", action="promote_item", entity="offers",
+    await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+                 action="promote_item", entity="offers",
                  entity_id=row["id"], detail={"item_id": str(item_id)})
     return {"id": row["id"], "state": row["state"]}
 
 
 @router.post("", status_code=201)
-async def create_offer(offer: OfferIn) -> dict:
+async def create_offer(offer: OfferIn, request: Request) -> dict:
     pool = db.get()
     row = await pool.fetchrow(
         """
@@ -98,7 +101,8 @@ async def create_offer(offer: OfferIn) -> dict:
         offer.offer_type, offer.promo_code, offer.redemption_url, offer.expires_at,
         _json(offer.eligibility), _json(offer.value), _json(offer.claim_steps),
     )
-    await _audit(pool, actor="reviewer", action="create_offer", entity="offers", entity_id=row["id"])
+    await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+                 action="create_offer", entity="offers", entity_id=row["id"])
     return {"id": row["id"], "state": row["state"]}
 
 
@@ -193,7 +197,7 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
 
 
 @router.patch("/{offer_id}")
-async def update_offer(offer_id: uuid.UUID, update: OfferUpdate) -> dict:
+async def update_offer(offer_id: uuid.UUID, update: OfferUpdate, request: Request) -> dict:
     pool = db.get()
     current = await pool.fetchrow(
         "SELECT state::text AS state, provider FROM offers WHERE id = $1", offer_id
@@ -241,7 +245,8 @@ async def update_offer(offer_id: uuid.UUID, update: OfferUpdate) -> dict:
         "RETURNING id, state::text AS state",
         *params,
     )
-    await _audit(pool, actor="reviewer", action="update_offer", entity="offers",
+    await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+                 action="update_offer", entity="offers",
                  entity_id=offer_id, detail={"demoted": demoted, "fields": list(payload)})
     return {"id": row["id"], "state": row["state"], "demoted": demoted}
 
@@ -250,7 +255,7 @@ async def update_offer(offer_id: uuid.UUID, update: OfferUpdate) -> dict:
 
 
 @router.post("/{offer_id}/evidence", status_code=201)
-async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn) -> dict:
+async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Request) -> dict:
     """Immutable evidence snapshot. Hash is computed server-side; identical
     content dedupes. domain_ok is decided HERE via the provider allowlist —
     callers cannot self-certify an official source."""
@@ -272,6 +277,7 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn) -> dict:
                    "(register the official source in the source registry first)",
         )
 
+    evidence_reviewer = effective_reviewer(request, evidence.reviewer)
     row = await pool.fetchrow(
         """
         INSERT INTO evidence (offer_id, source_id, url, content_hash, excerpt,
@@ -282,9 +288,9 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn) -> dict:
         """,
         offer_id, evidence.source_id, str(evidence.url), content_hash,
         evidence.excerpt, evidence.screenshot_path, _json(evidence.supported_fields),
-        evidence.official, domain_ok, evidence.reviewer,
+        evidence.official, domain_ok, evidence_reviewer,
     )
-    await _audit(pool, actor=evidence.reviewer or "worker", action="add_evidence",
+    await _audit(pool, actor=evidence_reviewer or "worker", action="add_evidence",
                  entity="evidence", entity_id=row["id"] if row else None,
                  detail={"offer_id": str(offer_id), "official": evidence.official,
                          "domain_ok": domain_ok, "content_hash": content_hash})
@@ -326,7 +332,7 @@ async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
 
 
 @router.post("/{offer_id}/transition")
-async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
+async def transition(offer_id: uuid.UUID, t: TransitionIn, request: Request) -> dict:
     pool = db.get()
     offer = await pool.fetchrow(
         "SELECT state::text AS state, title, provider FROM offers WHERE id = $1", offer_id
@@ -343,7 +349,10 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
             detail=f"illegal transition {current} → {target}",
         )
 
-    if requires_review(target) and not t.reviewer:
+    # §3: approval targets must name a human — a bound reviewer token satisfies
+    # this even when the body omits the field.
+    reviewer_on_record = effective_reviewer(request, t.reviewer)
+    if requires_review(target) and not reviewer_on_record:
         raise HTTPException(
             status_code=403,
             detail=f"transition to '{target}' requires a recorded reviewer",
@@ -363,7 +372,7 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
         f"WHERE id = $1 RETURNING state::text AS state",
         *params,
     )
-    await _audit(pool, actor=t.reviewer or "worker", action=f"transition:{current}->{target}",
+    await _audit(pool, actor=reviewer_on_record or "worker", action=f"transition:{current}->{target}",
                  entity="offers", entity_id=offer_id, detail={"note": t.note})
     return {"id": offer_id, "state": row["state"], "previous": current}
 
@@ -373,12 +382,13 @@ async def transition(offer_id: uuid.UUID, t: TransitionIn) -> dict:
 
 class CorrectionIn(BaseModel):
     note: str = Field(min_length=3, max_length=2000)
-    corrected_by: str = Field(min_length=1)
+    # v0.16: optional when a reviewer token binds identity (enforced server-side)
+    corrected_by: Optional[str] = None
     version_hash: Optional[str] = None
 
 
 @router.post("/{offer_id}/corrections", status_code=201)
-async def add_correction(offer_id: uuid.UUID, body: CorrectionIn) -> dict:
+async def add_correction(offer_id: uuid.UUID, body: CorrectionIn, request: Request) -> dict:
     """Log a correction (§3 Learn step) and demote the offer to 'corrected' when
     the state machine allows. Pausing of affected scheduled posts is enforced by
     the trg_pause_on_offer_change database trigger (007) — this endpoint only
@@ -390,13 +400,14 @@ async def add_correction(offer_id: uuid.UUID, body: CorrectionIn) -> dict:
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
 
+    corrected_by = effective_reviewer(request, body.corrected_by, require=True)
     row = await pool.fetchrow(
         """
         INSERT INTO offer_corrections (offer_id, note, corrected_by, version_hash)
         VALUES ($1, $2, $3, $4)
         RETURNING id
         """,
-        offer_id, body.note, body.corrected_by, body.version_hash,
+        offer_id, body.note, corrected_by, body.version_hash,
     )
     await pool.execute(
         "UPDATE offers SET correction_note = $2, updated_at = now() WHERE id = $1",
@@ -415,7 +426,7 @@ async def add_correction(offer_id: uuid.UUID, body: CorrectionIn) -> dict:
         new_state = new_row["state"]
         state_changed = True
 
-    await _audit(pool, actor=body.corrected_by,
+    await _audit(pool, actor=corrected_by,
                  action="correction:recorded" if not state_changed else "transition:%s->corrected" % current,
                  entity="offers", entity_id=offer_id,
                  detail={"note": body.note, "version_hash": body.version_hash})
@@ -504,7 +515,9 @@ async def _count_scheduled(pool: asyncpg.Pool, offer_id: uuid.UUID) -> int:
 
 
 @router.post("/{offer_id}/script", status_code=201)
-async def create_script(offer_id: uuid.UUID, created_by: str = Query(default="reviewer")) -> dict:
+async def create_script(offer_id: uuid.UUID, request: Request,
+                        created_by: str = Query(default="reviewer")) -> dict:
+    created_by_actor = effective_reviewer(request, created_by, default="reviewer")
     """Generate a versioned claim script + checklist + command cards.
 
     HARD GATE: blocked unless the offer state allows video (§3) — this is the
@@ -553,9 +566,9 @@ async def create_script(offer_id: uuid.UUID, created_by: str = Query(default="re
         RETURNING id, version
         """,
         offer_id, version, payload["markdown"], _json(payload["checklist"]),
-        _json(payload["command_cards"]), created_by,
+        _json(payload["command_cards"]), created_by_actor,
     )
-    await _audit(pool, actor=created_by, action="generate_script", entity="offer_scripts",
+    await _audit(pool, actor=created_by_actor, action="generate_script", entity="offer_scripts",
                  entity_id=row["id"],
                  detail={"version": version, "unsafe_command_cards": len(unsafe)})
     return {
@@ -579,7 +592,15 @@ async def list_scripts(offer_id: uuid.UUID) -> list[dict]:
         """,
         offer_id,
     )
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        item = dict(r)
+        # §17: the approval-pinning hash, computed from the exact markdown —
+        # the render worker binds it into each render row at registration so
+        # the publishing worker can verify render ↔ approval integrity.
+        item["version_hash"] = script_version_hash(r["markdown"])
+        out.append(item)
+    return out
 
 
 @router.post("/sweep-stale")

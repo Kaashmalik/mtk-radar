@@ -12,10 +12,11 @@ import json
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import effective_reviewer
 from redact import scan as scan_secrets
 from state import can_generate_video
 
@@ -31,7 +32,8 @@ class CaptureIn(BaseModel):
 
 
 class RedactionReviewIn(BaseModel):
-    reviewer: str = Field(min_length=2)
+    # v0.16: optional when a reviewer token binds identity (enforced server-side)
+    reviewer: Optional[str] = None
     approved: bool
     note: Optional[str] = None
 
@@ -93,7 +95,8 @@ async def list_captures(
 
 
 @router.post("/captures/{capture_id}/redaction-review")
-async def redaction_review(capture_id: uuid.UUID, review: RedactionReviewIn) -> dict:
+async def redaction_review(capture_id: uuid.UUID, review: RedactionReviewIn,
+                           request: Request) -> dict:
     """Reviewer attests the footage/transcript is clean (re-checked the video,
     terminal output, and captions — not just this scan)."""
     pool = db.get()
@@ -106,6 +109,7 @@ async def redaction_review(capture_id: uuid.UUID, review: RedactionReviewIn) -> 
     if not review.approved and capture["redaction_reviewed"]:
         raise HTTPException(status_code=409, detail="already reviewed — re-run via a new review")
 
+    reviewer_on_record = effective_reviewer(request, review.reviewer, require=True)
     row = await pool.fetchrow(
         """
         UPDATE capture_sessions
@@ -113,6 +117,6 @@ async def redaction_review(capture_id: uuid.UUID, review: RedactionReviewIn) -> 
         WHERE id = $1
         RETURNING id, redaction_reviewed
         """,
-        capture_id, review.approved, review.reviewer, review.note,
+        capture_id, review.approved, reviewer_on_record, review.note,
     )
     return {"id": row["id"], "redaction_reviewed": row["redaction_reviewed"]}

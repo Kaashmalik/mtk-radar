@@ -103,8 +103,11 @@ services:
     working_dir: /app
     environment:
       API_URL: http://api:8000
+      # server-side (Node) reads only — never inlined into the browser bundle;
+      # interactive islands use personal reviewer tokens (v0.16, minted with
+      # scripts/mint_reviewer.py). NEXT_PUBLIC_API_TOKEN is deliberately gone:
+      # the browser must never hold the master secret.
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
-      NEXT_PUBLIC_API_TOKEN: ${MTK_API_TOKEN:-}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://api:8000}
     volumes:
       - ../../apps/dashboard:/app

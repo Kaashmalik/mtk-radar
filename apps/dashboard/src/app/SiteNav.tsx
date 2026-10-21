@@ -7,6 +7,9 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
+import { getReviewerName } from "@/lib/identity";
+
+import IdentityBadge from "./IdentityBadge";
 
 const LINKS: [string, string][] = [
   ["/", "Inbox"],
@@ -75,6 +78,7 @@ export default function SiteNav() {
         </div>
       </nav>
       <div className="nav-spacer" />
+      <IdentityBadge />
       <HealthDot />
     </header>
   );

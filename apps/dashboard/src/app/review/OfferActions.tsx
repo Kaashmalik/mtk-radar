@@ -3,12 +3,13 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
-
-const REVIEWER = "kashif"; // TODO(week-5): real session identity
+import { getReviewerName } from "@/lib/identity";
 
 type Props = { offerId: string; state: string };
 
-/** Reviewer actions. The API enforces every gate — buttons only propose. */
+/** Reviewer actions. The API enforces every gate — buttons only propose.
+ * Identity: a reviewer token binds the actor server-side (v0.16); the name
+ * is a fallback for dev-open APIs. */
 export default function OfferActions({ offerId, state }: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -21,7 +22,7 @@ export default function OfferActions({ offerId, state }: Props) {
       const res = await clientFetch(`/offers/${offerId}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, reviewer: REVIEWER, note }),
+        body: JSON.stringify({ to, reviewer: getReviewerName(), note }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

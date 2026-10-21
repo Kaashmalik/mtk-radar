@@ -83,6 +83,9 @@ class RenderJob:
             raise SystemExit("no generated script — run the script step first")
         latest = scripts[0]
         self.script_version = latest["version"]
+        # §17 pin: hash of the exact markdown this render is produced from —
+        # carried into the render row so publishing can verify render ↔ approval.
+        self.script_version_hash = latest.get("version_hash")
         project_mod.write_script(self.project, latest["markdown"], latest["version"])
 
         project_mod.write_evidence_json(self.project, offer.get("evidence", []))
@@ -229,6 +232,7 @@ class RenderJob:
                 "video_path": render_row["video_path"],
                 "captions_path": render_row["captions_path"],
                 "script_version": self.script_version,
+                "script_version_hash": self.script_version_hash,
                 "capture_id": self.capture_id,
                 "disclosure": narration_mod.disclosure_record(narration_used),
             }

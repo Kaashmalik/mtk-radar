@@ -14,7 +14,10 @@ care about. Skipped automatically when the env var is absent.
 """
 
 import asyncio
+import importlib.util
 import os
+import sys as _sys
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +39,21 @@ DSN = os.environ[REQUIRED_ENV]
 
 # ------------------------------------------------------------- fixtures
 
+def _import_api_main():
+    """Import services/api/main.py as 'api_main'. A bare `import main` is
+    unreliable in combined test runs: pytest imports every test module before
+    running any, and worker test modules have their own main.py cached under
+    the same name."""
+    if "api_main" in _sys.modules:
+        return _sys.modules["api_main"]
+    spec = importlib.util.spec_from_file_location(
+        "api_main", Path(__file__).resolve().parents[1] / "main.py")
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["api_main"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @pytest.fixture(scope="session")
 def client():
     """Wiped schema + migrations applied by the real runner + the real app."""
@@ -52,9 +70,9 @@ def client():
     assert len(summary["applied"]) == summary["total_known"] > 0
 
     os.environ["DATABASE_URL"] = DSN
-    import main  # reads DATABASE_URL at import; startup() builds the pool
+    api_main = _import_api_main()  # reads DATABASE_URL at import; startup() builds the pool
 
-    with TestClient(main.app) as c:
+    with TestClient(api_main.app) as c:
         yield c
 
 
@@ -198,3 +216,144 @@ def test_full_review_pipeline(client, source):
     # ---- inbox processed flag ----------------------------------------------
     patch = client.patch(f"/items/{first.json()['id']}/processed", params={"processed": "true"})
     assert patch.status_code == 200
+
+
+# ------------------------------------------------- v0.16: identity + approval integrity
+
+import secrets
+
+import fastapi
+
+import api_hardening
+from captures_api import router as _captures_router
+from offers_api import router as _offers_router
+from renders_api import router as _renders_router
+from schedules_api import router as _schedules_router
+from schedules_state import script_version_hash
+
+
+def test_script_hash_reaches_renders_roundtrip(client):
+    """§17 chain: script markdown → version_hash (list_scripts) → render row →
+    GET /renders — the exact values the publishing worker compares."""
+    res = client.post("/offers", json={
+        "provider": "Hash Chain Co", "category": "domains", "offer_type": "coupon",
+    })
+    offer_id = res.json()["id"]
+    markdown = "# claim guide v1\n\nstep one cites evidence.\n"
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown) VALUES ($1, 1, $2)",
+         __import__("uuid").UUID(offer_id), markdown)
+
+    scripts = client.get(f"/offers/{offer_id}/scripts").json()
+    assert scripts[0]["version_hash"] == script_version_hash(markdown)
+
+    _run(
+        """
+        INSERT INTO renders (offer_id, preset, width, height, video_path,
+                             script_version, script_version_hash)
+        VALUES ($1, 'landscape', 1920, 1080, 'projects/x/r.mp4', 1, $2)
+        """,
+        __import__("uuid").UUID(offer_id), scripts[0]["version_hash"],
+    )
+    renders = client.get("/renders", params={"offer_id": offer_id}).json()
+    assert renders[0]["script_version_hash"] == scripts[0]["version_hash"] == script_version_hash(markdown)
+
+
+AUTH_TOKEN = "rtok-" + secrets.token_urlsafe(24)
+REVIEWER = "Kashi Test"
+
+
+@pytest.fixture(scope="session")
+def auth_client(client):
+    """Same global pool, but with full auth: shared service token + reviewer
+    token resolution against the REAL reviewers table."""
+    _run("INSERT INTO reviewers (name, token_hash) VALUES ($1, $2) "
+         "ON CONFLICT (name) DO UPDATE SET token_hash = EXCLUDED.token_hash, active = TRUE",
+         REVIEWER, api_hardening.token_hash(AUTH_TOKEN))
+
+    app2 = fastapi.FastAPI()
+
+    @app2.on_event("startup")
+    async def _own_pool():
+        # app2's TestClient runs its own event loop; the main pool belongs to
+        # the `client` fixture's loop and asyncpg pools are loop-bound.
+        import db
+        await db.init(DSN)
+
+    @app2.on_event("shutdown")
+    async def _drop_own_pool():
+        import db
+        await db.close()
+
+    for r in (_offers_router, _schedules_router, _renders_router, _captures_router):
+        app2.include_router(r)
+    api_hardening.register(app2, token="svc-token", db_url=DSN)
+    app2.include_router(api_hardening.router)
+    with TestClient(app2) as c:
+        yield c
+
+
+def _run(sql, *args):
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        try:
+            return await conn.fetch(sql, *args)
+        finally:
+            await conn.close()
+    return asyncio.run(go())
+
+
+AUTH = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+SVC = {"Authorization": "Bearer svc-token"}
+
+
+def test_whoami_distinguishes_reviewer_service_and_anonymous(auth_client):
+    r = auth_client.get("/whoami")
+    assert r.status_code == 401, "no token must be rejected when auth is on"
+
+    r = auth_client.get("/whoami", headers=SVC)
+    assert r.status_code == 200 and r.json() == {"actor": None, "auth": "service"}
+
+    r = auth_client.get("/whoami", headers=AUTH)
+    assert r.status_code == 200 and r.json() == {"actor": REVIEWER, "auth": "reviewer"}
+
+
+def test_reviewer_token_binds_audit_actor_over_body_strings(auth_client):
+    res = auth_client.post("/offers", headers=AUTH, json={
+        "provider": "Auth Test Co", "category": "domains",
+        "offer_type": "free_trial", "title": "identity binding probe",
+    })
+    assert res.status_code == 201, res.text
+    offer_id = res.json()["id"]
+
+    # the token owner — not any body string — is the actor on record
+    rows = _run("SELECT actor FROM audit_log WHERE entity = 'offers' AND entity_id = $1 "
+                "ORDER BY created_at DESC LIMIT 1", __import__("uuid").UUID(offer_id))
+    assert rows[0]["actor"] == REVIEWER
+
+    # an authenticated approval no longer needs the body reviewer field (§3)
+    tr = auth_client.post(f"/offers/{offer_id}/transition", headers=AUTH,
+                          json={"to": "evidence_needed", "note": "probe"})
+    assert tr.status_code == 200, tr.text
+
+
+def test_service_token_supports_explicit_reviewer_fallback(auth_client):
+    res = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Svc Co", "category": "domains", "offer_type": "coupon",
+    })
+    assert res.status_code == 201, res.text
+    rows = _run("SELECT actor FROM audit_log WHERE entity = 'offers' AND entity_id = $1 "
+                "ORDER BY created_at DESC LIMIT 1", __import__("uuid").UUID(res.json()["id"]))
+    assert rows[0]["actor"] == "reviewer"  # dev default preserved for service callers
+
+
+def test_unknown_token_rejected(auth_client):
+    r = auth_client.get("/whoami", headers={"Authorization": "Bearer rtok-not-a-token"})
+    assert r.status_code == 401
+
+
+def test_revoked_reviewer_token_rejected(auth_client):
+    auth_client.get("/whoami", headers=AUTH)  # populate the positive cache
+    _run("UPDATE reviewers SET active = FALSE WHERE name = $1", REVIEWER)
+    api_hardening.reset_reviewer_cache()
+    r = auth_client.get("/whoami", headers=AUTH)
+    assert r.status_code == 401, "revocation must take effect"

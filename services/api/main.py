@@ -32,7 +32,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.8.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.16.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,9 +49,11 @@ app.include_router(schedules_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 
-# Optional bearer-token auth (MTK_API_TOKEN) + structured request logging.
-# Unset token = open local dev; set it for anything reachable beyond localhost.
-api_hardening.register(app)
+# Optional bearer-token auth (MTK_API_TOKEN, v0.13) + reviewer-token identity
+# (v0.16) + structured request logging. Unset token = open local dev; set it
+# for anything reachable beyond localhost.
+api_hardening.register(app, db_url=DATABASE_URL)
+app.include_router(api_hardening.router)
 
 
 @app.on_event("startup")

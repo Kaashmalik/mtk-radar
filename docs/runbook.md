@@ -53,6 +53,19 @@ continue the `NNN_name.sql` sequence.
 The DB stores only *references* (`env:YOUTUBE_*`, `vault:<path>`), so recovery
 means rotating the secret in the environment/vault, never the database.
 
+### Reviewer identity tokens (v0.16)
+
+Dashboard users authenticate with personal tokens (reviewers table — only the
+sha256 is stored). From `services/api/` (or `docker compose exec api …`):
+
+    python -m scripts.mint_reviewer --name Kashi   # plaintext shown exactly once
+    python -m scripts.mint_reviewer --list
+    python -m scripts.mint_reviewer --revoke Kashi # instant; cache clears ≤60s
+
+Re-minting a name replaces its token (old one stops working). To activate in
+the dashboard: paste the token in the nav's identity box — the badge shows the
+authenticated name (GET `/whoami` doubles as a token liveness check).
+
 ### YouTube (OAuth2 refresh token)
 
 1. Symptom: calendar shows account `token_expired`; monitor logs
@@ -186,12 +199,17 @@ rows to refs.
 - TTS narration segments are mixed into one track and mapped into renders
   (v0.14: disclosure metadata now matches the actual audio); stream-copy concat
   assumes homogenous codec output from the TTS provider.
-- Reviewer identity is an operator string (no session/SSO yet) — fine for the
-  single-operator deployment. Transport-level protection exists: set
-  `MTK_API_TOKEN` and every route except `/health` requires
-  `Authorization: Bearer <token>` (services/api/api_hardening.py). The
-  dashboard and workers attach the token automatically when the env is set;
-  compose forwards it. Leave it unset only for throwaway local dev.
+- Reviewer identity: personal hashed tokens (v0.16) bind every dashboard/API
+  action to a named reviewer — audit_log.actor comes from the token, not the
+  request body, and the shared `MTK_API_TOKEN` no longer reaches the browser.
+  Still an operator-token model, NOT session/SSO login: no password auth, no
+  browser sessions. Fine for the single-operator deployment; revisit if a
+  second operator needs self-serve access (`MTK_API_TOKEN` gates workers and
+  the extension exactly as in v0.13; leave it unset only for throwaway dev).
+- Publishing safe-guards in place since v0.16: post upload re-verifies the
+  offer (state + expiry/recheck timestamps, §11) and the render↔approval hash
+  binding (§17) — anything else auto-pauses the post. Remaining exposure: the
+  schedule-host clock is trusted for the "due" check.
 - Analytics counts runs on one Postgres instance; no replication/HA.
 
 ## 10. Test & automation layers (v0.14)
