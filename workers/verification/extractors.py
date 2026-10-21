@@ -168,6 +168,11 @@ def extract(
             model_used = os.environ.get("VERIFY_LLM_MODEL", "gpt-4o-mini")
             llm_fields = llm.get("fields", {})
             conflicts = _compare(rules, llm_fields)
+            reported = llm.get("conflicts", [])
+            if isinstance(reported, list) and all(isinstance(item, dict) for item in reported):
+                conflicts.extend(reported)
+            else:
+                conflicts.append({"reason": "model returned malformed conflicts"})
             # LLM output wins but keeps rule fields the LLM missed; conflicts label it.
             merged = {**llm_fields, **{k: v for k, v in rules.items() if k not in llm_fields}}
             if merged:

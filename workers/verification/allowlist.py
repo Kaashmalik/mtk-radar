@@ -13,6 +13,8 @@ def build_allowlist(sources: list[dict]) -> dict[str, dict]:
     provider → {"domains": {...}, "handles": {...}, "source_ids": [...]}"""
     allowlist: dict[str, dict] = {}
     for source in sources:
+        if not source.get("enabled") or source.get("trust_tier") != "A_provider_owned":
+            continue
         key = (source.get("provider") or "").strip().lower()
         if not key:
             continue
