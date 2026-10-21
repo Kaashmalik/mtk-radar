@@ -110,6 +110,42 @@ python workers/collectors/main.py
 
 New candidates appear once (deduplicated by canonical URL) in the review inbox.
 
+### Local development without Docker
+
+Docker is the supported path, but the stack also runs directly on a host. On
+Windows without Docker Desktop, a portable PostgreSQL build works (the
+[Zonky embedded binaries](https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-windows-amd64/)
+need no admin rights); Docker's Postgres 16 image is the other option.
+
+```bash
+# 1. Python environment (3.12 matches CI)
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r services/api/requirements.txt \
+    -r workers/requirements.txt -r workers/publishing/requirements.txt \
+    -r workers/render/requirements.txt pytest
+
+# 2. Postgres on 5432 with role `mtk` / password `mtk` and database `mtk_radar`
+#    (Redis is optional — no Python code depends on it yet)
+
+# 3. Schema + source registry
+cp .env.example .env
+DATABASE_URL=postgresql://mtk:mtk@localhost:5432/mtk_radar .venv/Scripts/python.exe services/api/db_migrate.py
+DATABASE_URL=postgresql://mtk:mtk@localhost:5432/mtk_radar .venv/Scripts/python.exe services/api/scripts/seed_sources.py
+
+# 4. API and dashboard
+DATABASE_URL=postgresql://mtk:mtk@localhost:5432/mtk_radar \
+  .venv/Scripts/python.exe -m uvicorn main:app --app-dir services/api --port 8000
+pnpm --filter mtk-radar-dashboard dev          # http://localhost:3000
+
+# 5. Workers (each in its own shell; API_URL points at the API)
+API_URL=http://localhost:8000 .venv/Scripts/python.exe workers/collectors/main.py
+API_URL=http://localhost:8000 .venv/Scripts/python.exe workers/monitor/main.py
+```
+
+The pnpm version is pinned in `package.json` (`packageManager`); run
+`corepack enable` so `pnpm` matches it. `pnpm install` needs the `sharp`
+build script, already approved via `allowBuilds` in `pnpm-workspace.yaml`.
+
 ### Tests & checks
 
 ```bash
