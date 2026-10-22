@@ -6,7 +6,7 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 21 October 2026:** fifteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit and its blast-radius counts. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md) and [slice 15](implementation-wp01-slice15-2026-10-21.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 22 October 2026:** sixteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and coverage for claim-free pages in the acquisition window. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md), [slice 15](implementation-wp01-slice15-2026-10-21.md) and [slice 16](implementation-wp01-slice16-2026-10-22.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
 **Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
@@ -134,7 +134,7 @@ An additional orchestration gap: collection creates inbox items, while offer pro
 | [x] Partial | Metrics, monitor, health, auth, audit logs, backup scripts | Existing API/workers/infra; operational execution not demonstrated here |
 | [ ] | Trend/entity clustering, velocity, cross-source corroboration and watched topics | WP05–WP06 |
 | [x] | Retained hash-checked text snapshots, typed evidence binding, literal quote checks and server-derived core completeness | WP01 first integrity slice; 325 tests passed including isolated PostgreSQL integration; not semantic offer verification |
-| [ ] | Complete official offer confirmation: type-specific terms, mandatory extraction coverage, attestation expiry, freshness and downstream fact-pack propagation | Remaining WP01 work |
+| [ ] | Complete official offer confirmation: type-specific terms, mandatory extraction coverage, attestation expiry, freshness and downstream fact-pack propagation | Remaining WP01 work; claim-free pages from the same acquisition window are now counted, but a page never sent to the API or sent after the extraction is still invisible |
 | [ ] | Strict local GLM/MiniMax-compatible model gateway and evaluations | WP07 |
 | [ ] | Native Full HD capture, semantic edit plan, speech alignment and media QC | WP08–WP09 |
 | [ ] | Light manual in-app editing, revision history and selective rerender | WP10 |
@@ -669,9 +669,13 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Attach a compact `impact` object to every failing audit entry — total/scheduled/published schedules, renders and captures in one query — so an operator sees whether queued or published work depends on an offer before reclassifying it; the per-offer `/impact` view still provides ids.
 - [x] Keep the audit read-only: the added test asserts that a reported offer's scheduled post is still `scheduled` afterwards. Full suite **608 passed, zero skips**. See [fifteenth-slice checkpoint](implementation-wp01-slice15-2026-10-21.md).
 
+**Completed — sixteenth slice, coverage for claim-free pages:**
+
+- [x] Count every machine snapshot inside the acquisition window, not only snapshots a claim cites: the gate derives the window from server-side `captured_at` values between the previous extraction and this one, so a page read without yielding a claim must still be listed. Reviewer-attested snapshots remain exempt. Full suite **610 passed, zero skips**. See [sixteenth-slice checkpoint](implementation-wp01-slice16-2026-10-22.md).
+
 **Remaining — WP01 is not complete:**
 
-- [ ] Account for pages the worker read but drew no claim from: the gate can only check coverage for evidence that claims use, so an omitted page with no claims is still invisible.
+- [ ] Bind the acquisition run into signed provenance or fetch server-side: the window is time-based, so a worker can still store an inconvenient page after the extraction or never send it at all.
 - [ ] Replace the symmetric HMAC with asymmetric signing (API holds only a public key) or server-side fetching, so the API cannot forge a record and a compromised worker cannot sign bytes it never fetched.
 - [ ] Detect terms that changed inside a review's validity window and re-read the attested reference; today only the clock is checked, not the document.
 - [ ] Prove *applicable-terms* coverage beyond the mechanical section count: sections are paragraph groups, so a clause split across a boundary can still lose context, and no semantic check proves the restrictions that apply were captured.
@@ -867,7 +871,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit and its blast-radius counts implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md), [slice 15](implementation-wp01-slice15-2026-10-21.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, coverage for claim-free pages, downstream invalidation and human/bulk legacy reclassification remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and claim-free-page coverage in the acquisition window implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md), [slice 15](implementation-wp01-slice15-2026-10-21.md), [slice 16](implementation-wp01-slice16-2026-10-22.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, run-bound (not merely time-windowed) claim-free coverage, downstream invalidation and human/bulk legacy reclassification remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -1291,6 +1295,39 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 - **Next smallest task:** a reviewer-recorded batch reclassification path for the
   audited offers, one audit entry per offer, instead of repeating the
   single-offer transition by hand.
+
+#### 22 October 2026, 02:05 UTC — WP01 sixteenth slice: claim-free page coverage
+
+- **Status:** implemented; locally VERIFIED for the acquisition-window scope only.
+  Whole WP01 stays **IN_PROGRESS**.
+- **Implementation commit:** this slice's commit (parent `a22fae8`).
+- **Changes:** `_verified_problems` reads the stored extraction's `created_at`;
+  `_coverage_problems` now also requires every machine-collected, official,
+  domain-ok evidence row whose server-side `captured_at` falls after the previous
+  extraction and at or before this one. Coverage must list the union of the
+  claim-cited snapshots and that window. Reviewer-attested snapshots remain
+  exempt. No schema change: `evidence.captured_at` is not part of the request and
+  defaults to `now()`, so the window uses server time, not a worker-chosen id.
+  See [sixteenth-slice checkpoint](implementation-wp01-slice16-2026-10-22.md).
+- **Failing first:** at `a22fae8` the gate only resolved evidence ids cited by
+  claims, so an offer with a second stored official snapshot and coverage for the
+  cited page only promoted successfully; the new integration test expects 422.
+- **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
+  **610 passed, 26 warnings, zero skips**, exit 0; `ruff check`, `compileall`,
+  `pnpm typecheck` all exit 0. New unit and integration tests cover the block and
+  the full-coverage promotion.
+- **Not closed, and deliberately not ticked:** the window is time-based, so
+  evidence stored after the extraction, or never stored at all, is still outside
+  the gate; concurrent writers can land on the wrong side of the boundary.
+  Non-symmetric acquisition identity, semantic applicable-terms proof,
+  terms-change detection, risk-based recheck intervals, downstream invalidation,
+  bulk legacy reclassification and deployment with owner approval remain open.
+- **Safety:** no real `.env`, existing application database, live provider,
+  model/OAuth service or publishing account touched. Only the isolated test
+  database was used; no network fetch was performed.
+- **Next smallest task:** bind the acquisition run into the signed provenance (or
+  fetch server-side), so a worker cannot move evidence across the extraction
+  boundary or omit a page it actually read.
 
 ## 13. Coding-model execution guide
 
