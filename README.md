@@ -144,10 +144,15 @@ docs/                      # Master plan, runbook, go-live checklist, notices
 
 ```bash
 cp .env.example .env                  # never commit the real .env
-docker compose -f infra/docker/docker-compose.yml up -d \
+docker compose -f infra/docker/docker-compose.yml up -d --build \
   --profile workers --profile storage  # postgres + redis + api + dashboard + workers
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
 ```
+
+The base compose file builds immutable API/dashboard/worker images and keeps
+PostgreSQL, Redis and MinIO off the host network. For host-side hot reload and
+published development ports use
+`-f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml`.
 
 - Dashboard (operator console): http://localhost:3000 · API health: http://localhost:8000/health
 - Choose how much runs unattended in **Settings → Automation control** (default:
