@@ -40,6 +40,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
+from api_paging import iter_pages  # noqa: E402
+
 import captions as captions_mod  # noqa: E402
 import covers as covers_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
@@ -193,10 +195,15 @@ class RenderJob:
 
         capture = None
         if capture_id:
-            captures = self._get("/captures", params={"offer_id": self.offer_id})
-            capture = next((c for c in captures if c["id"] == capture_id), None)
-            if capture is None:
-                raise SystemExit(f"capture {capture_id} not found for this offer")
+            # Fetch the pinned capture by id. Scanning the first page of
+            # /captures?offer_id=... reported a valid asset as missing once an
+            # offer had more captures than one page.
+            try:
+                capture = self._get(f"/captures/{capture_id}")
+            except Exception:  # noqa: BLE001 — normalized below
+                capture = None
+            if not capture or str(capture.get("id")) != str(capture_id):
+                raise SystemExit(f"capture {capture_id} not found")
             self.capture_id = capture_id
             project_mod.write_step_log(
                 self.project,
@@ -665,16 +672,25 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
         log.info("render stage is %s in Settings — sweep skipped", state)
         return 0
     try:
-        candidates = client.get(
-            "/render-candidates",
-            params={"limit": limit, "presets": ",".join(preset_keys)},
-        ).json()
-    except httpx.HTTPError as exc:
+        # Follow X-Next-Cursor: a fixed first page hid every older candidate
+        # once the backlog grew beyond `limit`.
+        candidates = list(iter_pages(
+            client, "/render-candidates",
+            {"presets": ",".join(preset_keys)}, limit=limit,
+        ))
+    except (httpx.HTTPError, ValueError) as exc:
         log.error("render sweep skipped (API unreachable): %s", exc)
         return 0
 
     rendered = 0
     for candidate in candidates:
+        # The kill switch is re-checked before each irreversible render, so a
+        # pause during a long sweep takes effect immediately.
+        current = _load_policy(client)
+        if current is not None and not _render_stage_allowed(current):
+            log.info("render stage changed to %s — stopping the sweep before the "
+                     "next render", "paused" if current.get("paused") else "not auto")
+            break
         offer_id = candidate["offer_id"]
         # The API reports which variants are genuinely missing. Never re-render
         # a landscape export just because the vertical one is still absent.

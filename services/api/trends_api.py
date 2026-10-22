@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import json
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 import db
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from settings_store import audit
 from trend_engine import radar_bands, score_item
 
@@ -39,10 +47,21 @@ def _decode(row) -> dict:
 
 @router.get("")
 async def list_trends(
+    response: Response,
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
 ) -> dict:
     pool = db.get()
+    parts = decode_cursor(cursor, 3)
+    try:
+        # Keep the exact NUMERIC value: decoding to float and casting back can
+        # round 59.28 up, so equal-score rows would never advance the cursor.
+        before_score = Decimal(parts[0]) if parts else None
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid cursor: score") from None
+    before_updated = decode_datetime(parts[1]) if parts else None
+    before_id = decode_uuid(parts[2]) if parts else None
     rows = await pool.fetch(
         """
         SELECT id, item_id, title, url, source_provider, source_category,
@@ -52,13 +71,22 @@ async def list_trends(
                status, created_at, updated_at
         FROM trend_candidates
         WHERE ($1::text IS NULL OR status = $1)
-        ORDER BY score DESC, updated_at DESC
+          AND ($3::numeric IS NULL
+               OR (score, updated_at, id) < ($3::numeric, $4::timestamptz, $5::uuid))
+        ORDER BY score DESC, updated_at DESC, id DESC
         LIMIT $2
         """,
         status,
         limit,
+        before_score,
+        before_updated,
+        before_id,
     )
     candidates = [_decode(row) for row in rows]
+    set_next_cursor(
+        response, candidates, limit,
+        lambda row: encode_cursor(row["score"], row["updated_at"], row["id"]),
+    )
     return {
         "candidates": candidates,
         "bands": radar_bands(candidates),
@@ -93,6 +121,7 @@ async def scan_trends(limit: int = Query(default=100, le=500)) -> dict:
     )
     created = 0
     updated = 0
+    scored_ids = []
     for item in rows:
         data = dict(item)
         data["url"] = data.get("canonical_url") or data.get("url")
@@ -148,13 +177,24 @@ async def scan_trends(limit: int = Query(default=100, le=500)) -> dict:
             created += 1
         else:
             updated += 1
+        scored_ids.append(data["id"])
+
+    # Scoring an item IS its processing. Without this the same newest `limit`
+    # inbox rows were re-scanned forever and the tail never reached the radar.
+    if scored_ids:
+        await pool.execute(
+            "UPDATE items SET processed = TRUE WHERE id = ANY($1::uuid[])",
+            scored_ids,
+        )
 
     await audit(pool, actor="operator", action="trends:scan", entity="trend_candidates",
-                detail={"created": created, "updated": updated, "scanned": len(rows)})
+                detail={"created": created, "updated": updated, "scanned": len(rows),
+                        "processed": len(scored_ids)})
     return {
         "scanned": len(rows),
         "created": created,
         "updated": updated,
+        "processed": len(scored_ids),
         "message": "Radar refreshed — shortlist a lead, then verify it like any other offer.",
     }
 

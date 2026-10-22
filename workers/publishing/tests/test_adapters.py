@@ -426,3 +426,76 @@ def test_correction_preserves_tags_and_does_not_duplicate_notice():
     assert snippet["defaultLanguage"] == "en"
     assert snippet["description"].count(notice) == 1, "a retry must not duplicate the notice"
     assert "Original approved description." in snippet["description"]
+
+
+class TestYouTubeAnalyticsGroups:
+    def _adapter(self, handler):
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        return YouTubeAdapter(oauth=None, access_token="tok",
+                              account_id="acc1", http=http)
+
+    def test_unsupported_group_degrades_instead_of_dropping_everything(self):
+        """One rejected metric group must not discard the metrics that work,
+        and nearest-bucket retention must be marked as an estimate (§7.F.3-F.6).
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            params = request.url.params
+            if "/youtube/v3/videos" in url:
+                return httpx.Response(200, json={
+                    "items": [{"contentDetails": {"duration": "PT2M"}}]})
+            if "youtubeanalytics" in url:
+                if params.get("dimensions") == "elapsedVideoTimeRatio":
+                    return httpx.Response(200, json={
+                        "columnHeaders": [{"name": "elapsedVideoTimeRatio"},
+                                          {"name": "audienceWatchRatio"}],
+                        "rows": [[0.0, 0.8], [0.025, 0.61], [0.05, 0.5]],
+                    })
+                metrics = params.get("metrics", "")
+                if metrics.startswith("impressions"):
+                    return httpx.Response(400, json={
+                        "error": {"message": "impressions are unsupported here"}})
+                if metrics.startswith("views"):
+                    return httpx.Response(200, json={
+                        "columnHeaders": [
+                            {"name": "views"}, {"name": "likes"},
+                            {"name": "comments"}, {"name": "shares"},
+                            {"name": "averageViewDuration"},
+                        ],
+                        "rows": [[1500, 88, 12, 7, 143.5]],
+                    })
+                return httpx.Response(200, json={
+                    "columnHeaders": [
+                        {"name": "averageViewPercentage"},
+                        {"name": "subscribersGained"},
+                        {"name": "subscribersLost"},
+                        {"name": "estimatedMinutesWatched"},
+                    ],
+                    "rows": [[48.25, 9, 2, 3100]],
+                })
+            return httpx.Response(404)
+
+        adapter = self._adapter(handler)
+        report = adapter.fetch_video_metrics("vid1")
+
+        assert report["views"] == 1500
+        assert report["averageViewPercentage"] == 48.25
+        assert "impressions" not in report, "a rejected group stays unavailable"
+        meta = report["_meta"]
+        assert meta["degraded"] is True
+        assert meta["unsupported_groups"] == ["impressions"]
+        assert "unsupported" in meta["degradation_detail"]
+        assert meta["metric_definition"] == "youtube-analytics-v2:core,audience"
+        assert report["retention_3s"] == 0.61
+        assert report["retention_3s_estimated"] is True
+        assert report["retention_3s_bucket_ratio"] == 0.025
+        assert report["retention_3s_bucket_seconds"] == 3.0
+
+    def test_invalid_analytics_scope_is_still_a_permission_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "youtubeanalytics" in str(request.url):
+                return httpx.Response(403, json={"error": {"message": "forbidden"}})
+            return httpx.Response(404)
+
+        with pytest.raises(PermissionError):
+            self._adapter(handler).fetch_video_metrics("vid1")

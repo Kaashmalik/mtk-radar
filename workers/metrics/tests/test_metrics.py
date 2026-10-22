@@ -201,3 +201,40 @@ def test_pinned_account_never_uses_another_accounts_metrics():
     w.api = api
     assert w.run_once() == 0, "wrong-channel metrics must be skipped, not attributed"
     assert api.written == []
+
+
+class ProvenanceYouTube:
+    def fetch_video_metrics(self, video_id):
+        return {
+            "views": 640, "likes": 21, "comments": 4, "shares": 2,
+            "averageViewDuration": 95.0,
+            "retention_3s": 0.6,
+            "retention_3s_estimated": True,
+            "retention_3s_bucket_ratio": 0.025,
+            "retention_3s_bucket_seconds": 3.0,
+            "_meta": {
+                "report_start": "2026-10-01",
+                "report_end": "2026-10-22",
+                "groups": ["core", "audience", "impressions"],
+                "unsupported_groups": ["impressions"],
+                "degraded": True,
+                "degradation_detail": "impressions: unsupported for this report",
+                "metric_definition": "youtube-analytics-v2:core,audience",
+                "retention_estimated": True,
+            },
+        }
+
+
+def test_measure_persists_provenance_degradation_and_retention_estimate():
+    snap = _worker([], {})._measure("youtube", ProvenanceYouTube(), "vid1")
+    assert snap["views"] == 640
+    assert snap["degraded"] is True
+    assert "unsupported" in snap["degradation_detail"]
+    assert snap["report_start"] == "2026-10-01"
+    assert snap["report_end"] == "2026-10-22"
+    assert snap["metric_definition"] == "youtube-analytics-v2:core,audience"
+    assert snap["retention_3s_estimated"] is True
+    # The provider's bucket helper keys are not metrics.
+    assert "retention_3s_bucket_ratio" not in snap
+    assert "retention_3s_bucket_seconds" not in snap
+    assert snap["raw"]["meta"]["unsupported_groups"] == ["impressions"]

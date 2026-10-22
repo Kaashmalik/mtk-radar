@@ -377,7 +377,8 @@ async def approve_variant(variant_id: uuid.UUID, body: VariantApprovalIn,
     )
     if not variant:
         raise HTTPException(status_code=404, detail="content variant not found")
-    actor = effective_reviewer(request, None, default="operator")
+    # Approving copy is an editorial sign-off: a worker must not do it.
+    actor = effective_reviewer(request, None, default="operator", require=True)
     status = "approved" if body.approved else "archived"
     await pool.execute(
         "UPDATE content_variants SET status = $2, updated_at = now() WHERE id = $1",
@@ -499,7 +500,8 @@ async def decide_experiment(experiment_id: uuid.UUID, body: ExperimentDecisionIn
     if body.status not in ("won", "lost", "inconclusive"):
         raise HTTPException(status_code=422, detail="decision must be won, lost, or inconclusive")
     pool = db.get()
-    actor = effective_reviewer(request, None, default="operator")
+    # Declaring an experiment result is a human judgement, not a worker task.
+    actor = effective_reviewer(request, None, default="operator", require=True)
     row = await pool.fetchrow(
         "UPDATE content_experiments SET status = $2, result = $3::jsonb, "
         "decision_note = $4, decided_by = $5, decided_at = now(), updated_at = now() "

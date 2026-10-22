@@ -13,11 +13,18 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
 import api_hardening
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from attention_api import router as attention_router
 from automation_api import router as automation_router
 from captures_api import router as captures_router
@@ -74,6 +81,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Cursor pagination is unusable from a browser without this: the
+    # dashboard cannot read a header the cross-origin allowlist hides.
+    expose_headers=["X-Next-Cursor"],
 )
 
 app.include_router(offers_router)
@@ -321,11 +331,20 @@ async def create_item(item: ItemIn) -> dict:
 
 @app.get("/items")
 async def list_items(
+    response: Response,
     processed: Optional[bool] = None,
     limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
-    """Review inbox — unprocessed candidates first (most recent)."""
+    """Review inbox — unprocessed candidates first (most recent).
+
+    Paginated with an opaque keyset cursor so the inbox tail is reachable;
+    a fixed LIMIT previously hid every item older than the newest page.
+    """
     pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    before_observed = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
@@ -335,13 +354,22 @@ async def list_items(
         FROM items i
         LEFT JOIN sources s ON s.id = i.source_id
         WHERE ($1::boolean IS NULL OR i.processed = $1)
-        ORDER BY i.observed_at DESC
+          AND ($3::timestamptz IS NULL
+               OR (i.observed_at, i.id) < ($3::timestamptz, $4::uuid))
+        ORDER BY i.observed_at DESC, i.id DESC
         LIMIT $2
         """,
         processed,
         limit,
+        before_observed,
+        before_id,
     )
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["observed_at"], row["id"]),
+    )
+    return out
 
 
 @app.patch("/items/{item_id}/processed")

@@ -4,6 +4,7 @@ import EvidenceForm from "./EvidenceForm";
 import ExtractionEditor, { type ExtractionSnapshot } from "./ExtractionEditor";
 import GenerateScriptButton from "./GenerateScriptButton";
 import MediaPlayer from "./MediaPlayer";
+import OfferActions from "../../review/OfferActions";
 import RedactionReview from "./RedactionReview";
 import ScheduleForm from "./ScheduleForm";
 import { apiFetch } from "@/lib/api";
@@ -292,6 +293,8 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         {" · "}
         <a href="/calendar">Open calendar →</a>
       </p>
+
+      <OfferActions offerId={offer.id} state={offer.state} />
 
       <section className="card">
         <h2>Scripts ({scripts.length} version{scripts.length === 1 ? "" : "s"})</h2>

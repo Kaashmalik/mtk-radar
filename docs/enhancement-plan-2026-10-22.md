@@ -9,36 +9,90 @@ still not a production-readiness certificate, and not a promise of views,
 subscribers or revenue.
 
 **Implementation status (22 October 2026, after the audit and the P1
-completion pass):** all P0 findings are implemented and tested (`a34bfb2`,
-`d5473a4`, `c814444`). P1 is now implemented for the code-scoped findings:
-immutable revision/attempt media keys, persisted resumable upload sessions with
-provider-offset recovery and human held-upload reconciliation, mandatory
-YouTube package assets, a speech-authoritative render timeline without
-`-shortest`, and corrected growth-score zero/unavailable and unit handling.
-This pass also adds opaque **keyset cursors** on every growing list endpoint,
-**per-preset render-queue coverage** (a finished landscape export no longer
-hides a missing vertical one), immutable **API/dashboard/worker images** with
-private database/cache networking and explicit media volumes, authenticated
-**video playback with byte-range seeking** in the review desk, and a
-compliance-gated growth score that is **off by default**.
+completion pass, plus the follow-up hardening pass):** the plan is **not
+completely implemented**. The earlier P0/P1 pass closed several code-scoped
+findings (dashboard login gate, immutable revision/attempt media keys,
+persisted resumable upload sessions, per-preset render-queue coverage,
+authenticated byte-range playback, growth-score zero/unavailable handling, and
+keyset cursors on the core list endpoints). This follow-up pass then closed
+additional correctness and safety gaps:
 
-Verification on the audit machine: **845 backend tests passed** (100 of them
-against a disposable PostgreSQL database with real migrations), Python
-lint/compile, dashboard **typecheck and production build passed**, base and dev
-**compose configurations validated**, and the authenticated **Playwright suite
-passed 8/8**. That is code/test evidence only; it is not live-provider or
-deployment proof.
+- **Analytics provenance/degradation:** YouTube metric groups are requested
+  separately; a provider-rejected group is recorded as unsupported instead of
+  discarding the whole report. Metrics snapshots now store the report period,
+  metric definition, degraded flag/detail, and whether 3-second retention is a
+  nearest-bucket estimate. The dashboard labels estimates (`~X%*`) and partial
+  data; aggregates preserve missing-vs-zero instead of forcing `0`.
+- **Human-only controls:** `require=True` now rejects service, worker,
+  extension **and** `automation:*` identities. Automation policy writes
+  (including the generic `/settings/automation_policy` route), variant
+  approval, experiment decisions, redaction/claim attestations, corrections
+  and ToS reviews require a human reviewer credential.
+- **Backlog draining:** `/trends/scan` now marks scored items processed, so the
+  inbox tail is reachable instead of rescanning the same newest rows forever.
+  `/items` and `/trends` gained keyset cursors; `/trends` keeps exact numeric
+  cursor values (float round-tripping repeated a page). CORS exposes
+  `X-Next-Cursor` to the browser.
+- **Per-operation kill switch:** publishing re-reads policy before each post,
+  retry and correction; the render sweep re-reads it before each render; and
+  `POST /schedules/{id}/attempt` refuses upload authorization while automation
+  is paused or in dry-run.
+- **Pinned lookups:** render/publishing fetch a pinned render or capture by id
+  (`GET /renders/{id}`, `GET /captures/{id}`) instead of scanning the first
+  page of a filtered list. The render sweep follows `X-Next-Cursor` instead of
+  seeing only the newest ten candidates. Autopilot dedupes per target
+  (platform/account/language/variant), not merely per platform.
 
-Still **not demonstrated**: live credentials, accounts, domain/TLS, S3/R2
-storage, real YouTube upload/metrics/restore proof, an image build and private
-network actually operated on a deployment host, and full editorial or
-scene-timeline QC with final human playback review. The per-preset queue and
-cursors replace the starvation bug, but a durable PostgreSQL-backed job/outbox
-is still the recommended week-3 architecture rather than an implemented
-subsystem. Asymmetric acquisition signing and semantic applicable-terms proof
-remain blocked on dependency and product decisions. The system remains a
-**strong prototype in active hardening**, not production-ready or fully
-autonomous.
+Verification on the audit machine: **851 backend tests passed** (integration
+tests against a disposable PostgreSQL database with real migrations), Python
+lint/compile, dashboard **typecheck and production build passed**. That is
+code/test evidence only; it is not live-provider, restore or deployment proof.
+
+Still **not implemented / not demonstrated** (do not read the checked-or-not
+list in §9 as complete):
+
+- **P0 dashboard workflows remain partial.** This pass added inbox **Promote**
+  and **Dismiss** controls, and the review desk/offer page can now **verify**
+  or **request re-verification with a recorded reason** instead of requiring a
+  hand-called API. Still missing: inbox search/filters/pagination, per-conflict
+  resolution, raw-snapshot inspection, studio script/metadata/caption/chapter
+  editing and revision save, release-package preview, reschedule/cancel,
+  connection tests, notification tests, storage/backup status, and several
+  "Needs You" actions (render failure, correction, expiry, token reconnect,
+  worker restart). Several pages still render an outage as an empty pipeline
+  or zero metrics instead of "unavailable".
+- **Release gating is still three divergent checks** (API schedule validation,
+  offer freshness helper, publishing worker). This pass made the worker **fail
+  closed on a NULL `recheck_at`** (it previously published), but upload
+  authorization still does not itself re-check offer freshness, and there is no
+  separate public-release endpoint.
+- **Format/claim binding stops at generation.** Render registration and
+  scheduling do not re-read the script format or the capture's
+  `claim_outcome`; the wording guard is English/`official_explainer` only.
+- **Mandatory YouTube package policy is not a hard release gate.** Thumbnail,
+  caption, playlist and comments handling exist, but the set that blocks a
+  release is not fully enforced at scheduling/upload.
+- **Editorial/scene-timeline QC and a final human playback-review gate are not
+  implemented.** Authenticated playback exists; a recorded human sign-off on
+  the final export does not. `-shortest` is gone, but that is not the same as
+  scene-timeline sign-off.
+- **No durable PostgreSQL-backed job/outbox.** Orchestration remains polling +
+  row state. Render registration is not idempotent, upload `lease_expires_at`
+  is written but not enforced, sweep-lock release is not holder-scoped, and
+  collector cadence is in memory. Render **failures now stop retrying after
+  three attempts per script revision/preset** and remain in the dead letter for
+  a human, but there is no terminal queue state or automatic recovery. A restart
+  loses in-flight render work.
+- **Cursor coverage is still partial.** `/render-dead-letter`,
+  `/offers/audit/verified`, `/attention`, analytics truncations, `/sources` and
+  `/platform-accounts` are not fully paginated. CI's explicit test discovery
+  still needs a guard against missing directories.
+- **Live-provider and operational proof** remains outstanding: credentials,
+  accounts, domain/TLS, S3/R2, real YouTube upload/metrics, image deployment on
+  a private network, and database/media restore in a separate environment.
+
+The system remains a **strong prototype in active hardening**, not
+production-ready or fully autonomous.
 
 **Scope:** dashboard, API, collectors, verification, capture, render, publishing,
 metrics, automation policy, deployment, CI and the existing master plan. The
@@ -370,9 +424,10 @@ irreversible operation, not only once at the start of a long publishing sweep.
 
 Call the system functional only when all of these are demonstrated and recorded.
 Automated tests now cover the security boundary, blocking release checks,
-revision-scoped media keys, resumable-session persistence, package holds,
-growth-score units and compliance default, keyset cursors, per-preset render
-coverage, and media range parsing. Unchecked items below still require live
+revision-scoped media keys, resumable-session persistence, package-hold
+metadata checks, growth-score units and compliance default, core-list keyset
+cursors, per-preset render coverage, bounded render retries, and media range
+parsing. Unchecked items below still require live
 services, operator evidence or product decisions; do not replace that evidence
 with a passing unit test.
 

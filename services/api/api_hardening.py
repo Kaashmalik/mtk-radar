@@ -127,17 +127,22 @@ def effective_reviewer(
         return who
 
     if cls in SYSTEM_CLASSES:
-        if _is_system_actor(candidate):
-            return candidate
+        # `require=True` is a HUMAN-ONLY gate. An automation/system actor is
+        # still a machine credential, so it must not satisfy redaction,
+        # correction, ToS or policy attestations. Routes that intentionally
+        # accept automation call with require=False and authorize the stage
+        # explicitly.
         if require:
             raise HTTPException(
                 status_code=403,
                 detail=(
                     "this action requires a human reviewer credential; service, "
-                    "worker and extension credentials cannot approve or attest "
-                    "on a person's behalf"
+                    "worker, extension and automation identities cannot approve "
+                    "or attest on a person's behalf"
                 ),
             )
+        if _is_system_actor(candidate):
+            return candidate
         return default
 
     # Unknown class: never let it satisfy a human-only gate.

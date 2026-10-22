@@ -41,6 +41,16 @@ class FakeAPI:
             return FakeResponse(self.offer)
         if path == "/renders":
             return FakeResponse(self.renders)
+        if path.startswith("/renders/"):
+            wanted = path.rsplit("/", 1)[-1]
+            match = next((r for r in self.renders
+                          if str(r.get("id")) == wanted), None)
+            if match is None:
+                return FakeResponse({"detail": "render not found"}, status_code=404)
+            # The list fixtures predate offer_id on the row; bind the fixture
+            # post's offer id so the worker's ownership check behaves like the
+            # real endpoint.
+            return FakeResponse({"offer_id": "off-1", **match})
         raise AssertionError(f"unexpected GET {path}")
 
     def post(self, path, json=None):
@@ -339,6 +349,19 @@ def test_overdue_recheck_blocks_upload():
 
     assert adapter.uploads == []
     assert "recheck overdue" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_missing_recheck_deadline_blocks_upload():
+    """NULL is not proof of freshness: the API fails closed and so must the
+    worker (previously it skipped the check and published)."""
+    offer = {"state": "verified", "expires_at": None, "recheck_at": None}
+    render = _render("APPROVED")
+    p = _publisher(offer, [render])
+    adapter = FakeAdapter()
+    p._publish(_post(render), {"youtube": adapter})
+
+    assert adapter.uploads == []
+    assert "no recheck deadline" in _result_calls(p.api)[0][2]["detail"]
 
 
 def test_changed_render_bytes_block_upload():

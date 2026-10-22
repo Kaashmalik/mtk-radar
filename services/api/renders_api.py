@@ -227,6 +227,21 @@ async def list_renders(
     return out
 
 
+@router.get("/renders/{render_id}")
+async def get_render(render_id: uuid.UUID) -> dict:
+    """One render by id.
+
+    Workers pin a render id at schedule time. Looking it up by scanning the
+    first page of `/renders?offer_id=...` used to report a valid asset as
+    missing once an offer had more than one page of renders.
+    """
+    pool = db.get()
+    row = await pool.fetchrow("SELECT * FROM renders WHERE id = $1", render_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="render not found")
+    return dict(row)
+
+
 @router.get("/render-dead-letter")
 async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
     """Operator visibility for failed/QC-rejected render attempts.
@@ -264,6 +279,10 @@ async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
 #: Presets the render worker knows about. Kept in sync with
 #: workers/render/presets.py; the worker passes its own list explicitly.
 KNOWN_RENDER_PRESETS = ("landscape", "vertical")
+#: After this many failed attempts for the exact script revision/preset, the
+#: sweep stops retrying automatically. The failed rows stay visible in
+#: /render-dead-letter for a human; a new script revision resets the count.
+MAX_RENDER_ATTEMPTS = 3
 
 
 @router.get("/render-candidates")
@@ -334,6 +353,16 @@ async def render_candidates(
                        AND r.script_version_hash =
                            encode(sha256(convert_to(ls.markdown, 'UTF8')), 'hex')
                    )
+                     AND (
+                       SELECT COUNT(*)
+                       FROM renders failed
+                       WHERE failed.offer_id = o.id
+                         AND failed.language = ls.language
+                         AND failed.preset = p.preset
+                         AND failed.script_version_hash =
+                             encode(sha256(convert_to(ls.markdown, 'UTF8')), 'hex')
+                         AND failed.status IN ('render_failed', 'qc_failed')
+                     ) < $7
                  ) AS missing_presets
           FROM offers o
           JOIN latest_script ls ON ls.offer_id = o.id
@@ -359,6 +388,7 @@ async def render_candidates(
         before_created,
         before_offer,
         before_language,
+        MAX_RENDER_ATTEMPTS,
     )
     candidates = [dict(r) for r in rows]
     out: list[dict] = []

@@ -174,6 +174,10 @@ def recommendations(
         if (fraction := _retention_fraction(r)) is not None
     ]
     avg_retention = mean(measured_retention) if measured_retention else None
+    retention_is_estimate = any(
+        bool(r.get("retention_3s_estimated"))
+        for r in rows if _value(r, "retention_3s") is not None
+    )
 
     # A platform recommendation needs a minimum sample and more than one post
     # on the winning platform. Two measured posts are a lead, not proof.
@@ -197,10 +201,13 @@ def recommendations(
             "metric": "language",
         })
     if avg_retention is not None and avg_retention < 0.45:
+        shown = (f"about {avg_retention * 100:.0f}% (nearest retention-curve "
+                 "bucket, not an exact 3-second measurement)"
+                 if retention_is_estimate else f"{avg_retention * 100:.0f}%")
         out.append({
             "priority": "high",
             "title": "Shorten the hook and show proof sooner",
-            "detail": f"Average 3-second retention is {avg_retention * 100:.0f}%. Move the "
+            "detail": f"Average 3-second retention is {shown}. Move the "
                       "official-terms/proof frame into the first 3 seconds and cut the "
                       "intro card to under 1 second.",
             "metric": "retention",

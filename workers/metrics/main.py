@@ -231,14 +231,31 @@ class MetricsWorker:
         """Provider payload → normalized snapshot; None when there is no data
         yet (fresh upload before the platform has numbers)."""
         if platform == "youtube":
-            report = adapter.fetch_video_metrics(video_id)
+            report = dict(adapter.fetch_video_metrics(video_id) or {})
+            meta = report.pop("_meta", {}) or {}
+            retention_estimated = bool(report.pop("retention_3s_estimated", False))
+            report.pop("retention_3s_bucket_ratio", None)
+            report.pop("retention_3s_bucket_seconds", None)
             # empty rows raise inside the parser; catch that here by treating
             # an empty report as no-data (fetch returns {} when rows == [])
             if not report:
                 return None
-            return parse_youtube_analytics(
+            snapshot = parse_youtube_analytics(
                 {"columnHeaders": [{"name": k} for k in report], "rows": [[report[k] for k in report]]}
             )
+            # Provenance travels with the numbers: which period, which metric
+            # definition, and whether any group was rejected/degraded. Without
+            # this a stored value cannot be reconciled with YouTube Studio.
+            snapshot.update({
+                "retention_3s_estimated": retention_estimated,
+                "report_start": meta.get("report_start"),
+                "report_end": meta.get("report_end"),
+                "metric_definition": meta.get("metric_definition"),
+                "degraded": bool(meta.get("degraded")),
+                "degradation_detail": meta.get("degradation_detail"),
+                "raw": {"report": report, "meta": meta},
+            })
+            return snapshot
         if platform == "facebook":
             payload = adapter.insights(video_id)
             if not payload:

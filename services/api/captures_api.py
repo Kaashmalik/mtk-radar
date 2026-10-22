@@ -97,6 +97,18 @@ async def record_capture(offer_id: uuid.UUID, capture: CaptureIn) -> dict:
     }
 
 
+@router.get("/captures/{capture_id}")
+async def get_capture(capture_id: uuid.UUID) -> dict:
+    """One capture by id (pinned by a render job)."""
+    pool = db.get()
+    row = await pool.fetchrow(
+        "SELECT * FROM capture_sessions WHERE id = $1", capture_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="capture not found")
+    return dict(row)
+
+
 @router.get("/captures")
 async def list_captures(
     response: Response,

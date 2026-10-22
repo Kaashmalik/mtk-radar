@@ -139,7 +139,11 @@ class Batch:
                 continue
             if requires_render:
                 try:
-                    renders = self.api.get("/renders", params={"offer_id": offer["id"]}).json()
+                    # Existence only: one row is enough, and a fixed default
+                    # page could miss the render entirely on a busy offer.
+                    renders = self.api.get(
+                        "/renders", params={"offer_id": offer["id"], "limit": 1}
+                    ).json()
                 except httpx.HTTPError:
                     renders = []
                 if not renders:
@@ -184,17 +188,30 @@ class Batch:
             log.warning("schedule stage unavailable: %s", exc)
             return 0
 
-        by_offer: dict[str, set[str]] = {}
+        # Dedupe the TARGET, not just the platform. A schedule for account A /
+        # language en must not suppress account B or an Urdu variant — the
+        # same one-variant-suppresses-another bug the render queue had.
+        def target_key(schedule: dict) -> tuple:
+            return (
+                str(schedule.get("platform") or ""),
+                str(schedule.get("platform_account_id") or ""),
+                str(schedule.get("language") or ""),
+                str(schedule.get("content_variant_id") or ""),
+                str(schedule.get("metadata_variant") or ""),
+            )
+
+        by_offer: dict[str, set[tuple]] = {}
         for schedule in schedules:
             by_offer.setdefault(str(schedule.get("offer_id")), set()).add(
-                str(schedule.get("platform")))
+                target_key(schedule))
 
         created = 0
         for offer in offers:
             existing = by_offer.get(str(offer["id"]), set())
             for platform in platforms:
-                if platform in existing:
-                    continue  # never queue the same offer twice on one platform
+                # The autopilot's default target is the unpinned/English one.
+                if (platform, "", "", "", "") in existing:
+                    continue  # never queue the same target twice for one offer
                 try:
                     slot = self.api.get("/automation/next-slot",
                                         params={"platform": platform}).json()

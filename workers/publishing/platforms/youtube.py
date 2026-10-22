@@ -39,6 +39,35 @@ _RANGE_DONE = re.compile(r"^bytes=0-(?P<last>\d+)$")
 
 log = logging.getLogger("youtube")
 
+#: Metrics requested in independent groups. The Analytics API rejects the
+#: entire report when one requested metric is unsupported, so a failed group
+#: is recorded and the remaining groups are still stored (plan §7.F.3/F.4).
+ANALYTICS_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
+    "core": ("views", "likes", "comments", "shares", "averageViewDuration"),
+    "audience": (
+        "averageViewPercentage",
+        "subscribersGained",
+        "subscribersLost",
+        "estimatedMinutesWatched",
+    ),
+    "impressions": ("impressions", "impressionClickThroughRate"),
+}
+
+
+def _response_reason(resp: httpx.Response) -> str:
+    """Short provider error text for degradation records (never credentials)."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        text = (resp.text or "").strip().replace("\n", " ")
+        return text[:200] or f"HTTP {resp.status_code}"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message[:200]
+    return f"HTTP {resp.status_code}"
+
 
 def _parse_iso8601_duration(value: str) -> Optional[float]:
     match = _ISO_DURATION.match(str(value or ""))
@@ -559,65 +588,103 @@ class YouTubeAdapter(PublishAdapter):
         OAuth grant to include the yt-analytics scope — without it the API
         answers 403 and the caller should skip (documented gap, not an error).
 
-        The full metric set is requested first. Older/limited channels can
-        reject impressions or subscriber metrics with 400; we then fall back
-        to the universally available subset rather than losing the snapshot.
+        Metrics are requested in small trusted groups rather than one combined
+        query. The Analytics API rejects a whole report when any metric in it
+        is unsupported for the channel/video/period (for example impressions on
+        some Shorts reports), which used to discard every metric. A rejected
+        group is recorded as unsupported and the other groups still return
+        data; the caller sees exactly what was degraded instead of a silent
+        fallback (enhancement plan §7.F.3/F.4).
         """
         self._ensure_token()
         headers = {"Authorization": f"Bearer {self._access}"}
+        report_start = "2000-01-01"
+        report_end = datetime.now(timezone.utc).date().isoformat()
         base = {
             "ids": "channel==MINE",
-            "startDate": "2000-01-01",
-            "endDate": datetime.now(timezone.utc).date().isoformat(),
+            "startDate": report_start,
+            "endDate": report_end,
             "filters": f"video=={video_id}",
         }
-        full = (
-            "views,likes,comments,shares,averageViewDuration,"
-            "averageViewPercentage,subscribersGained,subscribersLost,"
-            "impressions,impressionClickThroughRate,estimatedMinutesWatched"
-        )
-        resp = self._http.get(
-            "https://youtubeanalytics.googleapis.com/v2/reports",
-            params={**base, "metrics": full},
-            headers=headers,
-        )
-        if resp.status_code == 403:
-            raise PermissionError("yt-analytics scope not granted for this OAuth client")
-        if resp.status_code == 400:
+
+        metrics: dict[str, object] = {}
+        attempted: list[str] = []
+        unsupported: list[str] = []
+        degraded_detail: list[str] = []
+        for group, names in ANALYTICS_METRIC_GROUPS.items():
+            attempted.append(group)
             resp = self._http.get(
                 "https://youtubeanalytics.googleapis.com/v2/reports",
-                params={**base, "metrics": "views,likes,comments,shares,averageViewDuration"},
+                params={**base, "metrics": ",".join(names)},
                 headers=headers,
             )
-        resp.raise_for_status()
-        data = resp.json()
-        rows = data.get("rows") or []
-        if not rows:
+            if resp.status_code == 403:
+                raise PermissionError(
+                    "yt-analytics scope not granted for this OAuth client")
+            if resp.status_code == 400:
+                unsupported.append(group)
+                degraded_detail.append(f"{group}: {_response_reason(resp)}")
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("rows") or []
+            if not rows:
+                continue
+            cols = [c["name"] for c in data.get("columnHeaders", [])]
+            metrics.update(dict(zip(cols, rows[0])))
+
+        if not metrics:
             return {}
-        cols = [c["name"] for c in data.get("columnHeaders", [])]
-        metrics = dict(zip(cols, rows[0]))
+
         # 3-second retention comes from a separate audienceWatchRatio report
-        # because it uses a dimension, not a scalar metric.
+        # because it uses a dimension, not a scalar metric. The value is the
+        # nearest retention-curve bucket, never an exact percentage.
         try:
-            retention = self.fetch_retention_3s(video_id)
+            retention = self._retention_3s_detail(video_id)
             if retention is not None:
-                metrics["retention_3s"] = retention
+                metrics["retention_3s"] = retention["value"]
+                metrics["retention_3s_estimated"] = True
+                metrics["retention_3s_bucket_ratio"] = retention["bucket_ratio"]
+                metrics["retention_3s_bucket_seconds"] = retention["bucket_seconds"]
         except Exception:  # noqa: BLE001 — retention is additive, not a blocker
             pass
+
+        supported = [group for group in attempted if group not in unsupported]
+        metrics["_meta"] = {
+            "report_start": report_start,
+            "report_end": report_end,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "groups": attempted,
+            "unsupported_groups": unsupported,
+            "degraded": bool(unsupported),
+            "degradation_detail": "; ".join(degraded_detail) or None,
+            "metric_definition": "youtube-analytics-v2:" + ",".join(supported),
+            "retention_estimated": "retention_3s" in metrics,
+        }
         return metrics
 
     def fetch_retention_3s(self, video_id: str) -> Optional[float]:
-        """Approximate 3-second retention from audienceWatchRatio.
+        """Nearest-bucket 3-second retention, or None when unavailable.
+
+        Callers that present the value must say it is a bucket estimate; use
+        `_retention_3s_detail` when the bucket/provenance is needed.
+        """
+        detail = self._retention_3s_detail(video_id)
+        return detail["value"] if detail else None
+
+    def _retention_3s_detail(self, video_id: str) -> Optional[dict]:
+        """`audienceWatchRatio` bucket closest to the 3-second mark.
 
         YouTube exposes the retention curve by elapsedVideoTimeRatio. We look
         up the video duration, convert 3 seconds to a ratio, and pick the
-        closest bucket. Returns None when the report/scope is unavailable.
+        closest bucket. The returned dict records the bucket so the dashboard
+        can label it as an estimate instead of an exact measurement.
         """
         duration = self._video_duration_s(video_id)
         if not duration or duration <= 0:
             return None
         if duration <= 3:
-            return 1.0
+            return {"value": 1.0, "bucket_ratio": 1.0, "bucket_seconds": duration}
         self._ensure_token()
         resp = self._http.get(
             "https://youtubeanalytics.googleapis.com/v2/reports",
@@ -641,7 +708,14 @@ class YouTubeAdapter(PublishAdapter):
             return None
         target = min(1.0, 3.0 / float(duration))
         closest = min(rows, key=lambda row: abs(float(row[0]) - target))
-        return float(closest[1]) if closest[1] is not None else None
+        if closest[1] is None:
+            return None
+        bucket_ratio = float(closest[0])
+        return {
+            "value": float(closest[1]),
+            "bucket_ratio": bucket_ratio,
+            "bucket_seconds": round(bucket_ratio * duration, 2),
+        }
 
     def _video_duration_s(self, video_id: str) -> Optional[float]:
         self._ensure_token()
