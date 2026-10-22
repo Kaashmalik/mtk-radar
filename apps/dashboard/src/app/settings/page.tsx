@@ -9,6 +9,7 @@
 import "./styles.css";
 import AutomationForm, { type AutomationPolicy } from "./AutomationForm";
 import LanguagePolicyForm, { type LanguagePolicy } from "./LanguagePolicyForm";
+import ReleasePolicyForm, { type ReleasePolicy } from "./ReleasePolicyForm";
 import SettingsForm from "./SettingsForm";
 import { apiFetch } from "@/lib/api";
 
@@ -103,7 +104,7 @@ function timeLabel(iso: string): string {
 }
 
 export default async function SettingsPage() {
-  const [setting, languageRes, policyRes, statusRes, accounts] = await Promise.all([
+  const [setting, languageRes, releaseRes, policyRes, statusRes, accounts] = await Promise.all([
     getJson<{ key: string; value: { windows?: string[] } | null }>(
       "/settings/publish_windows",
       { key: "publish_windows", value: null },
@@ -111,6 +112,10 @@ export default async function SettingsPage() {
     getJson<{ key: string; value: LanguagePolicy | null }>(
       "/settings/language_policy",
       { key: "language_policy", value: null },
+    ),
+    getJson<{ key: string; value: ReleasePolicy | null }>(
+      "/settings/release_policy",
+      { key: "release_policy", value: null },
     ),
     getJson<PolicyResponse>("/automation/policy", {
       policy: FALLBACK_POLICY,
@@ -147,6 +152,7 @@ export default async function SettingsPage() {
 
   const windows = setting.value?.windows ?? ["18:00"];
   const languagePolicy = languageRes.value ?? FALLBACK_LANGUAGE_POLICY;
+  const releasePolicy = releaseRes.value ?? { require_package_assets: true, require_playback_review: true };
   const policy = policyRes.policy ?? FALLBACK_POLICY;
   const summary = policyRes.summary ?? statusRes.summary;
   const controls = summary?.controls?.length ? summary.controls : FALLBACK_CONTROLS;
@@ -265,6 +271,15 @@ export default async function SettingsPage() {
           to the voiceover only.
         </p>
         <LanguagePolicyForm initial={languagePolicy} />
+      </section>
+
+      <section className="card">
+        <h2>Release policy (§17)</h2>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          What a queued post must prove before an upload is authorized. Strict
+          by default; relaxing a requirement is a recorded human decision.
+        </p>
+        <ReleasePolicyForm initial={releasePolicy} />
       </section>
 
       <section className="card">

@@ -620,3 +620,29 @@ main.page tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, tran
   .attention-item { flex-direction: column; }
   .attention-item-actions { justify-content: flex-start; }
 }
+
+/* Inbox (plan §6 P0): search + filter tabs + keyset pagination. */
+.inbox-controls { display: flex; gap: 0.5rem; margin: 0.6rem 0 0.9rem; flex-wrap: wrap; }
+.inbox-controls input[type="search"] {
+  flex: 1 1 220px; min-width: 180px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 0.45rem 0.7rem; font-size: 0.85rem;
+}
+.inbox-controls input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inbox-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.9rem; flex-wrap: wrap; }
+.inbox-list { display: flex; flex-direction: column; }
+.inbox-list .trend-row + .trend-row { border-top: 1px solid var(--border); }
+
+/* Release readiness + playback sign-off (plan §17/§6.F). */
+.release-readiness { display: grid; gap: 0.7rem; }
+.release-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; display: grid; gap: 0.45rem; }
+.release-item-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.release-item-head span:nth-of-type(1) { color: var(--text-muted); font-size: 0.78rem; }
+.release-problems { margin: 0; padding-left: 1.1rem; color: var(--text-muted); font-size: 0.78rem; line-height: 1.5; }
+.release-problems strong { color: var(--warn); }
+.cancel-confirm { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.cancel-confirm input {
+  flex: 1 1 240px; background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); padding: 0.4rem 0.6rem; font-size: 0.82rem;
+}
+.playback-review { display: inline-flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }

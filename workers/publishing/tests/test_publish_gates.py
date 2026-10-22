@@ -51,6 +51,10 @@ class FakeAPI:
             # post's offer id so the worker's ownership check behaves like the
             # real endpoint.
             return FakeResponse({"offer_id": "off-1", **match})
+        if path.startswith("/schedules/") and path.endswith("/release-check"):
+            # Default: the API-side gate passes. Gate-specific tests override
+            # this with a not-ok payload or an error status.
+            return FakeResponse({"ok": True, "problems": []})
         raise AssertionError(f"unexpected GET {path}")
 
     def post(self, path, json=None):

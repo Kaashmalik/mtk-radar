@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
@@ -29,8 +29,11 @@ from pagination import (
     set_next_cursor,
 )
 from schedules_state import script_version_hash
+from scriptgen import ScriptGateError, assert_format_wording
 from settings_store import get_language_policy
 from state import can_generate_video
+from api_hardening import effective_reviewer
+from automation import is_automation_actor
 
 router = APIRouter(tags=["renders"])
 
@@ -62,6 +65,15 @@ class RenderIn(BaseModel):
     qc_status: str = "not_checked"
     qc_report: dict = Field(default_factory=dict)
     qc_checked_at: Optional[datetime] = None
+    # Speech-authoritative scene timeline (§6, plan §6.F): stored for the QC
+    # trail so a reviewer can check what the export actually contains.
+    timeline: Optional[dict] = None
+
+
+class PlaybackReviewIn(BaseModel):
+    """A human's recorded verdict after watching the FINAL export (§6.F)."""
+    approved: bool
+    note: str = Field(min_length=3, max_length=1000)
 
 
 @router.post("/offers/{offer_id}/renders", status_code=201)
@@ -101,8 +113,9 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
 
     # The render must be bound to the exact script bytes it was produced from.
     script = await pool.fetchrow(
-        "SELECT markdown FROM offer_scripts WHERE offer_id = $1 AND language = $2 "
-        "AND ($3::int IS NULL OR version = $3) ORDER BY version DESC LIMIT 1",
+        "SELECT markdown, format FROM offer_scripts WHERE offer_id = $1 "
+        "AND language = $2 AND ($3::int IS NULL OR version = $3) "
+        "ORDER BY version DESC LIMIT 1",
         offer_id, render.language, render.script_version,
     )
     if not script:
@@ -113,6 +126,20 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
             status_code=409,
             detail="render script_version_hash does not match the selected script version",
         )
+
+    # Format binding at render time (plan §6.C): the declared format is
+    # re-checked against the actual wording. A hand-edited script (or a future
+    # generator bug) can no longer render "i claimed the offer" while claiming
+    # to be an official_explainer.
+    if script["format"]:
+        try:
+            assert_format_wording(script["markdown"], script["format"])
+        except ScriptGateError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"script wording does not match its declared format "
+                       f"('{script['format']}'): {exc}",
+            ) from exc
 
     # v0.29: a render registration without a measured QC report is incomplete.
     # Fail closed here; legacy rows already in the DB are blocked downstream.
@@ -158,10 +185,13 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
                              preset, width, height, duration_s, video_path, captions_path,
                              disclosure, language, cover_path, motion_template, metadata,
                              video_sha256, captions_sha256, cover_sha256,
-                             status, qc_status, qc_report, qc_checked_at)
+                             status, qc_status, qc_report, qc_checked_at, timeline)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
                 $12, $13, $14, $15::jsonb, $16, $17, $18,
-                $19, $20, $21::jsonb, COALESCE($22::timestamptz, now()))
+                $19, $20, $21::jsonb, COALESCE($22::timestamptz, now()), $23::jsonb)
+        ON CONFLICT (offer_id, language, preset, script_version_hash, video_sha256)
+            WHERE video_sha256 IS NOT NULL AND script_version_hash IS NOT NULL
+        DO NOTHING
         RETURNING id, created_at
         """,
         offer_id, render.capture_id, render.script_version, render.script_version_hash,
@@ -170,7 +200,31 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
         render.cover_path, render.motion_template, _json(render.metadata),
         video_sha256, captions_sha256, cover_sha256,
         render.status, render.qc_status, _json(render.qc_report), render.qc_checked_at,
+        _json(render.timeline) if render.timeline else None,
     )
+    if not row and video_sha256:
+        # Idempotent registration (§8.A): the unique index
+        # renders_revision_output_key matched — this exact output for this
+        # script revision is already registered. Return it instead of
+        # double-registering (a retry after a lost response, or two workers on
+        # one candidate, must not clone a render).
+        row = await pool.fetchrow(
+            "SELECT id, created_at FROM renders "
+            "WHERE offer_id = $1 AND language = $2 AND preset = $3 "
+            "AND script_version_hash = $4 AND video_sha256 = $5",
+            offer_id, render.language, render.preset,
+            render.script_version_hash, video_sha256,
+        )
+        if row:
+            return {
+                "id": row["id"],
+                "created_at": row["created_at"].isoformat(),
+                "duplicate": True,
+                "language": render.language,
+                "status": render.status,
+                "qc_status": render.qc_status,
+            }
+        raise HTTPException(status_code=500, detail="render insert failed")
     return {
         "id": row["id"],
         "created_at": row["created_at"].isoformat(),
@@ -205,7 +259,8 @@ async def list_renders(
                r.cover_sha256, r.language, r.cover_path, r.motion_template,
                r.metadata::text AS metadata,
                r.disclosure::text AS disclosure, r.status, r.qc_status,
-               r.qc_report::text AS qc_report, r.qc_checked_at, r.created_at
+               r.qc_report::text AS qc_report, r.qc_checked_at, r.created_at,
+               r.playback_approved, r.playback_reviewer, r.playback_reviewed_at
         FROM renders r JOIN offers o ON o.id = r.offer_id
         WHERE ($1::uuid IS NULL OR r.offer_id = $1)
           AND ($3::text IS NULL OR r.status = $3)
@@ -233,22 +288,68 @@ async def get_render(render_id: uuid.UUID) -> dict:
 
     Workers pin a render id at schedule time. Looking it up by scanning the
     first page of `/renders?offer_id=...` used to report a valid asset as
-    missing once an offer had more than one page of renders.
+    missing once an offer had more renders than one page.
     """
     pool = db.get()
     row = await pool.fetchrow("SELECT * FROM renders WHERE id = $1", render_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="render not found")
+    out = dict(row)
+    for key in ("metadata", "disclosure", "qc_report", "timeline"):
+        value = out.get(key)
+        if isinstance(value, str):
+            try:
+                out[key] = json.loads(value)
+            except ValueError:
+                pass
+    return out
+
+
+@router.post("/renders/{render_id}/playback-review")
+async def review_playback(render_id: uuid.UUID, body: PlaybackReviewIn,
+                          request: Request) -> dict:
+    """Record a human verdict after watching the FINAL export (§6.F).
+
+    Passing QC does not mean the video is right: a measured report cannot say
+    the narration matches the approved script, the captions read correctly, or
+    the disclosure is on screen. A named human signs off — and automation can
+    never do it for them. The release gate refuses renders without this.
+    """
+    actor = effective_reviewer(request, None, require=True)
+    if is_automation_actor(actor):
+        raise HTTPException(
+            status_code=403,
+            detail="automation may not attest playback — a named human must "
+                   "watch the export",
+        )
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        UPDATE renders
+        SET playback_approved = $2, playback_reviewer = $3, playback_note = $4,
+            playback_reviewed_at = now()
+        WHERE id = $1
+        RETURNING id, playback_approved, playback_reviewer, playback_reviewed_at
+        """,
+        render_id, body.approved, actor, body.note,
+    )
     if not row:
         raise HTTPException(status_code=404, detail="render not found")
     return dict(row)
 
 
 @router.get("/render-dead-letter")
-async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
+async def render_dead_letter(
+    response: Response,
+    limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
+) -> dict:
     """Operator visibility for failed/QC-rejected render attempts.
 
     A QC failure is not silently retried forever: it remains visible with the
     measured report until an operator re-renders the offer. Candidate selection
-    ignores failed rows, so the offer stays in the render queue.
+    ignores failed rows, so the offer stays in the render queue. Paginated
+    via the `X-Next-Cursor` header (counts always cover every row).
     """
     pool = db.get()
     counts = await pool.fetchrow(
@@ -262,18 +363,28 @@ async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
         FROM renders
         """
     )
+    parts = decode_cursor(cursor, 2)
+    before_created = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT r.id, r.offer_id, o.title AS offer_title, r.preset, r.language,
                r.status, r.qc_status, r.qc_report::text AS qc_report,
                r.video_path, r.duration_s, r.qc_checked_at, r.created_at
         FROM renders r JOIN offers o ON o.id = r.offer_id
-        WHERE r.status IN ('qc_failed', 'render_failed') OR r.qc_status = 'failed'
-        ORDER BY r.created_at DESC LIMIT $1
+        WHERE (r.status IN ('qc_failed', 'render_failed') OR r.qc_status = 'failed')
+          AND ($2::timestamptz IS NULL
+               OR (r.created_at, r.id) < ($2::timestamptz, $3::uuid))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $1
         """,
-        limit,
+        limit, before_created, before_id,
     )
-    return {"counts": dict(counts or {}), "items": [dict(r) for r in rows]}
+    items = [dict(r) for r in rows]
+    set_next_cursor(
+        response, items, limit,
+        lambda row: encode_cursor(row["created_at"], row["id"]),
+    )
+    return {"counts": dict(counts or {}), "items": items}
 
 
 #: Presets the render worker knows about. Kept in sync with

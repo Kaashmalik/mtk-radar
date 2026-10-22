@@ -2392,22 +2392,225 @@ def test_expired_lock_is_taken_over(auth_client):
     assert res.json()["acquired"] is True, "an expired lock must be taken over"
 
 
+def _gate_ready_schedule(auth_client, marker):
+    """A schedule that passes the FULL release gate (§17): a verified, fresh
+    offer; an approved script; a QC-passed render with the mandatory YouTube
+    package assets; a recorded human playback sign-off; and matching pins.
+
+    Attempt-time tests use this so they exercise attempt mechanics — the gate
+    itself gets its own dedicated tests below."""
+    import uuid as uuidlib
+    from schedules_state import script_version_hash
+
+    markdown = f"# release gate script {marker}\n\nOfficial terms only."
+    offer_id = _run(
+        """
+        INSERT INTO offers (title, provider, category, offer_type, state, recheck_at)
+        VALUES ($1, 'Gate Co', 'domains', 'coupon', 'verified', now() + interval '1 day')
+        RETURNING id
+        """,
+        f"Gate offer {marker}",
+    )[0]["id"]
+    _run(
+        "INSERT INTO offer_scripts (offer_id, language, version, markdown, format) "
+        "VALUES ($1, 'en', 1, $2, 'official_explainer')",
+        offer_id, markdown,
+    )
+    version_hash = script_version_hash(markdown)
+    render_id = _run(
+        """
+        INSERT INTO renders (offer_id, capture_id, preset, width, height,
+                             video_path, language, script_version_hash,
+                             video_sha256, cover_path, cover_sha256,
+                             captions_path, captions_sha256,
+                             status, qc_status, playback_approved,
+                             playback_reviewer, playback_reviewed_at)
+        VALUES ($1, NULL, 'landscape', 1920, 1080,
+                'projects/gate/' || $2 || '.mp4', 'en', $3,
+                repeat('a', 64), 'projects/gate/' || $2 || '.jpg', repeat('b', 64),
+                'projects/gate/' || $2 || '.srt', repeat('c', 64),
+                'rendered', 'passed', TRUE, 'pytest', now())
+        RETURNING id
+        """,
+        offer_id, marker, version_hash,
+    )[0]["id"]
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash, render_id,
+                               render_sha256, metadata_hash, cover_path, cover_sha256,
+                               captions_sha256)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                $2, $3, $4, repeat('a', 64), repeat('d', 64),
+                'projects/gate/' || $2 || '.jpg', repeat('b', 64), repeat('c', 64))
+        RETURNING id
+        """,
+        offer_id, f"gate-{marker}", version_hash, render_id,
+    )[0]["id"]
+    return {
+        "offer_id": str(offer_id), "schedule_id": str(sid),
+        "render_id": str(render_id), "version_hash": version_hash,
+    }
+
+
+def test_release_gate_blocks_attempt_without_playback_signoff(auth_client):
+    """§6.F: a measured QC pass is not a human playback review. The upload
+    authorization must refuse until a named human signs off the export."""
+    ids = _gate_ready_schedule(auth_client, "gate-playback")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
+    render_id = __import__("uuid").UUID(ids["render_id"])
+    _run("UPDATE renders SET playback_approved = NULL, playback_reviewed_at = NULL, "
+         "playback_reviewer = NULL WHERE id = $1", render_id)
+
+    refused = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert refused.status_code == 409, refused.text
+    assert "playback_review" in refused.text
+
+    # a machine credential may not perform the sign-off
+    machine = auth_client.post(f"/renders/{render_id}/playback-review", headers=SVC,
+                               json={"approved": True, "note": "watched by svc"})
+    assert machine.status_code == 403, machine.text
+
+    approved = auth_client.post(f"/renders/{render_id}/playback-review", headers=AUTH,
+                                json={"approved": True,
+                                      "note": "watched end to end; narration and "
+                                              "captions match the approved script"})
+    assert approved.status_code == 200, approved.text
+
+    preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["ok"] is True, preview.json()
+
+    allowed = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert allowed.status_code == 200, allowed.text
+
+
+def test_release_gate_blocks_attempt_with_incomplete_package(auth_client):
+    """Plan §5: 'video uploaded' must not mean 'package complete'. A YouTube
+    release without thumbnail/captions/metadata is refused, not annotated."""
+    ids = _gate_ready_schedule(auth_client, "gate-package")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
+    _run("UPDATE renders SET captions_path = NULL, captions_sha256 = NULL "
+         "WHERE id = $1", __import__("uuid").UUID(ids["render_id"]))
+
+    refused = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert refused.status_code == 409, refused.text
+    assert "package_incomplete" in refused.text
+
+    # The dashboard-visible preview shows the same structured problems.
+    preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+    assert preview["ok"] is False
+    codes = {p["code"] for p in preview["problems"]}
+    assert "package_incomplete" in codes
+
+    # An operator may relax the requirement — as a recorded human decision.
+    relaxed = auth_client.put("/settings/release_policy", headers=HUMAN,
+                              json={"value": {"require_package_assets": False,
+                                              "require_playback_review": True}})
+    assert relaxed.status_code == 200, relaxed.text
+    try:
+        preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+        assert preview["ok"] is True
+    finally:
+        reset = auth_client.put("/settings/release_policy", headers=HUMAN, json={
+            "value": {"require_package_assets": True,
+                      "require_playback_review": True}})
+        assert reset.status_code == 200, reset.text
+
+
+def test_release_gate_binds_claim_outcome_to_script_format(auth_client):
+    """A claim_walkthrough is only honest if the bound capture recorded an
+    actual demonstration. The gate re-reads the evidence at release time — the
+    capture's recorded outcome must still support the words being published."""
+    import uuid as uuidlib
+    from schedules_state import script_version_hash
+
+    marker = "gate-claim"
+    markdown = f"# claim walkthrough {marker}\n\nI claimed the offer on camera."
+    offer_id = _run(
+        """
+        INSERT INTO offers (title, provider, category, offer_type, state, recheck_at)
+        VALUES ($1, 'Claim Gate Co', 'domains', 'coupon', 'verified',
+                now() + interval '1 day')
+        RETURNING id
+        """,
+        f"Claim gate {marker}",
+    )[0]["id"]
+    _run(
+        "INSERT INTO offer_scripts (offer_id, language, version, markdown, format) "
+        "VALUES ($1, 'en', 1, $2, 'claim_walkthrough')",
+        offer_id, markdown,
+    )
+    version_hash = script_version_hash(markdown)
+    capture_id = _run(
+        """
+        INSERT INTO capture_sessions (offer_id, redaction_reviewed, claim_outcome)
+        VALUES ($1, TRUE, 'not_demonstrated') RETURNING id
+        """,
+        offer_id,
+    )[0]["id"]
+    render_id = _run(
+        """
+        INSERT INTO renders (offer_id, capture_id, preset, width, height,
+                             video_path, language, script_version_hash,
+                             video_sha256, cover_path, cover_sha256,
+                             captions_path, captions_sha256, status, qc_status,
+                             playback_approved, playback_reviewer, playback_reviewed_at)
+        VALUES ($1, $2, 'landscape', 1920, 1080, 'projects/claim/x.mp4', 'en', $3,
+                repeat('e', 64), 'projects/claim/x.jpg', repeat('f', 64),
+                'projects/claim/x.srt', repeat('10', 32), 'rendered', 'passed',
+                TRUE, 'pytest', now())
+        RETURNING id
+        """,
+        offer_id, capture_id, version_hash,
+    )[0]["id"]
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash, render_id,
+                               render_sha256, metadata_hash, cover_path, cover_sha256,
+                               captions_sha256)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                $2, $3, $4, repeat('e', 64), repeat('5', 64),
+                'projects/claim/x.jpg', repeat('f', 64), repeat('10', 32))
+        RETURNING id
+        """,
+        offer_id, f"gate-{marker}", version_hash, render_id,
+    )[0]["id"]
+
+    refused = auth_client.post(f"/schedules/{__import__('uuid').UUID(str(sid))}/attempt",
+                               headers=SVC, json={})
+    assert refused.status_code == 409, refused.text
+    assert "claim_outcome" in refused.text
+
+
+def test_schedule_cancel_is_human_terminal_and_records_why(auth_client):
+    ids = _gate_ready_schedule(auth_client, "gate-cancel")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
+
+    machine = auth_client.post(f"/schedules/{sid}/cancel", headers=SVC,
+                               json={"note": "machine cancel"})
+    assert machine.status_code == 403, "cancelling is a human decision"
+
+    cancelled = auth_client.post(f"/schedules/{sid}/cancel", headers=AUTH,
+                                 json={"note": "provider pulled the offer"})
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["state"] == "cancelled"
+
+    # terminal: automation and retries must never resurrect it
+    attempt = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert attempt.status_code == 409, attempt.text
+    again = auth_client.post(f"/schedules/{sid}/cancel", headers=AUTH,
+                             json={"note": "cancel the cancellation"})
+    assert again.status_code == 409, again.text
+
+
 def test_upload_attempt_marker_blocks_a_blind_retry(auth_client):
     """v0.23: the worker announces an upload before it starts. If the outcome
     never arrives, the marker stays open so the next sweep holds the post for
     a human instead of publishing a duplicate."""
-    offer = auth_client.post("/offers", headers=SVC, json={
-        "provider": "Dup Co", "category": "domains", "offer_type": "coupon",
-    }).json()
-    offer_id = __import__("uuid").UUID(offer["id"])
-    sid = _run(
-        """
-        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
-                               privacy, idempotency_key, version_hash)
-        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
-                'itest-attempt-1', 'hash-1')
-        RETURNING id
-        """, offer_id)[0]["id"]
+    ids = _gate_ready_schedule(auth_client, "attempt-marker")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
 
     started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC,
                                json={"detail": "upload started", "worker": "publishing-worker"})
@@ -2453,17 +2656,8 @@ def test_upload_attempt_marker_blocks_a_blind_retry(auth_client):
 def test_attempt_is_exclusive_and_success_requires_remote_confirmation(auth_client):
     """v0.28: one worker owns an upload attempt, and 'published' requires a
     confirmed remote processing/visibility state — not merely an upload id."""
-    offer = auth_client.post("/offers", headers=SVC, json={
-        "provider": "Confirm Co", "category": "domains", "offer_type": "coupon",
-    }).json()
-    offer_id = __import__("uuid").UUID(offer["id"])
-    sid = _run(
-        """
-        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
-                               privacy, idempotency_key, version_hash)
-        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
-                'itest-confirm-1', 'hash-1') RETURNING id
-        """, offer_id)[0]["id"]
+    sid = __import__("uuid").UUID(
+        _gate_ready_schedule(auth_client, "attempt-confirm")["schedule_id"])
 
     first = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
     assert first.status_code == 200, first.text
@@ -2539,23 +2733,8 @@ def test_unknown_attempt_requires_explicit_human_acknowledgement_to_requeue(auth
     """A dead worker leaves an unknown outcome. Requeueing must be possible,
     but only after a named human acknowledges the platform check — otherwise a
     duplicate public post is one click away."""
-    offer = auth_client.post("/offers", headers=SVC, json={
-        "provider": "Ack Co", "category": "domains", "offer_type": "coupon",
-    }).json()
-    offer_id = __import__("uuid").UUID(offer["id"])
-    _run("UPDATE offers SET state = 'verified', recheck_at = now() + interval '1 day', "
-         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
-    markdown = "# Ack Co walkthrough\n\nVerified details."
-    version = script_version_hash(markdown)
-    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
-         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
-    sid = _run(
-        """
-        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
-                               privacy, idempotency_key, version_hash)
-        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
-                'itest-ack-1', $2) RETURNING id
-        """, offer_id, version)[0]["id"]
+    ids = _gate_ready_schedule(auth_client, "attempt-ack")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
 
     started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
     assert started.status_code == 200, started.text
@@ -2754,20 +2933,8 @@ def test_clearing_extraction_conflicts_requires_a_human_note(auth_client):
 
 
 def test_held_upload_reconcile_records_a_human_checked_outcome(auth_client):
-    offer = auth_client.post("/offers", headers=SVC, json={
-        "provider": "Reconcile Co", "category": "domains", "offer_type": "coupon",
-    }).json()
-    offer_id = __import__("uuid").UUID(offer["id"])
-    _run("UPDATE offers SET state = 'verified', recheck_at = now() + interval '1 day', "
-         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
-    sid = _run(
-        """
-        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
-                               privacy, idempotency_key, version_hash)
-        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
-                'itest-reconcile-1', 'hash-1')
-        RETURNING id
-        """, offer_id)[0]["id"]
+    ids = _gate_ready_schedule(auth_client, "attempt-reconcile")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
 
     started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
     assert started.status_code == 200, started.text

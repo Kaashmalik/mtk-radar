@@ -5,7 +5,9 @@ import ExtractionEditor, { type ExtractionSnapshot } from "./ExtractionEditor";
 import GenerateScriptButton from "./GenerateScriptButton";
 import MediaPlayer from "./MediaPlayer";
 import OfferActions from "../../review/OfferActions";
+import { PlaybackReview } from "./PlaybackReview";
 import RedactionReview from "./RedactionReview";
+import { ReleaseReadiness } from "./ReleaseReadiness";
 import ScheduleForm from "./ScheduleForm";
 import { apiFetch } from "@/lib/api";
 
@@ -108,6 +110,9 @@ type RenderRow = {
   status: string;
   qc_status: string;
   qc_report: string | { errors?: string[]; warnings?: string[] } | null;
+  playback_approved?: boolean | null;
+  playback_reviewer?: string | null;
+  playback_reviewed_at?: string | null;
 };
 
 function renderQcErrors(report: RenderRow["qc_report"]): string[] {
@@ -408,11 +413,31 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                 )}
                 <div className="muted small">{r.video_path}</div>
                 <MediaPlayer kind="renders" id={r.id} label={`${r.preset} export`} />
+                <div style={{ marginTop: "0.35rem" }}>
+                  <PlaybackReview
+                    renderId={r.id}
+                    approved={r.playback_approved ?? null}
+                    reviewer={r.playback_reviewer ?? null}
+                    reviewedAt={r.playback_reviewed_at ?? null}
+                  />
+                </div>
               </li>
             ))}
           </ul>
         )}
       </section>
+
+      {impact && impact.schedules.length > 0 && (
+        <section className="card">
+          <h2>Release readiness (§17)</h2>
+          <p className="muted small" style={{ marginTop: "0.3rem" }}>
+            The same gate the upload authorization runs: package completeness, a
+            human playback sign-off, offer freshness and format/claim binding.
+            Blocked posts are explained here, never silently skipped.
+          </p>
+          <ReleaseReadiness schedules={impact.schedules} />
+        </section>
+      )}
 
       <section className="card">
         <h2>Corrections &amp; affected posts ({corrections.length})</h2>

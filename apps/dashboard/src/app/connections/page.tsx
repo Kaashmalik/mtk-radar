@@ -9,6 +9,7 @@
 
 import "./styles.css";
 import ConnectForm from "./ConnectForm";
+import { ConnectionTest } from "./ConnectionTest";
 import { apiFetch } from "@/lib/api";
 
 type Account = {
@@ -65,7 +66,7 @@ export default async function ConnectionsPage() {
                 <thead>
                   <tr>
                     <th>platform</th><th>handle</th><th>credentials</th>
-                    <th>scopes</th><th>status</th><th>expires</th><th>last error</th>
+                    <th>scopes</th><th>status</th><th>expires</th><th>last error</th><th>check</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -86,6 +87,7 @@ export default async function ConnectionsPage() {
                           : "–"}
                       </td>
                       <td className="small">{a.last_error ?? "–"}</td>
+                      <td><ConnectionTest accountId={a.id} /></td>
                     </tr>
                   ))}
                 </tbody>

@@ -18,7 +18,7 @@ class TestQueueStates:
     def test_plan_queue_states_exist(self):
         assert set(TRANSITIONS) == {
             "draft", "needs_approval", "approved", "scheduled",
-            "published", "failed", "paused",
+            "published", "failed", "paused", "cancelled",
         }
 
     def test_happy_path(self):
