@@ -15,6 +15,7 @@ Import pattern (workers): the verification-worker sys.path shim —
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -33,26 +34,65 @@ class Storage(Protocol):
 
 # ---------------------------------------------------------------- keys
 
+_SAFE_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-def render_key(offer_id: str, preset: str, language: str | None = None) -> str:
+
+def _safe_part(value: str, label: str) -> str:
+    """Reject path separators and traversal in a key component."""
+    text = str(value)
+    if not _SAFE_PART.fullmatch(text) or ".." in text:
+        raise ValueError(f"invalid {label} for storage key: {value!r}")
+    return text
+
+
+def _render_prefix(offer_id: str, revision: str | None,
+                   attempt: str | None) -> tuple[str, str]:
+    offer = _safe_part(offer_id, "offer id")
+    parts = ["renders", offer]
+    if revision:
+        parts.append(_safe_part(revision, "revision"))
+    prefix = "/".join(parts)
+    stem = f"{_safe_part(attempt, 'attempt')}-" if attempt else ""
+    return prefix, stem
+
+
+def render_key(offer_id: str, preset: str, language: str | None = None, *,
+               revision: str | None = None, attempt: str | None = None,
+               ext: str = "mp4") -> str:
+    """Immutable object key for one rendered variant.
+
+    New callers pass a script revision and a unique render attempt so a rerun
+    never overwrites a previously approved package. Omitting both keeps the
+    legacy stable key for old code paths.
+    """
     suffix = f"-{language}" if language and language != "en" else ""
-    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}.mp4"
+    prefix, stem = _render_prefix(offer_id, revision, attempt)
+    extension = _safe_part(ext.lstrip("."), "extension")
+    return f"{prefix}/{stem}{_safe_part(offer_id, 'offer id')}-{_safe_part(preset, 'preset')}{suffix}.{extension}"
 
 
-def captions_key(offer_id: str, preset: str, language: str | None = None) -> str:
+def captions_key(offer_id: str, preset: str, language: str | None = None, *,
+                 revision: str | None = None,
+                 attempt: str | None = None) -> str:
     suffix = f"-{language}" if language and language != "en" else ""
-    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}.srt"
+    prefix, stem = _render_prefix(offer_id, revision, attempt)
+    return f"{prefix}/{stem}{_safe_part(offer_id, 'offer id')}-{_safe_part(preset, 'preset')}{suffix}.srt"
 
 
 def cover_key(offer_id: str, preset: str, language: str | None = None,
-              ext: str = "png") -> str:
+              ext: str = "png", *, revision: str | None = None,
+              attempt: str | None = None) -> str:
     suffix = f"-{language}" if language and language != "en" else ""
-    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}-cover.{ext}"
+    prefix, stem = _render_prefix(offer_id, revision, attempt)
+    extension = _safe_part(ext.lstrip("."), "extension")
+    return (f"{prefix}/{stem}{_safe_part(offer_id, 'offer id')}-"
+            f"{_safe_part(preset, 'preset')}{suffix}-cover.{extension}")
 
 
 def capture_key(offer_id: str, session_id: str, filename: str) -> str:
     safe_name = Path(filename).name  # never trust caller-provided separators
-    return f"captures/{offer_id}/{session_id}/{safe_name}"
+    return (f"captures/{_safe_part(offer_id, 'offer id')}/"
+            f"{_safe_part(session_id, 'session id')}/{safe_name}")
 
 
 def is_managed_ref(ref: str) -> bool:
@@ -138,6 +178,7 @@ __all__ = [
     "is_managed_ref",
     "render_key",
     "captions_key",
+    "cover_key",
     "capture_key",
     "root_from_env",
 ]

@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from object_storage import materialize  # noqa: E402
+from upload_sessions import APIUploadSessionStore  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 from platforms import (  # noqa: E402
@@ -637,6 +638,12 @@ class Publisher:
                       post["id"])
             return False
 
+        if hasattr(adapter, "set_upload_session_store"):
+            # YouTube resumable sessions survive a worker restart. The URI is
+            # service/worker-only and cleared as soon as the upload completes.
+            adapter.set_upload_session_store(
+                APIUploadSessionStore(self.api, post["id"]))
+
         remote_id: str | None = None
         try:
             remote_id = str(adapter.upload(
@@ -678,6 +685,24 @@ class Publisher:
                 }
 
             remote_metadata = {**package, "confirmation": confirmation}
+            if package and package.get("complete") is False:
+                failures = package.get("failures") or {}
+                reason = "; ".join(
+                    f"{name}: {detail}" for name, detail in sorted(failures.items())
+                ) or "package assets were not accepted"
+                self._report(
+                    post["id"], ok=False, hold=True, remote_post_id=remote_id,
+                    attempt_token=attempt_token,
+                    detail=f"uploaded but release package incomplete: {reason}",
+                    remote_url=(confirmation or {}).get("remote_url"),
+                    remote_processing_state=(confirmation or {}).get("processing_state")
+                    or (confirmation or {}).get("processing_status"),
+                    remote_privacy=(confirmation or {}).get("privacy"),
+                    remote_metadata=remote_metadata,
+                )
+                log.warning("schedule %s: package incomplete on %s — held: %s",
+                            post["id"], platform, reason)
+                return False
             if not confirmation or not confirmation.get("confirmed"):
                 reason = (confirmation or {}).get("error") or "remote processing/visibility unconfirmed"
                 self._report(

@@ -15,6 +15,7 @@ from object_storage import (
     S3Storage,
     captions_key,
     capture_key,
+    cover_key,
     is_managed_ref,
     make_from_env,
     materialize,
@@ -31,6 +32,27 @@ def test_key_scheme_is_deterministic_and_offer_scoped():
     assert capture_key("o1", "s1", "../../evil/path/vid.webm") == "captures/o1/s1/vid.webm"
     assert is_managed_ref("s3://b/k") and is_managed_ref("local://k")
     assert not is_managed_ref("projects/o1/renders/x.mp4")
+
+
+def test_revision_attempt_keys_never_overwrite_an_approved_package():
+    first = render_key("o1", "landscape", revision="v2-abc123", attempt="run1")
+    second = render_key("o1", "landscape", revision="v2-abc123", attempt="run2")
+    assert first == "renders/o1/v2-abc123/run1-o1-landscape.mp4"
+    assert second != first
+    assert captions_key("o1", "vertical", "ur", revision="v2-abc123",
+                        attempt="run1") == (
+        "renders/o1/v2-abc123/run1-o1-vertical-ur.srt")
+    assert cover_key("o1", "landscape", revision="v2-abc123", attempt="run1",
+                     ext="jpg") == (
+        "renders/o1/v2-abc123/run1-o1-landscape-cover.jpg")
+
+
+def test_key_parts_cannot_escape_the_prefix():
+    for bad in ("../etc", "a/b", ".."):
+        with pytest.raises(ValueError):
+            render_key("o1", "landscape", revision=bad)
+        with pytest.raises(ValueError):
+            render_key("o1", "landscape", attempt=bad)
 
 
 # ---------------------------------------------------------------- local driver

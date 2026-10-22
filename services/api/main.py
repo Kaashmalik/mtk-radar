@@ -36,6 +36,7 @@ from schedules_api import router as schedules_router
 from settings_api import router as settings_router
 from trends_api import router as trends_router
 from worker_health import router as workers_router
+from upload_sessions_api import router as upload_sessions_router
 from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
 
 DATABASE_URL = os.environ.get(
@@ -88,6 +89,7 @@ app.include_router(trends_router)
 app.include_router(studio_router)
 app.include_router(attention_router)
 app.include_router(workers_router)
+app.include_router(upload_sessions_router)
 
 # Optional bearer-token auth (MTK_API_TOKEN, v0.13) + reviewer-token identity
 # (v0.16) + structured request logging. Unset token = open local dev; set it

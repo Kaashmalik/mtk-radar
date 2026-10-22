@@ -264,6 +264,7 @@ from analytics_api import router as _analytics_router
 from content_studio_api import router as _studio_router
 from worker_health import EXPECTED_WORKERS
 from worker_health import router as _workers_router
+from upload_sessions_api import router as _upload_sessions_router
 from schedules_state import script_version_hash
 
 
@@ -321,7 +322,8 @@ def auth_client(client):
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
               _settings_router, _analytics_router, _health_router, _locks_router,
-              _automation_router, _studio_router, _attention_router, _workers_router):
+              _automation_router, _studio_router, _attention_router, _workers_router,
+              _upload_sessions_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -1672,6 +1674,62 @@ def test_revoked_reviewer_token_rejected(auth_client):
         # token; restore it once the revocation behaviour is proven.
         _run("UPDATE reviewers SET active = TRUE WHERE name = $1", REVIEWER)
         api_hardening.reset_reviewer_cache()
+
+
+# ------------------------------------- resumable upload sessions (v0.31)
+
+def test_upload_sessions_are_worker_only_short_lived_and_deletable(
+    client, auth_client,
+):
+    import uuid
+    oid = _verified_offer(client)
+    sid = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, "
+        "idempotency_key) VALUES ($1, 'youtube', 'scheduled', now(), 'private', $2) "
+        "RETURNING id",
+        uuid.UUID(oid), f"upload-session-{uuid.uuid4()}",
+    )[0]["id"]
+    uri = ("https://www.googleapis.com/upload/youtube/v3/videos"
+           "?uploadType=resumable&upload_id=test-capability")
+
+    invalid = client.put(f"/schedules/{sid}/upload-session", json={
+        "session_uri": "https://evil.test/steal", "content_length": 10,
+    })
+    assert invalid.status_code == 422
+
+    created = client.put(f"/schedules/{sid}/upload-session", json={
+        "session_uri": uri, "content_length": 4096,
+    })
+    assert created.status_code == 200, created.text
+    assert created.json()["session_uri"] == uri
+
+    # The capability must never be readable with a human reviewer credential.
+    forbidden = auth_client.get(
+        f"/schedules/{sid}/upload-session", headers=AUTH)
+    assert forbidden.status_code == 403, forbidden.text
+    service_read = auth_client.get(
+        f"/schedules/{sid}/upload-session", headers=SVC)
+    assert service_read.status_code == 200
+    assert service_read.json()["session_uri"] == uri
+
+    assert client.patch(f"/schedules/{sid}/upload-session", json={
+        "bytes_sent": 1024}).status_code == 200
+    too_far = client.patch(f"/schedules/{sid}/upload-session", json={
+        "bytes_sent": 5000})
+    assert too_far.status_code == 422, too_far.text
+
+    assert client.delete(f"/schedules/{sid}/upload-session").status_code == 204
+    assert client.get(f"/schedules/{sid}/upload-session").status_code == 404
+
+    # An expired capability is deleted and cannot be resumed.
+    assert client.put(f"/schedules/{sid}/upload-session", json={
+        "session_uri": uri, "content_length": 4096,
+    }).status_code == 200
+    _run("UPDATE upload_sessions SET expires_at = now() - interval '1 minute' "
+         "WHERE schedule_id = $1", sid)
+    assert client.get(f"/schedules/{sid}/upload-session").status_code == 404
+    rows = _run("SELECT 1 FROM upload_sessions WHERE schedule_id = $1", sid)
+    assert rows == []
 
 
 # ------------------------------------------------- v0.18: settings + metrics

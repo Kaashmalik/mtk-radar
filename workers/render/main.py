@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 import shutil
 from pathlib import Path
 
@@ -515,6 +516,13 @@ class RenderJob:
         # repo-relative paths (single-host flow).
         storage = make_from_env()
         if storage is not None:
+            # A revision-scoped, attempt-unique prefix makes every uploaded
+            # package immutable: a rerun can never overwrite bytes that were
+            # already approved or published. Orphaned failed attempts are
+            # cheap and can be garbage-collected by retention policy later.
+            revision = (f"v{self.script_version}-"
+                        f"{str(self.script_version_hash or 'unsigned')[:12]}")
+            attempt = uuid.uuid4().hex[:12]
             for render_row in results:
                 if render_row.get("status") != "rendered":
                     continue  # failed/QC-rejected media is never uploaded as an asset
@@ -522,11 +530,13 @@ class RenderJob:
                 try:
                     render_row["video_path"] = storage.put(
                         self.project / f"renders/{offer['id']}-{preset}{'' if language == 'en' else '-' + language}.mp4",
-                        render_key(offer["id"], preset, language),
+                        render_key(offer["id"], preset, language,
+                                   revision=revision, attempt=attempt),
                     )
                     render_row["captions_path"] = storage.put(
                         self.project / f"assets/captions{'' if language == 'en' else '.' + language}.srt",
-                        captions_key(offer["id"], preset, language),
+                        captions_key(offer["id"], preset, language,
+                                     revision=revision, attempt=attempt),
                     )
                     cover_ref = render_row.get("cover_path")
                     if cover_ref:
@@ -536,7 +546,8 @@ class RenderJob:
                         ext = local_cover.suffix.lstrip(".") or "svg"
                         render_row["cover_path"] = storage.put(
                             local_cover,
-                            cover_key(offer["id"], preset, language, ext=ext),
+                            cover_key(offer["id"], preset, language, ext=ext,
+                                      revision=revision, attempt=attempt),
                         )
                 except OSError as exc:
                     log.error("storage upload failed (%s) — keeping local paths", exc)

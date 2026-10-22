@@ -8,6 +8,8 @@ the on_refresh hook (never the token). Privacy status comes from the schedule
 """
 
 import json
+import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -30,8 +32,12 @@ UPLOAD_INIT_URL = (
 )
 TOKEN_MIN_TTL_S = 120  # refresh before expiry with margin
 CATEGORY_DEVELOPER = "28"  # Science & Technology
+DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024  # YouTube requires a multiple of 256 KiB
 _ISO_DURATION = re.compile(
     r"^PT(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+(?:\.\d+)?)S)?$")
+_RANGE_DONE = re.compile(r"^bytes=0-(?P<last>\d+)$")
+
+log = logging.getLogger("youtube")
 
 
 def _parse_iso8601_duration(value: str) -> Optional[float]:
@@ -77,6 +83,20 @@ class YouTubeAdapter(PublishAdapter):
         self._access = access_token
         self._expires_monotonic = 0.0
         self._http = http or httpx.Client(timeout=600)
+        self._session_store = None
+        try:
+            chunk = int(os.environ.get(
+                "MTK_YOUTUBE_UPLOAD_CHUNK_BYTES", DEFAULT_CHUNK_BYTES))
+        except ValueError as exc:
+            raise ValueError("MTK_YOUTUBE_UPLOAD_CHUNK_BYTES must be an integer") from exc
+        if chunk <= 0 or chunk % (256 * 1024):
+            raise ValueError(
+                "MTK_YOUTUBE_UPLOAD_CHUNK_BYTES must be a multiple of 256 KiB")
+        self._chunk_bytes = chunk
+
+    def set_upload_session_store(self, store) -> None:
+        """Attach a worker-owned persisted session store for resume support."""
+        self._session_store = store
 
     # ------------------------------------------------------------------ auth
 
@@ -153,14 +173,18 @@ class YouTubeAdapter(PublishAdapter):
                 "selfDeclaredMadeForKids": False,
             },
         }
+        total = Path(video_path).stat().st_size
+
+        if self._session_store is not None:
+            return self._do_resumable_upload(video_path, body, total)
+
+        # Legacy path: a single PUT. Idempotency keys are accepted for the
+        # adapter interface but YouTube does not dedupe uploads by request id.
         headers = {
             "Authorization": f"Bearer {self._access}",
             "X-Upload-Content-Type": "video/mp4",
-            "X-Upload-Content-Length": str(Path(video_path).stat().st_size),
+            "X-Upload-Content-Length": str(total),
         }
-        if idempotency_key:
-            headers["X-Request-Id"] = idempotency_key  # resumable session dedupe
-
         init = self._http.post(UPLOAD_INIT_URL, json=body, headers=headers)
         if init.status_code == 401:
             raise TransportUnauthorized("upload init rejected: token invalid")
@@ -179,6 +203,141 @@ class YouTubeAdapter(PublishAdapter):
             raise TransportUnauthorized("upload rejected: token expired mid-flight")
         upload.raise_for_status()
         return str(upload.json()["id"])
+
+    # ------------------------------------------------- persisted resume (v0.31)
+
+    def _init_session(self, body: dict[str, Any], total: int) -> str:
+        headers = {
+            "Authorization": f"Bearer {self._access}",
+            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Length": str(total),
+        }
+        init = self._http.post(UPLOAD_INIT_URL, json=body, headers=headers)
+        if init.status_code == 401:
+            raise TransportUnauthorized("upload init rejected: token invalid")
+        init.raise_for_status()
+        location = init.headers.get("location")
+        if not location:
+            raise RuntimeError("YouTube did not return a resumable session location")
+        return location
+
+    @staticmethod
+    def _range_offset(value: str | None) -> int | None:
+        if not value:
+            return None
+        match = _RANGE_DONE.fullmatch(value.strip())
+        return int(match.group("last")) + 1 if match else None
+
+    def _query_session(self, uri: str, total: int) -> tuple[str, int | str]:
+        """Ask YouTube what it actually received.
+
+        Returns ("complete", video_id), ("offset", next_byte) or
+        ("expired", 0). A query carries no video bytes.
+        """
+        response = self._http.put(
+            uri,
+            content=b"",
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Range": f"bytes */{total}",
+            },
+        )
+        if response.status_code == 401:
+            raise TransportUnauthorized("resume status rejected: token invalid")
+        if response.status_code in (404, 410):
+            return "expired", 0
+        if response.status_code in (200, 201):
+            video_id = (response.json() or {}).get("id")
+            if not video_id:
+                raise RuntimeError("completed upload response had no video id")
+            return "complete", str(video_id)
+        if response.status_code == 308:
+            offset = self._range_offset(response.headers.get("range"))
+            if offset is None:
+                # No bytes are confirmed yet; resend from the start.
+                return "offset", 0
+            if offset > total:
+                raise RuntimeError("provider reported progress beyond file size")
+            return "offset", offset
+        response.raise_for_status()
+        raise RuntimeError(f"unexpected resume status {response.status_code}")
+
+    def _do_resumable_upload(self, video_path: Path, body: dict[str, Any],
+                             total: int) -> str:
+        if total <= 0:
+            raise RuntimeError("refusing to upload an empty video")
+        store = self._session_store
+        existing = store.load()
+        offset = 0
+        if existing:
+            if int(existing.get("content_length", -1)) != total:
+                store.clear()
+                raise RuntimeError(
+                    "persisted upload session size does not match the rendered file")
+            uri = str(existing["session_uri"])
+            state, observed = self._query_session(uri, total)
+            if state == "complete":
+                self._clear_session_quietly()
+                return str(observed)
+            if state == "expired":
+                store.clear()
+                existing = None
+            else:
+                offset = int(observed)
+                # Persist the provider-observed offset, not what we attempted.
+                store.progress(offset)
+
+        if not existing:
+            uri = self._init_session(body, total)
+            # Persist BEFORE sending bytes: if the worker dies after the first
+            # chunk, the next attempt can resume instead of uploading a
+            # duplicate video.
+            store.save(uri, total)
+
+        with open(video_path, "rb") as fh:
+            while offset < total:
+                fh.seek(offset)
+                chunk = fh.read(min(self._chunk_bytes, total - offset))
+                if not chunk:
+                    raise RuntimeError("video ended before its recorded size")
+                end = offset + len(chunk) - 1
+                response = self._http.put(
+                    uri,
+                    content=chunk,
+                    headers={
+                        "Content-Type": "video/mp4",
+                        "Content-Range": f"bytes {offset}-{end}/{total}",
+                    },
+                )
+                if response.status_code == 401:
+                    raise TransportUnauthorized(
+                        "upload rejected: token expired mid-flight")
+                if response.status_code in (200, 201):
+                    video_id = (response.json() or {}).get("id")
+                    if not video_id:
+                        raise RuntimeError("completed upload response had no video id")
+                    self._clear_session_quietly()
+                    return str(video_id)
+                if response.status_code == 308:
+                    next_offset = self._range_offset(response.headers.get("range"))
+                    if next_offset is None:
+                        raise RuntimeError(
+                            "YouTube accepted a chunk without reporting its range")
+                    if next_offset <= offset:
+                        raise RuntimeError("upload progress did not advance")
+                    store.progress(next_offset)
+                    offset = next_offset
+                    continue
+                response.raise_for_status()
+                raise RuntimeError(
+                    f"unexpected chunk response {response.status_code}")
+        raise RuntimeError("upload ended without a video id")
+
+    def _clear_session_quietly(self) -> None:
+        try:
+            self._session_store.clear()
+        except Exception as exc:  # noqa: BLE001 - row expires; never lose a video id
+            log.warning("could not clear persisted upload session: %s", exc)
 
     # --------------------------------------- complete YouTube package (v0.28)
 
@@ -292,10 +451,21 @@ class YouTubeAdapter(PublishAdapter):
                          playlist_id: Optional[str] = None,
                          pinned_comment: Optional[str] = None,
                          captions_language: Optional[str] = None) -> dict:
-        """Attach every reviewable YouTube asset after upload. Optional asset
-        failures are recorded in the returned metadata; a dead token is
-        re-raised so the worker pauses the queue."""
+        """Attach every requested YouTube asset after upload.
+
+        A requested asset is mandatory: the package is not complete unless the
+        thumbnail, captions, playlist entry and comment were all accepted.
+        Omitted assets are explicit skips. The worker holds an upload whose
+        package is incomplete instead of reporting a successful release. A
+        dead token is re-raised so the worker pauses the queue.
+        """
         result: dict[str, Any] = {}
+        requested = {
+            "thumbnail": bool(thumbnail_path),
+            "captions": bool(captions_path),
+            "playlist": bool(playlist_id),
+            "comment": bool(pinned_comment),
+        }
         operations = [
             ("thumbnail", lambda: self.set_thumbnail(video_id, thumbnail_path)
              if thumbnail_path else {"ok": True, "skipped": "no cover"}),
@@ -309,13 +479,21 @@ class YouTubeAdapter(PublishAdapter):
             ("comment", lambda: self.post_comment(video_id, pinned_comment or "")
              if pinned_comment else {"ok": True, "skipped": "no pinned comment"}),
         ]
+        failures: dict[str, str] = {}
         for name, operation in operations:
             try:
-                result[name] = operation()
+                outcome = operation()
+                result[name] = outcome
+                if not outcome.get("ok", False):
+                    failures[name] = str(outcome.get("error") or "not accepted")
             except TransportUnauthorized:
                 raise
-            except Exception as exc:  # noqa: BLE001 — optional asset, not the video
+            except Exception as exc:  # noqa: BLE001 — recorded as package failure
                 result[name] = {"ok": False, "error": str(exc)}
+                failures[name] = str(exc)
+        result["mandatory"] = sorted(name for name, needed in requested.items() if needed)
+        result["failures"] = failures
+        result["complete"] = not failures
         return result
 
     def confirm_publication(self, video_id: str, *, expected_privacy: str,
