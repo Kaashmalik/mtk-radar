@@ -7,7 +7,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 import IdentityBadge from "./IdentityBadge";
 
@@ -63,7 +62,7 @@ function HealthDot() {
   );
 }
 
-export default function SiteNav() {
+export default function SiteNav({ actor }: { actor: string }) {
   const pathname = usePathname();
 
   return (
@@ -85,7 +84,7 @@ export default function SiteNav() {
         </div>
       </nav>
       <div className="nav-spacer" />
-      <IdentityBadge />
+      <IdentityBadge actor={actor} />
       <HealthDot />
     </header>
   );

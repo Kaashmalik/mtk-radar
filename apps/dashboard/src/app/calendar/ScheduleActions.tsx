@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 
 type Props = { scheduleId: string; state: string };
@@ -18,10 +17,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const url = path.includes("?") || body !== undefined
-        ? path
-        : `${path}?reviewer=${encodeURIComponent(getReviewerName())}`;
-      const res = await clientFetch(url, {
+      const res = await clientFetch(path, {
         method,
         headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -43,7 +39,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
       label: "→ Needs approval",
       action: () => call(
         `/schedules/${scheduleId}/transition`,
-        { to: "needs_approval", reviewer: getReviewerName() },
+        { to: "needs_approval" },
       ),
     });
   }
@@ -62,11 +58,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
         if (!ok) return;
         call(
           `/schedules/${scheduleId}/transition`,
-          {
-            to: "scheduled",
-            reviewer: getReviewerName(),
-            acknowledge_unknown_attempt: true,
-          },
+          { to: "scheduled", acknowledge_unknown_attempt: true },
         );
       },
     });
@@ -74,13 +66,13 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
   if (state === "needs_approval") {
     buttons.push({
       label: "✓ Approve",
-      action: () => call(`/schedules/${scheduleId}/transition`, { to: "approved", reviewer: getReviewerName() }),
+      action: () => call(`/schedules/${scheduleId}/transition`, { to: "approved" }),
     });
   }
   if (state === "approved") {
     buttons.push({
       label: "🗓 Schedule",
-      action: () => call(`/schedules/${scheduleId}/transition`, { to: "scheduled", reviewer: getReviewerName() }),
+      action: () => call(`/schedules/${scheduleId}/transition`, { to: "scheduled" }),
     });
   }
   if (state === "approved" || state === "scheduled" || state === "failed") {

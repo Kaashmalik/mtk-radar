@@ -84,6 +84,8 @@ services:
       DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
       REDIS_URL: redis://redis:6379/0
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_EXTENSION_TOKEN: ${MTK_EXTENSION_TOKEN:-}
       # WP01: shared with the verification worker; unsigned machine evidence is
       # refused by default. Unset ⇒ machine evidence cannot be accepted (503).
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
@@ -132,12 +134,13 @@ services:
     working_dir: /app
     environment:
       API_URL: http://api:8000
-      # server-side (Node) reads only — never inlined into the browser bundle;
-      # interactive islands use personal reviewer tokens (v0.16, minted with
-      # scripts/mint_reviewer.py). NEXT_PUBLIC_API_TOKEN is deliberately gone:
-      # the browser must never hold the master secret.
+      # server-side (Node) reads only - never inlined into the browser bundle.
+      # Interactive actions use the signed HttpOnly reviewer session; the
+      # browser never holds MTK_API_TOKEN or the reviewer token itself.
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://api:8000}
+      # Required: without a valid secret the dashboard fails closed and only
+      # /login renders (with a configuration error).
+      MTK_SESSION_SECRET: ${MTK_SESSION_SECRET:-}
     volumes:
       - ../../apps/dashboard:/app
     command: sh -c "npm install && npm run dev"
@@ -158,6 +161,7 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
       MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
       MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
@@ -193,6 +197,7 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       # Shared with the API: unsigned machine evidence is refused.
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
       MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
@@ -214,6 +219,7 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     command: >
       sh -c "pip install -q httpx feedparser &&
@@ -231,6 +237,7 @@ services:
       - ../..:/repo:ro
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_BATCH_INTERVAL: ${MTK_BATCH_INTERVAL:-900}
     command: >
       sh -c "pip install -q httpx &&
@@ -248,6 +255,7 @@ services:
       - ../..:/repo
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
       MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
       MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
@@ -295,6 +303,7 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
       # Optional alert delivery. Blank values disable that channel; the
       # monitor still logs every alert. See docs/notifications.md.
@@ -327,6 +336,7 @@ services:
       - ../..:/repo:ro
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_METRICS_INTERVAL: ${MTK_METRICS_INTERVAL:-3600}
       # platform credentials are the SAME env references the publishing worker
       # uses (§6) — the metrics worker only ever reads via the adapters.

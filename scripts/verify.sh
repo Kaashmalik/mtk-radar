@@ -90,13 +90,7 @@ done
 docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
   || { docker logs "$PG_NAME" | tail -5; fail "postgres did not start"; }
 
-MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest \
-  packages/object_storage/tests packages/source_adapters/tests \
-  packages/worker_heartbeat/tests \
-  services/api/tests workers/verification/tests \
-  workers/render/tests workers/capture/tests workers/publishing/tests \
-  workers/metrics/tests workers/batch/tests workers/monitor/tests \
-  scripts/tests -q || fail "pytest"
+MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest -q || fail "pytest"
 ok "test suites green"
 
 # ------------------------------------------------- 3. pinned deps (py3.12)
@@ -144,8 +138,8 @@ ok "extension clean"
 if [ "$RUN_E2E" = "1" ]; then
   step "End-to-end (real API + dashboard build + Chromium)"
 
-  # pick free ports — the dashboard inlines the API URL at build time, so the
-  # API port must be known BEFORE the build
+  # Pick free ports. The dashboard reads API_URL at runtime, but the API port
+  # is still chosen before anything starts so both sides agree.
   API_PORT="$(pick_port 8000)"
   DASH_PORT="$(pick_port 3000)"
   echo "  api on ${API_PORT}, dashboard on ${DASH_PORT}"
@@ -158,6 +152,15 @@ if [ "$RUN_E2E" = "1" ]; then
   [ -x "$PY_BIN" ] || PY_BIN="python"
   DATABASE_URL="$E2E_URL" "$PY_BIN" services/api/db_migrate.py > /dev/null || fail "migrations"
 
+  # Real auth for the smoke test: a service token for Node-side reads and a
+  # personal reviewer token for the browser session. Nothing is hard-coded.
+  MTK_API_TOKEN="$(openssl rand -hex 24)"
+  MTK_SESSION_SECRET="$(openssl rand -hex 32)"
+  E2E_REVIEWER_TOKEN="$(DATABASE_URL="$E2E_URL" "$PY_BIN" \
+    services/api/scripts/mint_reviewer.py --name "Verify E2E" | sed -n '2p')"
+  [ -n "$E2E_REVIEWER_TOKEN" ] || fail "reviewer mint produced no token"
+
+  MTK_API_TOKEN="$MTK_API_TOKEN" \
   MTK_CORS_ORIGINS="http://127.0.0.1:${DASH_PORT},http://localhost:${DASH_PORT}" \
     DATABASE_URL="$E2E_URL" "$PY_BIN" -m uvicorn main:app --app-dir services/api \
     --host 127.0.0.1 --port "$API_PORT" > /tmp/mtk-verify-api.log 2>&1 &
@@ -168,9 +171,10 @@ if [ "$RUN_E2E" = "1" ]; then
   curl -sf "http://127.0.0.1:${API_PORT}/health" > /dev/null \
     || { tail -20 /tmp/mtk-verify-api.log; fail "api did not start"; }
 
-  NEXT_PUBLIC_API_URL="http://127.0.0.1:${API_PORT}" \
-    corepack pnpm --dir apps/dashboard build > /dev/null 2>&1 || fail "dashboard build"
+  corepack pnpm --dir apps/dashboard build > /dev/null 2>&1 || fail "dashboard build"
   API_URL="http://127.0.0.1:${API_PORT}" \
+  MTK_API_TOKEN="$MTK_API_TOKEN" \
+  MTK_SESSION_SECRET="$MTK_SESSION_SECRET" \
     corepack pnpm --dir apps/dashboard exec next start -p "$DASH_PORT" \
     > /tmp/mtk-verify-dashboard.log 2>&1 &
   DASH_PID=$!
@@ -181,6 +185,7 @@ if [ "$RUN_E2E" = "1" ]; then
     || { tail -20 /tmp/mtk-verify-dashboard.log; fail "dashboard did not start"; }
 
   E2E_BASE_URL="http://127.0.0.1:${DASH_PORT}" \
+  E2E_REVIEWER_TOKEN="$E2E_REVIEWER_TOKEN" \
     corepack pnpm --dir apps/dashboard exec playwright test || fail "playwright"
   kill "$API_PID" "$DASH_PID" > /dev/null 2>&1 || true
   ok "browser smoke green"

@@ -274,9 +274,12 @@ public IP or router port-forward:
 3. Route `api.example.com` to `http://localhost:8000`.
 4. Put both hostnames behind Cloudflare Access.
 5. Keep the API's bearer token and reviewer tokens enabled even behind Access.
-6. Set `NEXT_PUBLIC_API_URL=https://api.example.com`,
+6. Set `API_URL=https://api.example.com` (server-side only),
+   `MTK_SESSION_SECRET` (≥32 random chars),
    `MTK_CORS_ORIGINS=https://app.example.com` and
-   `MTK_PUBLIC_BASE_URL=https://app.example.com`.
+   `MTK_PUBLIC_BASE_URL=https://app.example.com`. The browser calls the
+   dashboard's same-origin `/api/backend` proxy, so no public API URL is
+   compiled into client JavaScript.
 
 Do not expose PostgreSQL, Redis or MinIO through the tunnel. The dashboard and
 API are the only browser-facing services. Render workers talk to the API and
@@ -684,8 +687,9 @@ posts happen.
    - `POSTGRES_PASSWORD`, `DATABASE_URL`;
    - `MTK_API_TOKEN`, `MTK_FETCH_SIGNING_KEY`;
    - `MTK_STORAGE_BACKEND=s3`, `MTK_S3_*`;
+   - `MTK_SESSION_SECRET` (required for dashboard login);
    - `MTK_PUBLIC_MEDIA_BASE_URL`, `MTK_CORS_ORIGINS`,
-     `NEXT_PUBLIC_API_URL`, `MTK_PUBLIC_BASE_URL`;
+     `API_URL`, `MTK_PUBLIC_BASE_URL`;
    - platform OAuth credentials and Instagram variables;
    - model/TTS variables only if you use them.
 5. **Start PostgreSQL, Redis and the API on the VPS.** Run migrations, restore

@@ -115,9 +115,16 @@ sha256 is stored). From `services/api/` (or `docker compose exec api …`):
     python -m scripts.mint_reviewer --list
     python -m scripts.mint_reviewer --revoke Kashi # instant; cache clears ≤60s
 
-Re-minting a name replaces its token (old one stops working). To activate in
-the dashboard: paste the token in the nav's identity box — the badge shows the
-authenticated name (GET `/whoami` doubles as a token liveness check).
+Re-minting a name replaces its token (old one stops working). Sign in at
+`/login` with the token; the API is checked via GET `/whoami` before a signed
+HttpOnly session cookie is issued. The nav shows the authenticated name.
+Browser JavaScript never reads the token: interactive calls go through the
+same-origin `/api/backend` proxy. Revoking a reviewer invalidates the token on
+the next API call (the session cookie itself expires after 12h).
+
+Dashboard sessions require `MTK_SESSION_SECRET` (≥32 random chars). Missing or
+too-short values fail closed — only the login page renders, with a configuration
+error. Rotating the secret signs every operator out.
 
 ### YouTube (OAuth2 refresh token)
 
@@ -379,11 +386,15 @@ rows to refs.
   a re-encode (libmp3lame 44.1 kHz) plus an ffprobe duration gate (≥85% of
   summed segments, else capture-audio fallback) — a provider/model change
   between batches can no longer silently corrupt boundaries.
-- Reviewer identity: personal hashed tokens (v0.16) bind every dashboard/API
-  action to a named reviewer — audit_log.actor comes from the token, not the
-  request body, and the shared `MTK_API_TOKEN` no longer reaches the browser.
-  Still an operator-token model, NOT session/SSO login: no password auth, no
-  browser sessions. Fine for the single-operator deployment.
+- Reviewer identity: personal hashed tokens bind every dashboard/API action to
+  a named reviewer — audit_log.actor comes from the token, not the request body.
+  The dashboard exchanges a token for a signed, HttpOnly session cookie; the
+  token never reaches browser JavaScript and the shared `MTK_API_TOKEN` is
+  server-side only. Service/worker/extension credentials cannot name a human:
+  approval, ToS attestation, redaction review and corrections require a
+  reviewer credential (or an explicit `automation:<stage>` actor where policy
+  allows automation). This is still a single-operator token-login model, not
+  SSO/password auth or multi-tenant identity.
 - Publishing safe-guards: approval-hash binding + expiry gates (v0.16),
   auto-retry with exponential backoff capped at `MTK_PUBLISH_MAX_RETRIES`
   (v0.17), correction notices pushed into already-published YouTube

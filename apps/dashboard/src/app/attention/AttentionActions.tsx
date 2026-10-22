@@ -4,7 +4,6 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 type Props = {
   kind: string;
@@ -30,9 +29,10 @@ export default function AttentionActions({ kind, entityId, action }: Props) {
       const path = kind === "offer_approval"
         ? `/offers/${entityId}/transition`
         : `/schedules/${entityId}/transition`;
+      // The proxy binds the reviewer token; no name is accepted from the body.
       const body = kind === "offer_approval"
-        ? { to: "approved_for_video", reviewer: getReviewerName() }
-        : { to: "approved", reviewer: getReviewerName() };
+        ? { to: "approved_for_video" }
+        : { to: "approved" };
       const res = await clientFetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
