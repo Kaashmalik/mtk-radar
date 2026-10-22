@@ -519,6 +519,34 @@ def test_recheck_deadline_keeps_the_policy_for_a_distant_expiry(client):
     assert now + timedelta(days=1) < row["recheck_at"] < now + timedelta(days=3)
 
 
+def test_coverage_must_include_claim_free_pages_from_the_run(client):
+    """A skipped page with no claims cannot be omitted from the run's coverage."""
+    import uuid
+    oid, source_id, eid, fields, _ = _verification_fixture(client)
+    other_url = f"https://example.com/wp01-notes-{uuid.uuid4().hex}"
+    other_text = "General programme terms apply. Students must verify enrolment."
+    other = client.post(f"/offers/{oid}/evidence", json={
+        "url": other_url, "source_id": source_id, "official": True,
+        "captured_content": other_text, **_procured(other_url, other_text),
+    })
+    assert other.status_code == 201, other.text
+
+    partial = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid),
+    })
+    assert partial.status_code == 201, partial.text
+    blocked = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert blocked.status_code == 422, blocked.text
+    assert "does not include" in blocked.json()["detail"]
+
+    full = client.post(f"/offers/{oid}/extraction", json={
+        "fields": fields, "coverage": _coverage(eid, other.json()["id"], sections=2),
+    })
+    assert full.status_code == 201, full.text
+    promoted = client.post(f"/offers/{oid}/transition", json={"to": "verified"})
+    assert promoted.status_code == 200, promoted.text
+
+
 def test_snapshot_and_extraction_roundtrip_is_server_derived(client):
     import hashlib
     import uuid

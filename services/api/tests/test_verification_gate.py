@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -38,6 +39,9 @@ class GatePool:
         self.offer_type = offer_type
         self.extraction = {
             "fields": json.dumps(fields()), "conflicts": "[]", "complete": True,
+            # WP01 slice 16: the gate derives the acquisition window from the
+            # extraction's server-side creation time.
+            "created_at": datetime.now(timezone.utc),
             # WP01 slice 8: machine evidence must record what was examined.
             "coverage": json.dumps({
                 "version": "paragraph-groups/1", "sections_total": 1,
@@ -69,7 +73,10 @@ class GatePool:
     async def fetch(self, query, *args):
         if "FROM sources" in query:
             return [{"canonical_domain": "example.com"}]
-        return copy.deepcopy(self.evidence)
+        rows = copy.deepcopy(self.evidence)
+        if "reviewer IS NULL" in query:
+            rows = [row for row in rows if row["reviewer"] is None]
+        return rows
 
 
 def gate(pool):
@@ -310,6 +317,25 @@ class TestExtractionCoverageGate:
             gate(pool)
         assert exc.value.status_code == 422
         assert "does not include" in exc.value.detail
+
+    def test_coverage_includes_claim_free_pages_from_the_same_run(self):
+        pool = GatePool()
+        other = uuid.uuid4()
+        pool.evidence.append({
+            **pool.evidence[0], "id": other,
+            "url": "https://example.com/notes-without-claims",
+        })
+        with pytest.raises(HTTPException) as exc:
+            gate(pool)
+        assert exc.value.status_code == 422
+        assert "pages with no claims still count" in exc.value.detail
+
+        pool.extraction["coverage"] = json.dumps({
+            "version": "paragraph-groups/1", "sections_total": 2,
+            "max_section_chars": 6000,
+            "evidence_ids": [str(EVIDENCE_ID), str(other)],
+        })
+        gate(pool)
 
     def test_reviewer_attested_extraction_is_exempt(self):
         pool = GatePool()

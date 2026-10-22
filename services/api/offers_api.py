@@ -830,7 +830,8 @@ async def _verified_problems(pool, offer_id: uuid.UUID) -> list[str]:
     """
     latest = await pool.fetchrow(
         """
-        SELECT fields, conflicts, coverage::text AS coverage FROM extractions
+        SELECT fields, conflicts, coverage::text AS coverage, created_at
+        FROM extractions
         WHERE offer_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         offer_id,
@@ -856,7 +857,7 @@ async def _verified_problems(pool, offer_id: uuid.UUID) -> list[str]:
         problems = list(problems) + await _provenance_problems(pool, offer_id, extraction)
     if _require_extraction_coverage():
         problems = list(problems) + await _coverage_problems(
-            pool, offer_id, extraction, latest["coverage"],
+            pool, offer_id, extraction, latest["coverage"], latest["created_at"],
         )
     return list(problems)
 
@@ -1114,8 +1115,14 @@ async def _require_source_tos_attestation(pool, evidence: EvidenceIn) -> None:
 
 
 async def _coverage_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
-                             coverage_text) -> list[str]:
-    """Every machine snapshot a claim uses must be listed as examined."""
+                             coverage_text, extracted_at=None) -> list[str]:
+    """Every machine snapshot from the run must be listed as examined.
+
+    That includes pages the extractor read but drew no claim from: a run that
+    quietly skips a page cannot be promoted by citing only the page that agreed
+    with it. The acquisition window is the server-side insert time between the
+    previous extraction and this one, so no caller-supplied run id is trusted.
+    """
     ids = list({field.evidence_id for field in extraction.fields.values()})
     rows = await pool.fetch(
         "SELECT id, reviewer FROM evidence "
@@ -1123,6 +1130,20 @@ async def _coverage_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn
         offer_id, ids,
     )
     machine = {str(row["id"]) for row in rows if row["reviewer"] is None}
+    if extracted_at is not None:
+        window = await pool.fetch(
+            """
+            SELECT id FROM evidence
+            WHERE offer_id = $1 AND reviewer IS NULL AND official AND domain_ok
+              AND captured_at <= $2
+              AND captured_at > COALESCE((
+                  SELECT max(x.created_at) FROM extractions x
+                  WHERE x.offer_id = $1 AND x.created_at < $2
+              ), '-infinity'::timestamptz)
+            """,
+            offer_id, extracted_at,
+        )
+        machine |= {str(row["id"]) for row in window}
     if not machine:
         # Reviewer-attested snapshots are a recorded human action; there is no
         # acquisition run to account for.
@@ -1137,7 +1158,7 @@ async def _coverage_problems(pool, offer_id: uuid.UUID, extraction: ExtractionIn
     if machine - listed:
         return [
             "extraction coverage does not include every machine-collected "
-            "snapshot its claims use"
+            "snapshot from this acquisition run (pages with no claims still count)"
         ]
     return []
 
