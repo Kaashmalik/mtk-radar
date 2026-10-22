@@ -381,17 +381,22 @@ class RenderJob:
         # render every requested preset relative to the project dir
         video_rel = os.path.relpath(capture_video, self.project)
         capture_duration = render_mod.probe_duration(capture_video)
-        # with narration the writer uses -shortest, so the intended output
-        # ends at the shorter of the footage and the spoken track.
         narration_duration = (
             render_mod.probe_duration(str(self.project / narration_file))
             if narration_file else None
         )
-        known_durations = [
-            value for value in (capture_duration, narration_duration)
-            if value is not None and value > 0
-        ]
-        expected_duration = min(known_durations) if known_durations else None
+        expected_duration, timeline_error = render_mod.resolve_timeline(
+            capture_duration, narration_duration,
+            narration_used=bool(narration_file),
+        )
+        timeline = {
+            "basis": "speech" if narration_file else "capture",
+            "capture_s": capture_duration,
+            "narration_s": narration_duration if narration_file else None,
+            "expected_s": expected_duration,
+        }
+        if timeline_error:
+            log.error("timeline preflight failed (%s): %s", language, timeline_error)
         qc_config = qc_mod.QCConfig.from_env()
         qc_exempt_ranges = qc_mod.parse_exempt_ranges(
             self.script_metadata.get("qc_exempt_ranges")
@@ -412,6 +417,16 @@ class RenderJob:
                 self.project, cues, preset.key, preset.width, preset.height,
                 language=language, caption_language=self.caption_language,
             )
+            if timeline_error:
+                results.append(_render_failure_row(
+                    preset=preset, language=language,
+                    video_path=f"projects/{self.offer_id}/{output}",
+                    captions_path=f"projects/{self.offer_id}/assets/captions{caption_suffix}.srt",
+                    cover_path=cover_path, command="",
+                    reason=f"timeline preflight: {timeline_error}",
+                    expected_duration=expected_duration,
+                ))
+                continue
             motion_filter = motion_mod.build_motion_filter(
                 preset,
                 title=offer.get("title", ""),
@@ -425,8 +440,9 @@ class RenderJob:
             cmd = render_mod.build_ffmpeg_cmd(
                 video_rel, output, preset,
                 captions=captions_rel,
-                narration=narration_file,  # mixed track maps 1:a + -shortest
+                narration=narration_file,  # mixed track maps 1:a
                 motion=motion_filter,
+                duration=expected_duration if narration_file else None,
             )
             log.info("rendering %s/%s :: %s", language, preset.key,
                      render_mod.describe(cmd))
@@ -505,6 +521,7 @@ class RenderJob:
             covers=cover_bundle.get("covers", []),
             motion=motion_mod.motion_metadata(self.motion_template, language),
             captions_language=self.caption_language,
+            timeline=timeline,
         )
         manifest_path = project_mod.write_edit_manifest(self.project, manifest,
                                                         language=language)
@@ -580,6 +597,7 @@ class RenderJob:
                     "copy_language": self.copy_language,
                     "captions_language": self.caption_language,
                     "beats": self.script_metadata.get("beats", []),
+                    "timeline": timeline,
                     "motion": motion_mod.motion_metadata(self.motion_template, language),
                     "cover": primary_cover.get("spec", {}),
                 },

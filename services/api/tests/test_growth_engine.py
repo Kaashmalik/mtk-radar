@@ -68,3 +68,63 @@ def test_empty_state_recommends_measurement_not_invention():
     recs = recommendations([])
     assert recs[0]["metric"] == "measurement"
     assert "Publish" in recs[0]["title"]
+
+
+def test_retention_seconds_are_not_silently_treated_as_a_percentage():
+    """45 seconds must not score like 45% 3-second retention."""
+    seconds_only = growth_score([
+        {"views": 1_000, "retention_3s": None, "avg_view_duration_s": 45},
+    ])
+    measured_retention = growth_score([
+        {"views": 1_000, "retention_3s": 0.45},
+    ])
+    unavailable = growth_score([{"views": 1_000}])
+
+    assert seconds_only == unavailable, "seconds-only data is not retention"
+    assert measured_retention > seconds_only
+
+
+def test_measured_zero_retention_lowers_the_score():
+    zero = growth_score([{"views": 1_000, "likes": 10, "retention_3s": 0.0}])
+    unavailable = growth_score([{"views": 1_000, "likes": 10}])
+    assert zero < unavailable
+
+
+def test_average_view_percentage_is_a_valid_retention_fraction():
+    from_percentage = growth_score([
+        {"views": 1_000, "avg_view_percentage": 0.45},
+    ])
+    from_retention = growth_score([
+        {"views": 1_000, "retention_3s": 0.45},
+    ])
+    assert from_percentage == from_retention
+
+
+def test_two_posts_do_not_produce_a_platform_winner():
+    recs = recommendations(ROWS[:2])
+    assert not any(rec["metric"] == "reach" for rec in recs)
+
+
+def test_one_language_does_not_produce_a_language_winner():
+    recs = recommendations(
+        [{"platform": "youtube", "language": "en", "views": 100}],
+        languages=[{"language": "en", "avg_views": 100}],
+    )
+    assert not any(rec["metric"] == "language" for rec in recs)
+
+
+def test_unknown_views_do_not_produce_engagement_advice():
+    recs = recommendations([
+        {"platform": "youtube", "language": "en", "views": None,
+         "impressions": 1_000, "likes": 50},
+    ])
+    assert not any(rec["metric"] == "engagement" for rec in recs)
+
+
+def test_zero_platform_views_are_not_a_winner():
+    recs = recommendations([
+        {"platform": "youtube", "views": 0, "impressions": 1_000},
+        {"platform": "tiktok", "views": 0, "impressions": 500},
+        {"platform": "facebook", "views": 0, "impressions": 100},
+    ])
+    assert not any("leads this small measured set" in rec["detail"] for rec in recs)

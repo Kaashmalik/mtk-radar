@@ -4,9 +4,28 @@
 
 **Baseline commit:** `448dced` — *feat: add laptop-first automation and Needs You inbox (v0.30)*
 
-**Status:** audit and recommendation. Not a production-readiness certificate, and
-not a promise of views, subscribers or revenue. No source code was changed while
-producing this review.
+**Status:** audit and recommendation, followed by implementation work. This is
+still not a production-readiness certificate, and not a promise of views,
+subscribers or revenue.
+
+**Implementation status (22 October 2026, after the audit):** all P0 findings
+are implemented and tested (`a34bfb2`, `d5473a4`, `c814444`). P1 is partially
+complete: immutable revision/attempt media keys, persisted resumable upload
+sessions with provider-offset recovery and human held-upload reconciliation,
+mandatory YouTube package assets, a speech-authoritative render timeline without
+`-shortest`, and corrected growth-score zero/unavailable and unit handling.
+Verification on the audit machine: **818 backend tests passed** against a
+disposable PostgreSQL database, dashboard **typecheck and production build
+passed**, and the authenticated **Playwright suite passed 8/8**. That is
+code/test evidence only; it is not live-provider or deployment proof.
+
+Still **not demonstrated**: live credentials, accounts, domain/TLS, S3/R2
+storage, real YouTube upload/metrics/restore proof, production image and private
+network hardening, cursor pagination/durable jobs, and full editorial or
+scene-timeline QC with final human playback review. Asymmetric acquisition
+signing and semantic applicable-terms proof remain blocked on dependency and
+product decisions. The system remains a **strong prototype in active
+hardening**, not production-ready or fully autonomous.
 
 **Scope:** dashboard, API, collectors, verification, capture, render, publishing,
 metrics, automation policy, deployment, CI and the existing master plan. The
@@ -336,7 +355,12 @@ irreversible operation, not only once at the start of a long publishing sweep.
 
 ## 9. Release requirements at the end of two months
 
-Call the system functional only when all of these are demonstrated and recorded:
+Call the system functional only when all of these are demonstrated and recorded.
+Automated tests now cover the security boundary, blocking release checks,
+revision-scoped media keys, resumable-session persistence, package holds and
+growth-score units. Unchecked items below still require live services, operator
+evidence or product decisions; do not replace that evidence with a passing unit
+test.
 
 - [ ] A complete dashboard-driven production workflow works end to end.
 - [ ] Unauthorised visitors and workers cannot reach human-only capabilities.

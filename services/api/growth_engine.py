@@ -38,23 +38,46 @@ def engagement_rate(views: Any, likes: Any, comments: Any) -> float:
     return round((_num(likes) + _num(comments)) / view_count * 100, 2)
 
 
+def _value(row: dict[str, Any], key: str) -> Any:
+    """Return a measured value, preserving zero; do not fall through on 0."""
+    value = row.get(key)
+    return value if value is not None else None
+
+
+def _retention_fraction(row: dict[str, Any]) -> float | None:
+    """Retention as a 0..1 fraction, never as an unconverted duration.
+
+    `avg_view_duration_s` is seconds and cannot share a percentage scale with
+    `retention_3s`. If a provider reports only seconds, retention is genuinely
+    unavailable for the score rather than silently normalised as a percentage.
+    """
+    for key in ("retention_3s", "avg_view_percentage"):
+        value = _value(row, key)
+        if value is not None:
+            return _num(value)
+    return None
+
+
 def growth_score(rows: Iterable[dict[str, Any]]) -> float:
     """Blend the signals we actually have, without inventing missing ones."""
     rows = [r for r in rows if r]
     if not rows:
         return 0.0
 
-    reach = [_num(r.get("views") or r.get("impressions")) for r in rows]
-    engagement = [engagement_rate(r.get("views"), r.get("likes"), r.get("comments")) for r in rows]
-    retention = [
-        _num(r.get("retention_3s")) * 100
-        if r.get("retention_3s") is not None
-        else _num(r.get("avg_view_duration_s"))
-        for r in rows
+    reach = [
+        _num(value) for r in rows
+        if (value := (_value(r, "views") if _value(r, "views") is not None
+                      else _value(r, "impressions"))) is not None
     ]
-    clicks = [_num(r.get("link_clicks")) for r in rows]
+    engagement = [engagement_rate(r.get("views"), r.get("likes"), r.get("comments"))
+                  for r in rows if _num(_value(r, "views")) > 0]
+    retention = [
+        fraction * 100 for r in rows
+        if (fraction := _retention_fraction(r)) is not None
+    ]
+    clicks = [_num(value) for r in rows if (value := _value(r, "link_clicks")) is not None]
 
-    # Normalize each signal to 0–100 with transparent, conservative ceilings.
+    # Normalize each signal to 0-100 with transparent, conservative ceilings.
     reach_score = min(100.0, mean(reach) / 10_000 * 100) if reach else 0.0
     engagement_score = min(100.0, mean(engagement) / 8 * 100) if engagement else 0.0
     retention_score = min(100.0, mean(retention) / 45 * 100) if retention else 0.0
@@ -69,8 +92,7 @@ def growth_score(rows: Iterable[dict[str, Any]]) -> float:
         available.append((reach_score, 0.40))
     if any(_num(r.get("views")) > 0 for r in rows):
         available.append((engagement_score, 0.25))
-    if any(r.get("retention_3s") is not None or r.get("avg_view_duration_s") is not None
-           for r in rows):
+    if any(_retention_fraction(r) is not None for r in rows):
         available.append((retention_score, 0.25))
     if any(r.get("link_clicks") is not None for r in rows):
         available.append((click_score, 0.10))
@@ -82,15 +104,27 @@ def growth_score(rows: Iterable[dict[str, Any]]) -> float:
 
 
 def _best_by(rows: list[dict[str, Any]], key: str,
-             value_key: str = "views") -> tuple[str, float] | None:
+             value_key: str = "views") -> tuple[str, float, int] | None:
+    """Best group by a measured value. Returns (label, mean, post_count).
+
+    A zero is a measured value and stays zero; it must not fall through to a
+    different field. Groups without any measured value are ignored, and a
+    missing/zero metric can never produce a "best" claim.
+    """
     grouped: dict[str, list[float]] = {}
     for row in rows:
+        value = _value(row, value_key)
+        if value is None:
+            continue
         label = str(row.get(key) or "unknown")
-        grouped.setdefault(label, []).append(_num(row.get(value_key) or row.get("views")))
+        grouped.setdefault(label, []).append(_num(value))
     if not grouped:
         return None
     label, values = max(grouped.items(), key=lambda pair: mean(pair[1]) if pair[1] else 0)
-    return label, round(mean(values), 1)
+    average = mean(values) if values else 0.0
+    if average <= 0:
+        return None
+    return label, round(average, 1), len(values)
 
 
 def recommendations(
@@ -112,31 +146,44 @@ def recommendations(
         }]
 
     best_platform = _best_by(rows, "platform")
-    best_language = _best_by(languages or rows, "language", "avg_views")
-    avg_engagement = mean([engagement_rate(r.get("views"), r.get("likes"), r.get("comments"))
-                           for r in rows]) if rows else 0
-    avg_retention = mean([_num(r.get("retention_3s")) for r in rows
-                          if r.get("retention_3s") is not None]) if any(
-        r.get("retention_3s") is not None for r in rows) else 0
+    language_rows = languages or rows
+    language_groups = {
+        str(r.get("language") or "unknown") for r in language_rows if r.get("language")
+    }
+    best_language = _best_by(language_rows, "language", "avg_views")
+    measured_engagement = [
+        engagement_rate(r.get("views"), r.get("likes"), r.get("comments"))
+        for r in rows if _num(_value(r, "views")) > 0
+    ]
+    avg_engagement = mean(measured_engagement) if measured_engagement else None
+    measured_retention = [
+        fraction for r in rows
+        if (fraction := _retention_fraction(r)) is not None
+    ]
+    avg_retention = mean(measured_retention) if measured_retention else None
 
-    if best_platform:
+    # A platform recommendation needs a minimum sample and more than one post
+    # on the winning platform. Two measured posts are a lead, not proof.
+    if best_platform and len(rows) >= 3 and best_platform[2] >= 2:
         out.append({
             "priority": "high",
-            "title": f"Double down on {best_platform[0]}",
-            "detail": f"{best_platform[0]} leads the current set at ~{best_platform[1]:.0f} "
-                      "views per measured post. Reuse its hook length, cover style and "
-                      "posting window for the next three posts.",
+            "title": f"Test more posts on {best_platform[0]}",
+            "detail": f"{best_platform[0]} leads this small measured set at "
+                      f"~{best_platform[1]:.0f} views per post. This is an association, "
+                      "not proof of cause: vary one packaging element at a time and "
+                      "keep the posting window stable.",
             "metric": "reach",
         })
-    if best_language and best_language[1] > 0:
+    if best_language and best_language[1] > 0 and len(language_groups) >= 2:
         out.append({
             "priority": "medium",
-            "title": f"Prioritize {best_language[0]} on the next production run",
-            "detail": f"The {best_language[0]} variant currently leads on average views. "
-                      "Keep both languages, but sequence the stronger one first.",
+            "title": f"Sequence {best_language[0]} first on the next production run",
+            "detail": f"The {best_language[0]} variant leads this small sample on average "
+                      "views. Keep both languages, but test the stronger one first; do "
+                      "not drop the other variant without a longer sample.",
             "metric": "language",
         })
-    if avg_retention and avg_retention < 0.45:
+    if avg_retention is not None and avg_retention < 0.45:
         out.append({
             "priority": "high",
             "title": "Shorten the hook and show proof sooner",
@@ -145,7 +192,7 @@ def recommendations(
                       "intro card to under 1 second.",
             "metric": "retention",
         })
-    if avg_engagement < 3:
+    if avg_engagement is not None and avg_engagement < 3:
         out.append({
             "priority": "medium",
             "title": "Add one specific question CTA",

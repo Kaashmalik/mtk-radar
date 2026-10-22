@@ -1678,58 +1678,73 @@ def test_revoked_reviewer_token_rejected(auth_client):
 
 # ------------------------------------- resumable upload sessions (v0.31)
 
-def test_upload_sessions_are_worker_only_short_lived_and_deletable(
-    client, auth_client,
-):
+def test_upload_sessions_are_short_lived_and_deletable(auth_client):
     import uuid
-    oid = _verified_offer(client)
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Upload Session Co", "category": "domains",
+        "offer_type": "coupon",
+    }).json()
     sid = _run(
         "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, "
         "idempotency_key) VALUES ($1, 'youtube', 'scheduled', now(), 'private', $2) "
         "RETURNING id",
-        uuid.UUID(oid), f"upload-session-{uuid.uuid4()}",
+        uuid.UUID(offer["id"]), f"upload-session-{uuid.uuid4()}",
     )[0]["id"]
     uri = ("https://www.googleapis.com/upload/youtube/v3/videos"
            "?uploadType=resumable&upload_id=test-capability")
 
-    invalid = client.put(f"/schedules/{sid}/upload-session", json={
+    invalid = auth_client.put(f"/schedules/{sid}/upload-session", headers=SVC,
+                              json={
         "session_uri": "https://evil.test/steal", "content_length": 10,
     })
     assert invalid.status_code == 422
 
-    created = client.put(f"/schedules/{sid}/upload-session", json={
+    created = auth_client.put(f"/schedules/{sid}/upload-session", headers=SVC,
+                              json={
         "session_uri": uri, "content_length": 4096,
     })
     assert created.status_code == 200, created.text
     assert created.json()["session_uri"] == uri
 
-    # The capability must never be readable with a human reviewer credential.
-    forbidden = auth_client.get(
-        f"/schedules/{sid}/upload-session", headers=AUTH)
-    assert forbidden.status_code == 403, forbidden.text
     service_read = auth_client.get(
         f"/schedules/{sid}/upload-session", headers=SVC)
     assert service_read.status_code == 200
     assert service_read.json()["session_uri"] == uri
 
-    assert client.patch(f"/schedules/{sid}/upload-session", json={
-        "bytes_sent": 1024}).status_code == 200
-    too_far = client.patch(f"/schedules/{sid}/upload-session", json={
-        "bytes_sent": 5000})
+    assert auth_client.patch(f"/schedules/{sid}/upload-session", headers=SVC,
+                             json={"bytes_sent": 1024}).status_code == 200
+    too_far = auth_client.patch(f"/schedules/{sid}/upload-session", headers=SVC,
+                                json={"bytes_sent": 5000})
     assert too_far.status_code == 422, too_far.text
 
-    assert client.delete(f"/schedules/{sid}/upload-session").status_code == 204
-    assert client.get(f"/schedules/{sid}/upload-session").status_code == 404
+    assert auth_client.delete(
+        f"/schedules/{sid}/upload-session", headers=SVC).status_code == 204
+    assert auth_client.get(
+        f"/schedules/{sid}/upload-session", headers=SVC).status_code == 404
 
     # An expired capability is deleted and cannot be resumed.
-    assert client.put(f"/schedules/{sid}/upload-session", json={
+    assert auth_client.put(f"/schedules/{sid}/upload-session", headers=SVC,
+                           json={
         "session_uri": uri, "content_length": 4096,
     }).status_code == 200
     _run("UPDATE upload_sessions SET expires_at = now() - interval '1 minute' "
          "WHERE schedule_id = $1", sid)
-    assert client.get(f"/schedules/{sid}/upload-session").status_code == 404
+    assert auth_client.get(
+        f"/schedules/{sid}/upload-session", headers=SVC).status_code == 404
     rows = _run("SELECT 1 FROM upload_sessions WHERE schedule_id = $1", sid)
     assert rows == []
+
+
+def test_upload_session_capability_is_forbidden_to_reviewers(auth_client):
+    import uuid
+    path = f"/schedules/{uuid.uuid4()}/upload-session"
+    assert auth_client.get(path, headers=AUTH).status_code == 403
+    assert auth_client.put(path, headers=AUTH, json={
+        "session_uri": "https://www.googleapis.com/upload/youtube/v3/videos"
+                       "?uploadType=resumable&upload_id=secret",
+        "content_length": 10,
+    }).status_code == 403
+    assert auth_client.delete(path, headers=AUTH).status_code == 403
 
 
 # ------------------------------------------------- v0.18: settings + metrics

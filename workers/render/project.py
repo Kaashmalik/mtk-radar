@@ -90,6 +90,7 @@ def build_edit_manifest(
     covers: Optional[list[dict[str, Any]]] = None,
     motion: Optional[dict[str, Any]] = None,
     captions_language: str = "en",
+    timeline: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return {
         "product": "MTK RADAR AI",
@@ -115,6 +116,7 @@ def build_edit_manifest(
             },
             "covers": covers or [],
             "motion": motion or {},
+            "timeline": timeline or {},
         },
         "renders": renders,
         "disclosure": {
