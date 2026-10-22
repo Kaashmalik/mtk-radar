@@ -11,6 +11,11 @@ do not establish full end-to-end or production readiness. See the
 for current gaps, actual checks run and release-blocking safety work. The
 historical verification counts below must be re-proven for each release.
 
+For the laptop-first low-cost deployment, student/free-resource limits,
+Render/MongoDB credits and the split-VPS fallback, see
+[`cost-laptop-vps-2026-10-22.md`](cost-laptop-vps-2026-10-22.md). The cost note
+does not relax any gate in this checklist.
+
 **Rule zero:** secrets live in the deploy environment (or a vault), never in
 the database, never in the browser, never in git. The database only records
 *where* a credential lives (`credential_source`, e.g. `env:YOUTUBE_`).
@@ -115,6 +120,15 @@ identity in `audit_log` (§15).
 | `MTK_S3_*` (+ `MTK_STORAGE_BACKEND=s3`) | portable renders/captures **and** the off-host copy of every backup (recommended) |
 | `MTK_S3_*` + `MTK_STORAGE_BACKEND=s3` | portable renders/captures (any S3-compatible store) |
 | `MTK_PUBLIC_MEDIA_BASE_URL` | public CDN/bucket origin — **required for Instagram** |
+| `MTK_NOTIFY_WEBHOOK_URL` / `MTK_NOTIFY_WEBHOOK_TOKEN` | optional JSON alert digest (Slack/Discord/your receiver); token is sent as a Bearer header |
+| `MTK_NOTIFY_EMAIL_TO` + `MTK_SMTP_*` | optional SMTP email digest from the monitor (Gmail needs an App Password) |
+
+Alert delivery setup, payload schema and the free-Supabase boundaries are in
+[`notifications.md`](notifications.md). Test it once before relying on it:
+
+```bash
+python workers/monitor/main.py --test-notification
+```
 
 ---
 
@@ -211,6 +225,7 @@ adapter stays disabled (posts are skipped, not failed).
 | Dead platform token | `ALERT token expiry …` in the publishing log → re-consent (§3) → account returns to `active` |
 | Offer expired | monitor sweep auto-pauses scheduled posts; the offer page shows the correction path |
 | Metrics empty | check the OAuth scope (`yt-analytics.readonly`) and the metrics worker log |
+| Alerts only in the log | set the webhook/email variables, restart `monitor`, then run `--test-notification`; see [`notifications.md`](notifications.md) |
 | Post shows "HELD" on the calendar | a previous upload's outcome is unknown — check the platform first (it may already be live), then re-queue or cancel the post |
 | Reviewer token lost | `python -m scripts.mint_reviewer --name "Kashi"` → mint a new one |
 

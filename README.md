@@ -238,6 +238,8 @@ browser step.
 - [`docs/language-policy.md`](docs/language-policy.md) — **English-first packaging**: English titles/captions by default, opt-in Urdu voiceover, caption wrapping/fonts, and API validation.
 - [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
 - [`docs/runbook.md`](docs/runbook.md) — **operational runbook**: deployment, migrations, backup/restore drills, credential & source recovery, incident playbooks, retention policy, first production review.
+- [`docs/cost-laptop-vps-2026-10-22.md`](docs/cost-laptop-vps-2026-10-22.md) — **low-cost hosting**: cost scenarios, student/free-resource stack, laptop production setup, Render/MongoDB credits, Supabase/Cloudinary/Drive tradeoffs, and the split-VPS fallback when the laptop is off.
+- [`docs/notifications.md`](docs/notifications.md) — **monitor webhook/email alerts**: payload schema, SMTP/Gmail setup, webhook security, test command, troubleshooting, and which parts can (and cannot) run on free Supabase.
 - [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, obligations, and the evaluated-but-not-adopted list.
 - [`docs/go-live-checklist.md`](docs/go-live-checklist.md) — **the operator procedure**: which keys to add, how to connect each social account, the first real post, and the daily/weekly operations.
 - [`docs/master-plan-traceability.md`](docs/master-plan-traceability.md) — every master-plan item mapped to its code and its proof.

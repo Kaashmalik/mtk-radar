@@ -10,12 +10,20 @@ drives detection and surfaces alerts:
      scheduled posts).
   2. GET /platform-accounts — alert on token_expired/revoked accounts and
      soon-expiring tokens.
+  3. GET /analytics — alert when published posts have no metrics, or when
+     the last audience snapshot is stale.
+
+Alerts are always logged. If MTK_NOTIFY_WEBHOOK_URL and/or SMTP settings are
+configured, one digest is also POSTed to the webhook and emailed (subject to
+MTK_NOTIFY_COOLDOWN_S so a persistent alert does not repeat every tick).
 
 Usage:
     python main.py [--once] [--api http://localhost:8000] [--interval 300]
+    python main.py --test-notification
 """
 
 import argparse
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -23,6 +31,8 @@ from datetime import datetime, timezone
 import os
 import signal
 import httpx
+
+import notifications
 
 
 _API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
@@ -40,8 +50,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("monitor")
 
 
-def sweep_offers(client: httpx.Client) -> None:
+def sweep_offers(client: httpx.Client) -> list[dict]:
     """Expire past-due offers + queue overdue rechecks via the API."""
+    alerts: list[dict] = []
     try:
         res = client.post("/offers/sweep-stale")
         res.raise_for_status()
@@ -50,17 +61,31 @@ def sweep_offers(client: httpx.Client) -> None:
             log.info("sweep: %d offer(s) expired, %d recheck(s) queued "
                      "(scheduled posts auto-paused by trigger)",
                      data["expired"], data["recheck_queued"])
-    except httpx.HTTPError as exc:
+            alerts.append({
+                "severity": "warning",
+                "event": "offers.sweep",
+                "message": ("%d offer(s) expired and %d recheck(s) were queued; "
+                            "affected scheduled posts are auto-paused."
+                            % (int(data.get("expired") or 0),
+                               int(data.get("recheck_queued") or 0))),
+                "details": {
+                    "expired": int(data.get("expired") or 0),
+                    "recheck_queued": int(data.get("recheck_queued") or 0),
+                },
+            })
+    except (httpx.HTTPError, ValueError) as exc:
         log.error("offer sweep failed: %s", exc)
+    return alerts
 
 
-def check_platform_accounts(client: httpx.Client) -> None:
+def check_platform_accounts(client: httpx.Client) -> list[dict]:
     """Token-expiry monitor: dead sessions block publishing — alert loudly."""
+    alerts: list[dict] = []
     try:
         accounts = client.get("/platform-accounts").json()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         log.error("cannot list platform accounts: %s", exc)
-        return
+        return alerts
 
     now = datetime.now(timezone.utc)
     for account in accounts:
@@ -70,6 +95,19 @@ def check_platform_accounts(client: httpx.Client) -> None:
                       "refresh credentials then re-register: %s",
                       account.get("account_handle"), account.get("platform"),
                       status, account.get("last_error"))
+            alerts.append({
+                "severity": "error",
+                "event": f"platform_account.{status}",
+                "message": ("Platform account %s (%s) is %s; publishing is paused."
+                            % (account.get("account_handle"), account.get("platform"),
+                               status)),
+                "details": {
+                    "platform": account.get("platform"),
+                    "account_handle": account.get("account_handle"),
+                    "status": status,
+                    "last_error": account.get("last_error"),
+                },
+            })
         elif status == "active" and account.get("expires_at"):
             try:
                 exp = datetime.fromisoformat(str(account["expires_at"]).replace("Z", "+00:00"))
@@ -77,50 +115,95 @@ def check_platform_accounts(client: httpx.Client) -> None:
                 if days <= TOKEN_WARN_DAYS:
                     log.warning("ALERT token for %s (%s) expires in %.1f day(s) — refresh soon",
                                 account.get("account_handle"), account.get("platform"), days)
+                    alerts.append({
+                        "severity": "warning",
+                        "event": "platform_account.expiring",
+                        "message": ("Token for %s (%s) expires in %.1f day(s)."
+                                    % (account.get("account_handle"),
+                                       account.get("platform"), days)),
+                        "details": {
+                            "platform": account.get("platform"),
+                            "account_handle": account.get("account_handle"),
+                            "expires_at": account.get("expires_at"),
+                            "days_remaining": round(days, 1),
+                        },
+                    })
             except ValueError:
                 pass
+    return alerts
 
 
-def check_metrics_freshness(client: httpx.Client) -> None:
+def check_metrics_freshness(client: httpx.Client) -> list[dict]:
     """Audience-metrics freshness (v0.20): published posts that nobody
     measures are a silent blind spot — the operator thinks reach is known
     while the numbers are days old (or missing because a scope/reason
     stopped the pull)."""
+    alerts: list[dict] = []
     try:
         data = client.get("/analytics").json()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         log.warning("cannot read analytics for metrics freshness: %s", exc)
-        return
+        return alerts
 
     totals = data.get("metrics_totals") or {}
     published = int(totals.get("published_total") or 0)
     if published == 0:
-        return
+        return alerts
     measured = int(totals.get("posts_measured") or 0)
     if measured == 0:
         log.error("ALERT %d published post(s) but no audience metrics at all — "
                   "the metrics worker has no access (OAuth scope / credentials) "
                   "or has not run yet", published)
-        return
+        alerts.append({
+            "severity": "error",
+            "event": "metrics.missing",
+            "message": ("%d published post(s) have no audience metrics; the "
+                        "metrics worker has no access or has not run yet."
+                        % published),
+            "details": {"published_total": published, "posts_measured": 0},
+        })
+        return alerts
     last = totals.get("last_captured_at")
     if not last:
-        return
+        return alerts
     try:
         captured = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
     except ValueError:
-        return
+        return alerts
     if captured.tzinfo is None:
         captured = captured.replace(tzinfo=timezone.utc)
     hours = (datetime.now(timezone.utc) - captured).total_seconds() / 3600
     if hours > METRICS_STALE_HOURS:
         log.warning("ALERT audience metrics are %.0fh old (%d/%d posts measured) — "
                     "the metrics sweep may have stopped", hours, measured, published)
+        alerts.append({
+            "severity": "warning",
+            "event": "metrics.stale",
+            "message": ("Audience metrics are %.0fh old (%d/%d posts measured); "
+                        "the metrics sweep may have stopped."
+                        % (hours, measured, published)),
+            "details": {
+                "hours_old": round(hours, 1),
+                "posts_measured": measured,
+                "published_total": published,
+                "last_captured_at": last,
+            },
+        })
+    return alerts
 
 
-def run_once(client: httpx.Client) -> None:
-    sweep_offers(client)
-    check_platform_accounts(client)
-    check_metrics_freshness(client)
+def run_once(client: httpx.Client) -> list[dict]:
+    alerts: list[dict] = []
+    alerts.extend(sweep_offers(client))
+    alerts.extend(check_platform_accounts(client))
+    alerts.extend(check_metrics_freshness(client))
+    if alerts:
+        try:
+            result = notifications.notify(alerts)
+            log.info("notification result: %s", result)
+        except Exception as exc:  # noqa: BLE001 — alerting must not stop the sweep
+            log.exception("notification delivery crashed: %s", exc)
+    return alerts
 
 
 # ---------------------------------------------------------- graceful stop
@@ -145,9 +228,36 @@ def _install_stop_handlers() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="MTK RADAR expiry/token monitor")
     parser.add_argument("--once", action="store_true", help="run one sweep and exit")
+    parser.add_argument(
+        "--test-notification",
+        action="store_true",
+        help="send one test alert to the configured webhook/email and exit",
+    )
     parser.add_argument("--api", default=API_URL_DEFAULT)
     parser.add_argument("--interval", type=int, default=INTERVAL_S)
     args = parser.parse_args()
+
+    config = notifications.NotificationConfig.from_env()
+    log.info("notification config: %s", config.public_summary())
+
+    if args.test_notification:
+        alert = {
+            "severity": "info",
+            "event": "monitor.test",
+            "message": "Test notification from the MTK RADAR monitor worker.",
+            "details": {
+                "service": "monitor",
+                "note": "No production alert was raised.",
+            },
+        }
+        result = notifications.notify([alert], config=config, force=True)
+        print(json.dumps({
+            "notification_config": config.public_summary(),
+            "delivery": result,
+        }, indent=2, sort_keys=True))
+        if "failed" in result.values():
+            raise SystemExit(1)
+        return
 
     client = httpx.Client(timeout=60, base_url=args.api.rstrip("/"), headers=_api_auth_headers())
     _install_stop_handlers()
