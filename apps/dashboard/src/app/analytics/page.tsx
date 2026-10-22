@@ -41,22 +41,53 @@ type Analytics = {
     likes: number | string;
     comments: number | string;
     impressions: number | string;
+    link_clicks?: number | string;
+    subscribers_gained?: number | string;
+    avg_ctr?: number | null;
+    avg_retention_3s?: number | null;
     last_captured_at: string | null;
     published_total: number;
   } | null;
   content_performance: {
     id: string;
     platform: string;
+    language?: string;
     offer_title: string;
     remote_post_id: string | null;
     views: number | null;
     likes: number | null;
     comments: number | null;
     avg_watch_s: number | null;
+    ctr?: number | null;
+    retention_3s?: number | null;
+    link_clicks?: number | null;
     captured_at: string;
     source: string;
     description_patched_at: string | null;
   }[];
+  growth: {
+    score: number;
+    measured_posts: number;
+    by_platform: { platform: string; posts: number; views: number; engagement: number; reach: number }[];
+    recommendations: { priority: string; title: string; detail: string; metric: string }[];
+  } | null;
+  language_performance: {
+    language: string;
+    posts: number;
+    views: number | string;
+    avg_views: number;
+    interactions: number | string;
+  }[];
+  experiments: {
+    id: string;
+    language: string;
+    platform: string | null;
+    hypothesis: string;
+    metric: string;
+    status: string;
+    created_at: string;
+  }[];
+  trend_summary: { total?: number; hot?: number; shortlisted?: number; average_score?: number } | null;
 };
 
 async function getAnalytics(): Promise<Analytics | null> {
@@ -187,6 +218,93 @@ export default async function AnalyticsPage() {
           </section>
 
           <section className="card">
+            <div className="panel-head">
+              <div>
+                <h2>Growth loop</h2>
+                <p>Conservative recommendations from measured posts — test, do not assume causality.</p>
+              </div>
+              <span className="tag tag-accent">{data.growth?.score ?? 0}/100</span>
+            </div>
+            {!data.growth || data.growth.measured_posts === 0 ? (
+              <div className="empty-state">
+                No measured posts yet. Publish a private test, run the metrics worker, then
+                this loop will compare languages, platforms and packaging variants.
+              </div>
+            ) : (
+              <>
+                <div className="score-bar" style={{ height: 10, marginBottom: "0.9rem" }}>
+                  <span style={{ width: `${Math.min(100, data.growth.score)}%` }} />
+                </div>
+                <div className="grid-2">
+                  <div>
+                    <h3 style={{ fontSize: "0.86rem", margin: "0 0 0.4rem" }}>Next actions</h3>
+                    {data.growth.recommendations.map((recommendation) => (
+                      <div key={recommendation.title} style={{ margin: "0.65rem 0" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <span className={`tag ${recommendation.priority === "high" ? "tag-hot" : "tag-accent"}`}>
+                            {recommendation.priority}
+                          </span>
+                          <strong style={{ fontSize: "0.84rem" }}>{recommendation.title}</strong>
+                        </div>
+                        <p className="small muted" style={{ margin: "0.25rem 0 0" }}>
+                          {recommendation.detail}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <h3 style={{ fontSize: "0.86rem", margin: "0 0 0.4rem" }}>By platform</h3>
+                    {(data.growth.by_platform ?? []).map((row) => (
+                      <div className="metric-row" key={row.platform}>
+                        <span>{row.platform} · {row.posts} post(s)</span>
+                        <strong>{big(row.views)} <span className="muted small">views</span></strong>
+                      </div>
+                    ))}
+                    <h3 style={{ fontSize: "0.86rem", margin: "0.9rem 0 0.4rem" }}>By language</h3>
+                    {(data.language_performance ?? []).map((row) => (
+                      <div className="metric-row" key={row.language}>
+                        <span>{row.language === "ur" ? "اردو" : "English"} · {row.posts} post(s)</span>
+                        <strong>{big(row.avg_views)} <span className="muted small">avg views</span></strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="panel-head">
+              <div>
+                <h2>Experiments</h2>
+                <p>Packaging choices with a hypothesis and a decision state.</p>
+              </div>
+              <span className="tag">{data.experiments?.length ?? 0} tracked</span>
+            </div>
+            {(data.experiments ?? []).length === 0 ? (
+              <p className="muted small">
+                No experiments yet. Generate A/B metadata in the Content Studio and attach
+                each variant to a schedule to compare hooks.
+              </p>
+            ) : (
+              <table>
+                <thead><tr><th>Hypothesis</th><th>Language</th><th>Platform</th><th>Metric</th><th>Status</th></tr></thead>
+                <tbody>
+                  {data.experiments.map((experiment) => (
+                    <tr key={experiment.id}>
+                      <td>{experiment.hypothesis}</td>
+                      <td>{experiment.language === "ur" ? "اردو" : "English"}</td>
+                      <td>{experiment.platform ?? "all"}</td>
+                      <td>{experiment.metric}</td>
+                      <td><span className="tag">{experiment.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          <section className="card">
             <h2>Source freshness</h2>
             {(data.source_freshness ?? []).length === 0 ? (
               <p className="muted small">No sources registered yet.</p>
@@ -241,19 +359,20 @@ export default async function AnalyticsPage() {
                   <table>
                     <thead>
                       <tr>
-                        <th>post</th><th>platform</th><th>views</th><th>reactions</th>
-                        <th>comments</th><th>avg watch</th><th>captured</th>
+                        <th>post</th><th>platform / language</th><th>views</th><th>reactions</th>
+                        <th>comments</th><th>retention 3s</th><th>link clicks</th><th>captured</th>
                       </tr>
                     </thead>
                     <tbody>
                       {data.content_performance.map((p) => (
                         <tr key={p.id}>
                           <td>{p.offer_title}</td>
-                          <td>{p.platform}</td>
+                          <td>{p.platform} · {p.language === "ur" ? "اردو" : "EN"}</td>
                           <td>{p.views ?? "–"}</td>
                           <td>{p.likes ?? "–"}</td>
                           <td>{p.comments ?? "–"}</td>
-                          <td>{p.avg_watch_s != null ? fmtWatch(p.avg_watch_s) : "–"}</td>
+                          <td>{p.retention_3s != null ? `${(Number(p.retention_3s) * 100).toFixed(0)}%` : "–"}</td>
+                          <td>{p.link_clicks ?? "–"}</td>
                           <td className="small">
                             {new Date(p.captured_at).toLocaleDateString("en-GB", { timeZone: "Asia/Karachi" })}
                             {p.description_patched_at && (

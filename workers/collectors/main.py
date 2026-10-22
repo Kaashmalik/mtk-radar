@@ -132,7 +132,22 @@ class Collector:
                 log.error("API unreachable, retrying in %ss: %s", HOUSEKEEPING_INTERVAL, exc)
                 time.sleep(HOUSEKEEPING_INTERVAL)
 
+    def _collect_stage_allowed(self) -> bool:
+        try:
+            resp = self.client.get(f"{self.api_url}/automation/policy")
+            if resp.status_code >= 300:
+                return True  # legacy API — keep collecting
+            policy = (resp.json() or {}).get("policy") or {}
+            if policy.get("paused") or policy.get("dry_run"):
+                return False
+            return (policy.get("stages") or {}).get("collect") == "auto"
+        except (httpx.HTTPError, ValueError):
+            return True  # policy unavailable must not stop source health checks
+
     async def sweep(self) -> None:
+        if not self._collect_stage_allowed():
+            log.info("collection is paused/human-controlled in Settings — sweep skipped")
+            return
         resp = self.client.get(f"{self.api_url}/sources", params={"enabled": "true"})
         resp.raise_for_status()
         sources = resp.json()

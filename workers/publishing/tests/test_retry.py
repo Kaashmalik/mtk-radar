@@ -70,6 +70,20 @@ def test_backoff_elapsed_requeues_with_exponential_delay():
     assert "auto-retry 1/3" in posts[0][2]["note"]
 
 
+def test_auto_retry_disabled_in_settings_waits_for_a_human():
+    p = _worker([_failed(retry_count=0, updated_min_ago=600)])
+    p.policy = {"guardrails": {"auto_retry": False}}
+    assert p.retry_failed() == 0
+    assert p.api.calls == [], "the worker must not even read the failed queue"
+
+
+def test_settings_retry_cap_overrides_the_environment_default():
+    p = _worker([_failed(retry_count=2, updated_min_ago=5000)])
+    p.policy = {"guardrails": {"auto_retry": True, "retry_max_attempts": 2}}
+    assert p.retry_failed() == 0
+    assert not [c for c in p.api.calls if c[0] == "POST"]
+
+
 def test_max_retries_is_terminal_for_the_worker():
     p = _worker([_failed(retry_count=3, updated_min_ago=600)])
     assert p.retry_failed() == 0

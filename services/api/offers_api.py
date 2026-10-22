@@ -28,6 +28,13 @@ from api_hardening import effective_reviewer
 import tos_review
 from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
 from fetch_attestation import verify_provenance
+from automation import (
+    AutomationDenied,
+    authorize as authorize_automation,
+    guardrails as automation_guardrails,
+    is_automation_actor,
+)
+from automation_api import load_policy
 from redact import scan as scan_secrets
 from schedules_state import script_version_hash
 from schemas import (
@@ -515,10 +522,30 @@ async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Reque
             detail=f"illegal transition {current} → {target}",
         )
 
-    # §3: approval targets must name a human — a bound reviewer token satisfies
-    # this even when the body omits the field.
+    # §3/§17: approval targets must name a human — a bound reviewer token
+    # satisfies this even when the body omits the field. v0.26: an automation
+    # actor is only accepted when the settings policy explicitly enables that
+    # stage; otherwise the write is refused exactly like an anonymous one.
     reviewer_on_record = effective_reviewer(request, t.reviewer)
-    if requires_review(target) and not reviewer_on_record:
+    policy = await load_policy()
+    if is_automation_actor(reviewer_on_record):
+        stage = _automation_stage_for(target)
+        if stage is None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"automation may not perform the transition to '{target}'",
+            )
+        try:
+            # canonical actor: audit/approval rows use automation:<stage>, so
+            # case/whitespace variants cannot dodge the daily budget query.
+            reviewer_on_record = authorize_automation(policy, stage, reviewer_on_record)
+        except AutomationDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        if target == "verified":
+            await _gate_automation_verify(pool, offer_id, policy, reviewer_on_record)
+        elif target == "approved_for_video":
+            await _gate_automation_approve(pool, offer_id, policy)
+    elif requires_review(target) and not reviewer_on_record:
         raise HTTPException(
             status_code=403,
             detail=f"transition to '{target}' requires a recorded reviewer",
@@ -770,9 +797,10 @@ async def list_scripts(offer_id: uuid.UUID) -> list[dict]:
     pool = db.get()
     rows = await pool.fetch(
         """
-        SELECT id, version, markdown, command_cards::text AS command_cards,
-               created_by, created_at
-        FROM offer_scripts WHERE offer_id = $1 ORDER BY version DESC
+        SELECT id, version, language, markdown, command_cards::text AS command_cards,
+               metadata::text AS metadata, created_by, created_at
+        FROM offer_scripts WHERE offer_id = $1
+        ORDER BY language, version DESC
         """,
         offer_id,
     )
@@ -820,6 +848,139 @@ async def sweep_stale() -> dict:
 
 
 # ---------------------------------------------------------------- gates
+
+
+AUTOMATION_TARGET_STAGES = {
+    "verified": "verify",
+    "approved_for_video": "approve",
+    # 'published' is deliberately absent: an offer is only marked published
+    # after the publishing result, not by an unattended state change.
+}
+
+
+def _automation_stage_for(target: str) -> Optional[str]:
+    return AUTOMATION_TARGET_STAGES.get(target)
+
+
+async def _gate_automation_verify(pool: asyncpg.Pool, offer_id: uuid.UUID,
+                                  policy: dict, actor: str) -> None:
+    """Extra guardrails for ``automation:verify``.
+
+    The normal verification gate (official + domain-checked evidence + complete
+    extraction) is still applied separately. This adds the quality bar an
+    unattended run must clear: confidence, freshness, no conflicts, and no
+    open correction note.
+    """
+    limits = automation_guardrails(policy)
+    row = await pool.fetchrow(
+        """
+        SELECT o.confidence::float AS confidence, o.correction_note,
+               (SELECT MAX(e.captured_at) FROM evidence e
+                 WHERE e.offer_id = o.id AND e.official AND e.domain_ok) AS last_official_at,
+               (SELECT x.conflicts::text FROM extractions x
+                 WHERE x.offer_id = o.id ORDER BY x.created_at DESC LIMIT 1) AS conflicts
+        FROM offers o WHERE o.id = $1
+        """,
+        offer_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="offer not found")
+
+    problems: list[str] = []
+    minimum = float(limits["auto_verify_min_confidence"])
+    confidence = float(row["confidence"] or 0.0)
+    if confidence < minimum:
+        problems.append(
+            f"confidence {confidence:.2f} is below auto_verify_min_confidence {minimum:.2f}")
+
+    conflicts = json.loads(row["conflicts"]) if row["conflicts"] else []
+    if conflicts:
+        problems.append(f"{len(conflicts)} extraction conflict(s) require human triage")
+
+    if (row["correction_note"] or "").strip():
+        problems.append("an open correction note requires human review before re-verification")
+
+    last = row["last_official_at"]
+    if last is None:
+        problems.append("no official evidence timestamp")
+    else:
+        age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+        max_age = int(limits["auto_verify_max_evidence_age_hours"])
+        if age_h > max_age:
+            problems.append(
+                f"newest official evidence is {age_h:.1f}h old "
+                f"(auto_verify_max_evidence_age_hours={max_age})")
+
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail="automation verification refused: " + "; ".join(problems),
+        )
+    await _audit(pool, actor=actor, action="automation:verify:gates-passed",
+                 entity="offers", entity_id=offer_id,
+                 detail={"confidence": confidence, "limits": limits})
+
+
+async def _gate_automation_approve(pool: asyncpg.Pool, offer_id: uuid.UUID,
+                                   policy: dict) -> None:
+    """Unattended approval requires a completed, reviewable video package.
+
+    A human can still approve an offer before rendering if they choose; the
+    automation cannot. This is the guardrail that keeps autopilot from
+    queueing an offer that has no footage behind it.
+    """
+    limits = automation_guardrails(policy)
+    offer = await pool.fetchrow(
+        "SELECT correction_note FROM offers WHERE id = $1", offer_id
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+
+    problems: list[str] = []
+    if (offer["correction_note"] or "").strip():
+        problems.append("an open correction note requires human review before approval")
+
+    script = await pool.fetchrow(
+        "SELECT version, markdown, command_cards::text AS command_cards "
+        "FROM offer_scripts WHERE offer_id = $1 ORDER BY version DESC LIMIT 1",
+        offer_id,
+    )
+    if not script:
+        problems.append("no generated script exists")
+
+    render = await pool.fetchrow(
+        """
+        SELECT r.id, r.script_version_hash, c.redaction_reviewed
+        FROM renders r LEFT JOIN capture_sessions c ON c.id = r.capture_id
+        WHERE r.offer_id = $1 ORDER BY r.created_at DESC LIMIT 1
+        """,
+        offer_id,
+    )
+    if limits.get("auto_approve_requires_render", True):
+        if not render:
+            problems.append("no render exists (auto_approve_requires_render)")
+        else:
+            if render["redaction_reviewed"] is not True:
+                problems.append("the latest render's capture has not passed redaction review")
+            if script:
+                current_hash = script_version_hash(script["markdown"])
+                if render["script_version_hash"] != current_hash:
+                    problems.append("the latest render is not from the current script version")
+
+    if script and limits.get("auto_approve_block_unsafe_commands", True):
+        try:
+            cards = json.loads(script["command_cards"]) if script["command_cards"] else []
+        except (TypeError, ValueError):
+            cards = []
+        unsafe = [c for c in cards if isinstance(c, dict) and c.get("unsafe_reasons")]
+        if unsafe:
+            problems.append(f"{len(unsafe)} unsafe command card(s) require human review")
+
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail="automation approval refused: " + "; ".join(problems),
+        )
 
 
 async def _verified_problems(pool, offer_id: uuid.UUID) -> list[str]:

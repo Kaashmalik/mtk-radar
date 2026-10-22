@@ -31,13 +31,54 @@ Candidate → Evidence needed → Verified → Approved for video → Published 
 
 Video generation is **blocked** from `Candidate` or `Evidence needed` states. If terms change, scheduled posts pause automatically and affected videos are marked stale.
 
+## Automation & Human Control
+
+Every pipeline stage — collect, verify, script, render, approve, schedule — is
+controlled by one policy in **Settings → Automation control**. Pick a preset or
+mix stages yourself:
+
+| Mode | Mechanical work | Offer & post approval | Scheduling |
+|---|---|---|---|
+| **Manual** | human-triggered | human only | human only |
+| **Assisted** (default) | automatic | **human** | **human** |
+| **Autopilot** | automatic | automatic inside guardrails | automatic inside guardrails |
+
+The API re-checks the policy on every gated write, so a stale or forged worker
+cannot skip a human stage. Automations are audited as `automation:<stage>`, and
+guardrails cap confidence, evidence age, platform/privacy, and unattended
+approvals per day. The **Pause all automation** switch stops unattended
+progress immediately; **dry-run** reports what would happen without changing
+anything. Some guarantees are not configurable: `verified` always needs
+official, domain-checked evidence; redaction review is always human; a render
+can only publish when its script hash matches the approved hash; and expiry or
+corrections auto-pause queued posts.
+
+See [`docs/automation-and-human-control.md`](docs/automation-and-human-control.md)
+for the full matrix, guardrails, API, and rollout advice.
+
+## Language & Packaging
+
+Titles, descriptions, hashtags, cover text, CTA and on-screen captions are
+**English by default for every video**. Urdu is an **opt-in voiceover only**:
+enable it in **Settings → Language policy** when you want an Urdu-spoken
+version, while the package stays English and searchable. The renderer skips
+disabled languages, and Content Studio/scheduling/render registration reject
+them, so no worker can quietly publish an unapproved language.
+
+Captions are generated from the real capture step log, split into readable
+chunks, and rendered with a legible font, safe margins and 9:16-aware sizing.
+Override the font with `MTK_CAPTION_FONT` if you install another one.
+
+See [`docs/language-policy.md`](docs/language-policy.md) for defaults,
+validation, and the English-first rationale.
+
 ## Key Principles
 
 - **Source registry, not scraping.** Each source has an owner, official identifier, collection method, trust tier, and polling cadence. Social posts are discovery signals; official terms pages are the evidence.
 - **Immutable evidence snapshots.** Page URL, retrieval timestamp, publisher identity, text excerpt, and content hash — stored and reviewable.
 - **Tiered trust:** Tier A (provider-owned) can support verification; Tier B (X, Reddit, HN, Discord) only creates leads; Tier C (coupon aggregators, leaked codes) is excluded until official confirmation exists.
 - **Real walkthroughs only.** No staged success screens, no implied universal results, no secrets on camera. Commands come from official docs, are tested in a clean environment, and are shown with expected output.
-- **Human approval before publishing,** with pause/cancel/edit controls after scheduling.
+- **Human approval before publishing by default,** with pause/cancel/edit controls after scheduling. Automation can be enabled per stage in Settings, but never bypasses evidence, redaction, or script-hash guarantees.
 
 ## Architecture
 
@@ -104,6 +145,8 @@ docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
 ```
 
 - Dashboard (operator console): http://localhost:3000 · API health: http://localhost:8000/health
+- Choose how much runs unattended in **Settings → Automation control** (default:
+  Assisted — approve and schedule stay human)
 - The schema is owned by the migration runner (`db_migrate.py`) — run it once
   after the first boot; it records what it applied in `schema_migrations`
 - Extension: load `apps/extension/` via `chrome://extensions` → Developer mode → Load unpacked
@@ -191,6 +234,8 @@ browser step.
 - [`docs/first-offer-recipe.md`](docs/first-offer-recipe.md) — the pilot case-study recipe: pre-flight, script, guided capture, redaction review, hard no's.
 - [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — upstream repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
 - [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
+- [`docs/automation-and-human-control.md`](docs/automation-and-human-control.md) — **automation policy**: manual/assisted/autopilot modes, per-stage control, server-enforced guardrails, kill switch and dry-run.
+- [`docs/language-policy.md`](docs/language-policy.md) — **English-first packaging**: English titles/captions by default, opt-in Urdu voiceover, caption wrapping/fonts, and API validation.
 - [`docs/security-and-redaction.md`](docs/security-and-redaction.md) — secrets, capture, and privacy rules that block release if violated.
 - [`docs/runbook.md`](docs/runbook.md) — **operational runbook**: deployment, migrations, backup/restore drills, credential & source recovery, incident playbooks, retention policy, first production review.
 - [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, obligations, and the evaluated-but-not-adopted list.
@@ -210,6 +255,8 @@ browser step.
 | 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 |
 | 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ✅ v0.19 (needs your keys) |
 | 7. Analytics & scale | Views, corrections, source freshness | Data improves packaging without weakening verification | ✅ v0.18, v0.22, v0.24 |
+| 8. Automation & control | Manual / assisted / autopilot policy per stage | Every gated write re-checks the policy; human stages cannot be bypassed | ✅ v0.26 |
+| 9. Production polish | Trend radar, bilingual studio, covers/motion, English-first packaging, growth analytics | English package + captions for every video; Urdu voiceover opt-in; verified render/schedule path | ✅ v0.27 |
 
 Remaining, with reasons: SSO/self-serve logins (single-operator token model is
 sufficient — see runbook §9), Postgres HA (single instance at this scale), and

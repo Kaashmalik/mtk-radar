@@ -23,6 +23,13 @@ from pydantic import BaseModel, Field
 import db
 from api_hardening import effective_reviewer
 from offer_freshness import freshness_problem
+from automation import (
+    AutomationDenied,
+    authorize as authorize_automation,
+    guardrails as automation_guardrails,
+    is_automation_actor,
+)
+from automation_api import _budget_used, load_policy
 from schedules_state import (
     PLATFORMS,
     ScheduleTransitionError,
@@ -30,6 +37,7 @@ from schedules_state import (
     script_version_hash,
     validate_transition,
 )
+from settings_store import get_language_policy, get_value
 from state import can_generate_video
 
 router = APIRouter(tags=["schedules"])
@@ -44,6 +52,13 @@ class ScheduleIn(BaseModel):
     timezone: str = "Asia/Karachi"
     privacy: str = "private"  # test posts default private (§18 week 9)
     caption_variant: str = "default"
+    # v0.27 content packaging. Defaults keep every existing caller working.
+    language: str = "en"
+    content_variant_id: Optional[uuid.UUID] = None
+    metadata_variant: str = "default"
+    cover_path: Optional[str] = None
+    pinned_comment: Optional[str] = None
+    website_url: Optional[str] = None
 
 
 class ScheduleTransitionIn(BaseModel):
@@ -70,8 +85,9 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
     pool = db.get()
     offer = await pool.fetchrow(
         """
-        SELECT id, title, provider, state::text AS state, eligibility::text AS eligibility,
-               renewal::text AS renewal, expires_at
+        SELECT id, title, provider, category, offer_type, state::text AS state,
+               eligibility::text AS eligibility, renewal::text AS renewal,
+               redemption_url, expires_at
         FROM offers WHERE id = $1
         """,
         offer_id,
@@ -93,21 +109,35 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             status_code=400,
             detail=f"unsupported platform — known: {', '.join(PLATFORMS)}",
         )
+    if body.language not in ("en", "ur"):
+        raise HTTPException(status_code=422, detail="language must be 'en' or 'ur'")
+    language_policy = await get_language_policy(pool)
+    if body.language not in language_policy["narration_languages"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{body.language} voiceover is disabled in Settings → Language policy",
+        )
     if offer["expires_at"] and offer["expires_at"] <= datetime.now(offer["expires_at"].tzinfo or None):
         raise HTTPException(status_code=409, detail="offer already expired — cannot schedule")
 
     # §17: each queued post must reference an approved video version + valid evidence.
+    # v0.27: the render must match the language being scheduled; falling back to a
+    # different-language render would put the wrong narration/captions on a post.
     render = await pool.fetchrow(
         """
-        SELECT r.id, r.video_path, r.disclosure::text AS disclosure, c.redaction_reviewed
+        SELECT r.id, r.video_path, r.language, r.cover_path,
+               r.disclosure::text AS disclosure, c.redaction_reviewed
         FROM renders r LEFT JOIN capture_sessions c ON c.id = r.capture_id
-        WHERE r.offer_id = $1
+        WHERE r.offer_id = $1 AND r.language = $2
         ORDER BY r.created_at DESC LIMIT 1
         """,
-        offer_id,
+        offer_id, body.language,
     )
     if not render:
-        raise HTTPException(status_code=409, detail="no render exists — render the video first")
+        raise HTTPException(
+            status_code=409,
+            detail=f"no {body.language} render exists — render this language first",
+        )
     if render["redaction_reviewed"] is False:
         raise HTTPException(
             status_code=409,
@@ -115,8 +145,9 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         )
 
     scripts = await pool.fetch(
-        "SELECT version, markdown FROM offer_scripts WHERE offer_id = $1 ORDER BY version DESC LIMIT 1",
-        offer_id,
+        "SELECT version, markdown FROM offer_scripts "
+        "WHERE offer_id = $1 AND language = $2 ORDER BY version DESC LIMIT 1",
+        offer_id, body.language,
     )
     version_hash = script_version_hash(scripts[0]["markdown"]) if scripts else None
 
@@ -124,25 +155,72 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         "SELECT url FROM evidence WHERE offer_id = $1 AND official AND domain_ok",
         offer_id,
     )
-    correction_base = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    metadata = platform_metadata(
-        body.platform, dict(offer), [r["url"] for r in evidence],
-        json.loads(render["disclosure"]) if render["disclosure"] else {},
-        correction_url=f"{correction_base}/offers/{offer_id}" if correction_base else None,
-    )
+    brand = await get_value(pool, "brand")
+    brand_value = (brand or {}).get("value") or {}
+    website = body.website_url or brand_value.get("website_url") or offer.get("redemption_url") or None
 
-    idempotency_key = f"{offer_id}:{body.platform}:{body.local_time.isoformat()}:{version_hash or ''}"
+    # An approved metadata variant can be scheduled directly. It must belong to
+    # this offer and match the platform/language, so a stale variant cannot be
+    # silently posted cross-platform.
+    metadata: dict
+    scheduled_variant_key = body.metadata_variant
+    if body.content_variant_id:
+        variant = await pool.fetchrow(
+            """
+            SELECT id, kind, platform, language, variant_key, payload::text AS payload
+            FROM content_variants
+            WHERE id = $1 AND offer_id = $2
+            """,
+            body.content_variant_id, offer_id,
+        )
+        if not variant:
+            raise HTTPException(status_code=404, detail="content variant not found for this offer")
+        if variant["kind"] != "metadata":
+            raise HTTPException(status_code=409, detail="only metadata variants can be scheduled")
+        if variant["platform"] not in (None, body.platform):
+            raise HTTPException(status_code=409, detail="content variant belongs to another platform")
+        if variant["language"] != body.language:
+            raise HTTPException(status_code=409, detail="content variant belongs to another language")
+        try:
+            metadata = json.loads(variant["payload"])
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="content variant payload is invalid") from exc
+        scheduled_variant_key = variant["variant_key"]
+    else:
+        correction_base = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        metadata = platform_metadata(
+            body.platform, dict(offer), [r["url"] for r in evidence],
+            json.loads(render["disclosure"]) if render["disclosure"] else {},
+            correction_url=f"{correction_base}/offers/{offer_id}" if correction_base else None,
+            website_url=website,
+            # English-first: the public package stays in the configured copy
+            # language even when the voiceover is Urdu.
+            language=language_policy["metadata_language"],
+            variant=body.metadata_variant,
+        )
+
+    cover_path = body.cover_path or render["cover_path"]
+    pinned_comment = body.pinned_comment or metadata.get("pinned_comment")
+
+    idempotency_key = (
+        f"{offer_id}:{body.platform}:{body.local_time.isoformat()}:"
+        f"{body.language}:{body.caption_variant}:{body.metadata_variant}:{version_hash or ''}"
+    )
     try:
         row = await pool.fetchrow(
             """
             INSERT INTO schedules (offer_id, platform, local_time, timezone, privacy,
-                                   caption_variant, idempotency_key, version_hash, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                                   caption_variant, idempotency_key, version_hash, metadata,
+                                   language, content_variant_id, cover_path, pinned_comment,
+                                   metadata_variant)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id, state::text AS state, idempotency_key
             """,
             offer_id, body.platform, body.local_time, body.timezone, body.privacy,
             body.caption_variant, idempotency_key, version_hash, json.dumps(metadata),
+            body.language, body.content_variant_id, cover_path, pinned_comment,
+            scheduled_variant_key,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"schedule insert failed: {exc}") from exc
@@ -158,9 +236,14 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
     await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
                  action="create_schedule", entity="schedules",
                  entity_id=row["id"], detail={"platform": body.platform,
-                                              "privacy": body.privacy})
+                                              "privacy": body.privacy,
+                                              "language": body.language,
+                                              "metadata_variant": scheduled_variant_key})
     return {"id": row["id"], "state": row["state"], "created": True,
-            "idempotency_key": idempotency_key, "metadata": metadata}
+            "idempotency_key": idempotency_key, "language": body.language,
+            "metadata_language": metadata.get("language", language_policy["metadata_language"]),
+            "cover_path": cover_path, "pinned_comment": pinned_comment,
+            "metadata_variant": scheduled_variant_key, "metadata": metadata}
 
 
 # ---------------------------------------------------------------- calendar
@@ -177,8 +260,9 @@ async def list_schedules(
         SELECT s.id, s.offer_id, o.title AS offer_title, o.provider AS offer_provider,
                s.platform, s.state::text AS state, s.local_time, s.timezone,
                s.privacy, s.caption_variant, s.version_hash, s.approved_by,
-               s.metadata::text AS metadata, s.retry_count, s.updated_at,
-               s.description_patched_at,
+               s.metadata::text AS metadata, s.language, s.content_variant_id,
+               s.cover_path, s.pinned_comment, s.metadata_variant,
+               s.retry_count, s.updated_at, s.description_patched_at,
                s.remote_post_id, s.outcome_detail::text AS outcome_detail, s.created_at
         FROM schedules s JOIN offers o ON o.id = s.offer_id
         WHERE ($1::text IS NULL OR s.state::text = $1)
@@ -217,6 +301,65 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
     pool = db.get()
     schedule = await _load(pool, schedule_id)
     reviewer_on_record = effective_reviewer(request, body.reviewer)
+    policy = await load_policy()
+
+    # v0.26: automation may approve/schedule only when Settings enables that
+    # stage. A human reviewer token always wins (identity binding), so this
+    # path is reachable only by workers using the service token + explicit
+    # automation:<stage> actor.
+    if is_automation_actor(reviewer_on_record):
+        stage = "approve" if body.to == "approved" else "schedule" if body.to == "scheduled" else None
+        if stage is None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"automation may not perform the schedule transition to '{body.to}'",
+            )
+        if body.to == "scheduled" and schedule["state"] == "paused":
+            raise HTTPException(
+                status_code=403,
+                detail="automation may not resume a paused post — a named human must decide",
+            )
+        try:
+            # canonical actor: approved_by must stay in the 'automation:%'
+            # namespace the budget/status queries count.
+            reviewer_on_record = authorize_automation(policy, stage, reviewer_on_record)
+        except AutomationDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        limits = automation_guardrails(policy)
+        if body.to == "approved":
+            used = await _budget_used(pool)
+            if used >= int(limits["auto_publish_max_per_day"]):
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "automation daily approval budget exhausted "
+                        f"({used}/{limits['auto_publish_max_per_day']}) — "
+                        "raise auto_publish_max_per_day in Settings or approve manually"
+                    ),
+                )
+            await _gate_automation_schedule(pool, schedule)
+        elif body.to == "scheduled":
+            # Re-check the live offer and the auto-schedule guardrails even when
+            # approval happened earlier: a post can sit in the queue while the
+            # offer expires or the platform policy changes.
+            await _gate_automation_schedule(pool, schedule)
+            if schedule["platform"] not in limits["auto_schedule_platforms"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"automation may not schedule '{schedule['platform']}' — "
+                        "allowed: " + ", ".join(limits["auto_schedule_platforms"])
+                    ),
+                )
+            if schedule["privacy"] != limits["auto_schedule_privacy"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"automation may only schedule {limits['auto_schedule_privacy']} "
+                        f"posts (this post is {schedule['privacy']}); a human must schedule it"
+                    ),
+                )
+
     try:
         validate_transition(schedule["state"], body.to,
                             reviewer=reviewer_on_record, version_hash=schedule["version_hash"])
@@ -289,7 +432,19 @@ async def pause(schedule_id: uuid.UUID, note: Optional[str] = None,
 @router.post("/schedules/{schedule_id}/resume")
 async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator"),
                  request: Request = None) -> dict:
-    """Resume revalidates the version hash — modified content stays paused."""
+    """Resume revalidates the version hash — modified content stays paused.
+
+    Resuming a paused post is always a human decision: a paused post may be
+    paused because the offer expired, a correction landed, or an upload's
+    outcome is unknown. Automation must never put it back in the publishing
+    queue on its own.
+    """
+    actor = effective_reviewer(request, reviewer, default="operator")
+    if is_automation_actor(actor):
+        raise HTTPException(
+            status_code=403,
+            detail="automation may not resume a paused post — a named human must decide",
+        )
     pool = db.get()
     schedule = await _load(pool, schedule_id)
     if schedule["state"] != "paused":
@@ -320,8 +475,8 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
         "updated_at = now() WHERE id = $1",
         schedule_id,
     )
-    await _audit(pool, actor=effective_reviewer(request, reviewer, default="operator"),
-                 action="schedule:resume", entity="schedules", entity_id=schedule_id)
+    await _audit(pool, actor=actor, action="schedule:resume",
+                 entity="schedules", entity_id=schedule_id)
     return {"id": schedule_id, "state": row["state"]}
 
 
@@ -497,9 +652,36 @@ async def mark_description_patched(schedule_id: uuid.UUID, body: DescriptionPatc
 # ---------------------------------------------------------------- helpers
 
 
+async def _gate_automation_schedule(pool, schedule: dict) -> None:
+    """Unattended approval/scheduling must never act on a stale offer."""
+    offer = await pool.fetchrow(
+        "SELECT state::text AS state, correction_note, expires_at, recheck_at "
+        "FROM offers WHERE id = $1",
+        schedule["offer_id"],
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+    problems: list[str] = []
+    if offer["state"] != "approved_for_video":
+        problems.append(f"offer state is '{offer['state']}' (must be approved_for_video)")
+    if (offer["correction_note"] or "").strip():
+        problems.append("an open correction note requires human review")
+    now = datetime.now(timezone.utc)
+    if offer["expires_at"] and offer["expires_at"] <= now:
+        problems.append("offer has expired")
+    if offer["recheck_at"] and offer["recheck_at"] <= now:
+        problems.append("offer recheck is overdue")
+    if problems:
+        raise HTTPException(
+            status_code=409,
+            detail="automation schedule approval refused: " + "; ".join(problems),
+        )
+
+
 async def _load(pool, schedule_id: uuid.UUID) -> dict:
     row = await pool.fetchrow(
-        "SELECT id, offer_id, state::text AS state, version_hash, platform FROM schedules WHERE id = $1",
+        "SELECT id, offer_id, state::text AS state, version_hash, platform, privacy "
+        "FROM schedules WHERE id = $1",
         schedule_id,
     )
     if not row:

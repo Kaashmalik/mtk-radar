@@ -42,21 +42,43 @@ demonstrates it works.
 | Corrections link to affected posts | `offer_corrections` + caption permalink (`MTK_PUBLIC_BASE_URL`) + YouTube description write-back | correction write-back tests |
 | Reviewed records only | redaction review attestation required for render registration | integration test (unreviewed capture never queues) |
 | Manageable publish cadence, never "best hours" | `settings.publish_windows` (validated HH:MM, PKT) | settings tests (invalid window refused) |
+| No worker can bypass a human stage | `automation_policy` loaded on every gated write; automation actors must be `automation:<stage>` and the stage must be `auto` | automation unit + integration tests (403 on human stages) |
+| Automation stays inside guardrails | confidence/freshness/render/unsafe-command/platform/privacy/budget checks in `offers_api` + `schedules_api` | integration tests (422/409/429) |
+| No worker speaks a disabled language | `language_policy.narration_languages` checked in Content Studio, render registration, `/render-candidates`, the renderer and scheduling | language-policy unit tests; renderer skip; API 409 tests |
 
-## Automation coverage (v0.19–v0.21)
+## Language & packaging coverage (v0.27)
 
-| Stage | Human gate? | Automated by |
+English-first defaults live in `settings.language_policy` (migration
+`021_language_policy.sql`) and **Settings → Language policy**. The package
+(title, description, hashtags, cover, CTA) and on-screen captions are English
+by default; Urdu is opt-in for voiceover only. See
+[`language-policy.md`](language-policy.md).
+
+| Behaviour | Implementation | Proof |
 |---|---|---|
-| Collect | no | `workers/collectors` (compose service) |
-| Verify | **yes** (human decision) | dashboard *Review desk* |
-| Script | no | `workers/batch` (deterministic generation) |
-| Capture | **yes** (human-operated recording) | `workers/capture` (Playwright drives the mechanics) |
-| Redaction review | **yes** (attestation) | dashboard offer page |
-| Render | no | `workers/render --sweep` (queue via `GET /render-candidates`) |
-| Approve + schedule | **yes** (named reviewer) | dashboard *Calendar* / *Settings* |
-| Publish | no | `workers/publishing` (+ auto-retry with backoff) |
-| Measure | no | `workers/metrics` (YouTube Analytics / Graph insights) |
-| Alert | no | `workers/monitor` (expiry, token, metrics freshness) |
+| English metadata even for Urdu voiceover | `content_studio_api` + `schedules_api` pass `metadata_language` to `seo.py` | SEO unit tests; settings normalizer tests |
+| English on-screen captions | `captions.build_cues` wraps step-log text; `to_ass` uses DejaVu Sans/large 9:16 style | caption chunk/wrap/font tests |
+| English covers/lower-third | renderer uses `copy_language` for `covers.generate_covers` and `motion.build_motion_filter` | cover/motion tests; render metadata records copy language |
+| Urdu only when enabled | policy gate in studio/render/register/schedule/candidates | `test_language_policy.py`; renderer filtering |
+
+## Automation coverage (v0.26)
+
+The mode is set in **Settings → Automation control** and stored as
+`settings.automation_policy`; see
+[`automation-and-human-control.md`](automation-and-human-control.md).
+
+| Stage | Default (assisted) | Automated by |
+|---|---|---|
+| Collect | auto | `workers/collectors` (compose service) |
+| Verify | auto, with evidence/confidence/freshness gates | `workers/verification` + dashboard *Review desk* |
+| Script | auto | `workers/batch` (deterministic generation) |
+| Capture | **human** (always) | `workers/capture` (Playwright drives the mechanics) |
+| Redaction review | **human** (always) | dashboard offer page |
+| Render | auto | `workers/render --sweep` (queue via `GET /render-candidates`) |
+| Approve + schedule | **human** (auto in autopilot) | dashboard *Calendar* / *Settings*, or `workers/batch` inside guardrails |
+| Publish | approved + scheduled only | `workers/publishing` (+ policy-controlled retry with backoff) |
+| Measure | auto | `workers/metrics` (YouTube Analytics / Graph insights) |
+| Alert | auto | `workers/monitor` (expiry, token, metrics freshness) |
 
 ## Operator surfaces (no curl needed)
 
@@ -69,5 +91,5 @@ demonstrates it works.
 | `/calendar` | scheduled posts, approve/pause/resume, outcomes |
 | `/analytics` | pipeline health, source freshness, audience reach, content performance |
 | `/connections` | register social accounts + where their credentials live |
-| `/settings` | publish windows, pipeline status |
+| `/settings` | automation policy (manual/assisted/autopilot, per-stage control, guardrails, kill switch, dry-run), live automation status/audit, publish windows |
 | `/offers/[id]` | script, capture, renders, corrections, scheduling |

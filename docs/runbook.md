@@ -170,6 +170,17 @@ live), **Settings** (publish windows, pipeline status), **Queue** (what the
 automation renders vs what waits on you). Secrets never pass through the
 browser.
 
+Language policy (v0.27): **Settings → Language policy** controls the spoken
+language independently from the published package. Defaults are English
+voiceover, English titles/descriptions/hashtags/covers and English on-screen
+captions. To produce an Urdu-spoken version, enable **Urdu voiceover** first.
+The API rejects disabled languages in Content Studio, render registration and
+scheduling, and the renderer skips them; the settings UI keeps the written
+package and captions English and only exposes the spoken language. Captions are
+built from the capture step log, wrapped to fit the frame, and use DejaVu Sans
+by default (`MTK_CAPTION_FONT` overrides it). See
+[`language-policy.md`](language-policy.md).
+
 Duplicate protection (v0.23): the worker announces an upload
 (`POST /schedules/{id}/attempt`) before it starts. If the outcome never
 arrives (worker died mid-upload), the post is HELD — the calendar shows a
@@ -264,16 +275,21 @@ before. Re-rendering an offer with `MTK_STORAGE_BACKEND` set refreshes its
 rows to refs.
 
 ## 9. Known gaps (explicit, not hidden)
-- **Automation (v0.19/v0.20)**: the pipeline runs itself around the human
-  gates — the batch worker generates scripts for earned offers and reports
-  readiness, the render service renders the ready queue (script +
-  redaction-reviewed capture, idempotent per script version), and the
-  collector/publishing/metrics/monitor services run continuously under
-  compose. The human gates are deliberate and stay human: evidence
-  verification (§3), capture recording (§4), redaction review (§4), publish
-  approval (§17). Operator console: **Sources**, **Connections** (register
-  accounts and where their credentials live), **Settings** (publish windows),
-  **Queue** (what is rendering, what is waiting on you). Go-live procedure:
+- **Human vs automation (v0.26)**: each stage — collect, verify, script,
+  render, approve, schedule — is controlled by
+  `settings.automation_policy` in **Settings → Automation control**. The
+  default is **assisted** (mechanical stages automatic; approve and schedule
+  human). The API re-checks the policy on every gated write, so workers cannot
+  bypass a human stage; guardrails cover confidence, evidence freshness,
+  render/redaction/hash, unsafe commands, platform/privacy, and a daily
+  auto-approval budget. Always-human guarantees: capture recording (§4),
+  redaction review (§4), resuming a paused post, and final publish is only
+  possible for posts that were approved and scheduled. A global **Pause all
+  automation** switch and **dry-run** are in the same page. See
+  `docs/automation-and-human-control.md`. Operator console: **Sources**,
+  **Connections** (register accounts and where their credentials live),
+  **Settings** (automation policy, live status, publish windows), **Queue**
+  (what is rendering, what is waiting on you). Go-live procedure:
   `docs/go-live-checklist.md`; one-command verification: `pnpm verify`.
 - **Instagram (v0.19)**: adapter implemented (Graph content publishing:
   container → transcoding wait → publish) and wired into publishing + metrics.

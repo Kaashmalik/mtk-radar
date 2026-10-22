@@ -12,12 +12,14 @@ import { getReviewerName } from "@/lib/identity";
 import IdentityBadge from "./IdentityBadge";
 
 const LINKS: [string, string][] = [
-  ["/", "Inbox"],
-  ["/review", "Review desk"],
+  ["/", "Overview"],
+  ["/radar", "Radar"],
+  ["/review", "Review"],
   ["/queue", "Queue"],
-  ["/sources", "Sources"],
+  ["/studio", "Studio"],
   ["/calendar", "Calendar"],
-  ["/analytics", "Analytics"],
+  ["/analytics", "Growth"],
+  ["/sources", "Sources"],
   ["/connections", "Connections"],
   ["/settings", "Settings"],
 ];

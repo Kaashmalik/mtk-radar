@@ -46,6 +46,28 @@ class LockingAPI:
         return FakeResponse([])
 
 
+class PolicyAPI(LockingAPI):
+    def __init__(self, policy, acquired=True):
+        super().__init__(acquired=acquired)
+        self.policy = policy
+
+    def get(self, path, params=None):
+        if path == "/automation/policy":
+            return FakeResponse({"policy": self.policy})
+        return super().get(path, params)
+
+
+def test_paused_policy_skips_the_whole_publishing_sweep():
+    api = PolicyAPI({"paused": True, "dry_run": False, "stages": {},
+                     "guardrails": {}})
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = api
+    worker._sweep = lambda now: (_ for _ in ()).throw(
+        AssertionError("a paused policy must not sweep"))
+    assert worker.run_once() == 0
+    assert api.calls == [], "paused must not even acquire the sweep lock"
+
+
 def test_lock_is_acquired_before_a_sweep_and_released_after():
     api = LockingAPI(acquired=True)
     worker = pub.Publisher(api_url="http://fake")

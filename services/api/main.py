@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import db
 import api_hardening
+from automation_api import router as automation_router
 from captures_api import router as captures_router
 import health_api
 from health_api import router as health_router
@@ -28,16 +29,18 @@ from normalize import canonicalize_url, hash_parts
 from offers_api import router as offers_router
 from platforms_api import router as platforms_router
 from analytics_api import router as analytics_router
+from content_studio_api import router as studio_router
 from renders_api import router as renders_router
 from schedules_api import router as schedules_router
 from settings_api import router as settings_router
+from trends_api import router as trends_router
 from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
 )
 
-app = FastAPI(title="MTK RADAR AI API", version="0.25.0")
+app = FastAPI(title="MTK RADAR AI API", version="0.27.0")
 health_api.APP_VERSION = app.version
 
 
@@ -74,10 +77,13 @@ app.include_router(captures_router)
 app.include_router(renders_router)
 app.include_router(schedules_router)
 app.include_router(settings_router)
+app.include_router(automation_router)
 app.include_router(health_router)
 app.include_router(locks_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
+app.include_router(trends_router)
+app.include_router(studio_router)
 
 # Optional bearer-token auth (MTK_API_TOKEN, v0.13) + reviewer-token identity
 # (v0.16) + structured request logging. Unset token = open local dev; set it

@@ -20,6 +20,7 @@ from jsonb import decode_list, decode_mapping
 from offer_terms import CONTRADICTED, SUPPORTED, UNKNOWN
 
 VIDEO_STATES: Final = frozenset({"verified", "approved_for_video", "published"})
+SUPPORTED_LANGUAGES: Final = ("en", "ur")
 
 
 class ScriptGateError(PermissionError):
@@ -122,10 +123,51 @@ def _unsafe_reasons(step: dict) -> list[str]:
     return reasons
 
 
+def build_beats(offer: dict, checklist: list[dict]) -> list[dict]:
+    """A retention-oriented beat sheet shared by English and Urdu scripts.
+
+    The beats are deliberately short and visual: hook → proof → steps → result
+    → CTA. The editor can cut to these markers without re-reading the script.
+    """
+    title = offer.get("title", "this offer")
+    provider = offer.get("provider", "the provider")
+    return [
+        {"id": "hook", "at_s": 0, "purpose": "stop the scroll",
+         "en": f"I claimed {title} from {provider} — here is the real proof.",
+         "ur": f"میں نے {provider} سے {title} حقیقت میں کلیم کیا — ثبوت سامنے ہے۔"},
+        {"id": "eligibility", "at_s": 4, "purpose": "qualify the viewer early",
+         "en": _eligibility_line(offer),
+         "ur": _eligibility_line_ur(offer)},
+        {"id": "proof", "at_s": 9, "purpose": "show official terms on screen",
+         "en": "Official terms and eligibility are on screen; the source is in the description.",
+         "ur": "آفیشل شرائط اور اہلیت اسکرین پر ہیں؛ مکمل ذریعہ ڈسکرپشن میں ہے۔"},
+        {"id": "claim", "at_s": 15, "purpose": "real-time claim walkthrough",
+         "en": f"{len(checklist)} ordered checks, performed live on a real account.",
+         "ur": f"{len(checklist)} مرحلے، ایک حقیقی اکاؤنٹ پر لائیو کیے گئے۔"},
+        {"id": "result", "at_s": 45, "purpose": "show where the benefit landed",
+         "en": "Open the provider dashboard and show the benefit — no staged success screens.",
+         "ur": "پرووائیڈر ڈیش بورڈ کھول کر فائدہ دکھائیں — کوئی جعلی کامیابی نہیں۔"},
+        {"id": "cta", "at_s": 55, "purpose": "convert without misleading",
+         "en": "Full guide, eligibility and source links are in the description.",
+         "ur": "مکمل گائیڈ، اہلیت اور آفیشل لنکس ڈسکرپشن میں موجود ہیں۔"},
+    ]
+
+
 def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dict],
-                     evidence: list[dict]) -> str:
-    """Markdown script following §4/§15 sequence. Every factual claim cites
-    its evidence; renewal cost is always surfaced (§11)."""
+                     evidence: list[dict], language: str = "en") -> str:
+    """Markdown script following §4/§15 sequence, in English or Urdu.
+
+    Every factual claim cites evidence; renewal cost is always surfaced (§11).
+    """
+    if language not in SUPPORTED_LANGUAGES:
+        raise ValueError(f"unsupported script language '{language}' — known: {', '.join(SUPPORTED_LANGUAGES)}")
+    if language == "ur":
+        return _render_ur(offer, checklist, command_cards, evidence)
+    return _render_en(offer, checklist, command_cards, evidence)
+
+
+def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
+               evidence: list[dict]) -> str:
     provider = offer.get("provider", "the provider")
     title = offer.get("title", "Offer walkthrough")
     expires = _fmt_date(offer.get("expires_at"))
@@ -138,7 +180,12 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
     lines.append(f"_Checked on {datetime.utcnow().strftime('%d %b %Y')}. Terms may change; "
                  "source links below and in the description._")
     lines.append("")
-    lines.append(f"## Who this is for")
+    lines.append("## Hook options (choose one, keep it under 3 seconds)")
+    lines.append(f"1. I claimed **{title}** from {provider} — here is the real proof.")
+    lines.append(f"2. This {provider} offer looks too good to be true — I tested the real claim.")
+    lines.append(f"3. Do not pay for {title} until you see what the official terms actually say.")
+    lines.append("")
+    lines.append("## Who this is for")
     lines.append(
         _eligibility_line(offer)
         + (f" Promo code: `{promo_code}`." if promo_code else "")
@@ -189,6 +236,10 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
     lines.append("- Open the provider dashboard and show exactly where the benefit landed "
                  "(plan, quota, domain panel) — no staged success screens.")
     lines.append("")
+    lines.append("## CTA")
+    lines.append("- Full guide, eligibility and official source links are in the description. "
+                 "Use the tracked website link, not a lookalike domain.")
+    lines.append("")
     lines.append("## Wrap-up summary card")
     lines.append(f"- Steps recap: {len(checklist)} checks above; "
                  f"deadline: {expires or NO_EXPIRY_STATED}; "
@@ -216,6 +267,72 @@ ELIGIBILITY_UNKNOWN: Final = (
 ONGOING_COST_UNKNOWN: Final = "not stated in the inspected terms"
 
 
+def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
+               evidence: list[dict]) -> str:
+    provider = offer.get("provider", "پرووائیڈر")
+    title = offer.get("title", "آفر")
+    expires = _fmt_date(offer.get("expires_at"))
+    renewal = decode_mapping(offer.get("renewal"))
+    promo_code = offer.get("promo_code")
+
+    lines: list[str] = []
+    lines.append(f"# {title} — اصلی کلیم گائیڈ")
+    lines.append("")
+    lines.append(f"_چیک کیا گیا: {datetime.utcnow().strftime('%d %b %Y')}۔ شرائط بدل سکتی ہیں؛ "
+                 "ذرائع نیچے اور ڈسکرپشن میں موجود ہیں۔_")
+    lines.append("")
+    lines.append("## ہک کے آپشن (ایک منتخب کریں، 3 سیکنڈ سے کم رکھیں)")
+    lines.append(f"1. میں نے {provider} سے **{title}** حقیقت میں کلیم کیا — ثبوت سامنے ہے۔")
+    lines.append(f"2. یہ {provider} آفر بہت اچھی لگ رہی ہے — میں نے اصلی کلیم ٹیسٹ کیا۔")
+    lines.append(f"3. {title} پر پیسے خرچ کرنے سے پہلے آفیشل شرائط ضرور دیکھیں۔")
+    lines.append("")
+    lines.append("## یہ کس کے لیے ہے")
+    lines.append(_eligibility_line_ur(offer)
+                 + (f" پرومو کوڈ: `{promo_code}`۔" if promo_code else ""))
+    lines.append("")
+    lines.append("## شروع کرنے سے پہلے (آفیشل شرائط)")
+    lines.append(f"- آفیشل شرائط پڑھیں: {offer.get('redemption_url') or 'نیچے ذرائع میں لنک'}۔")
+    if expires:
+        lines.append(f"- ⏰ آخری تاریخ: **{expires}** — کوشش سے پہلے تصدیق کریں کہ آفر ابھی فعال ہے۔")
+    if renewal.get("autoRenew") or renewal.get("regularPrice"):
+        lines.append(
+            f"- ⚠️ مفت مدت کے بعد قیمت **{renewal.get('regularPrice', 'عام قیمت')}** ہوگی "
+            f"(خودکار تجدید: {'آن' if renewal.get('autoRenew') else 'آف'})۔ "
+            "فائنل کرنے سے پہلے قیمت اور خودکار تجدید اسکرین پر دکھائیں۔"
+        )
+    lines.append("")
+    lines.append("## کلیم کے مراحل (لائیو کریں؛ ناقابلِ واپسی یا ادائیگی والے قدم پر رکیں)")
+    for step in checklist:
+        lines.append(f"{step['order'] + 1}. [{step['kind']}] {step['text']}")
+    lines.append("")
+    if command_cards:
+        lines.append("## کمانڈز / سیٹ اپ (ٹیسٹ شدہ؛ OS/شیل واضح)")
+        for card in command_cards:
+            lines.append(f"```bash\n# {card['shell_os']}\n{card['command']}\n```")
+            lines.append(f"- متوقع نتیجہ: {card['expected_output'] or '_TODO: صاف ماحول میں ٹیسٹ کریں_'}")
+            lines.append(f"- ذریعہ: {card['source_url'] or '_آفیشل ذریعہ نہیں — فلم نہ کریں_'}")
+            for reason in card["unsafe_reasons"]:
+                lines.append(f"- ⚠️ {reason}")
+        lines.append("")
+    lines.append("## فائدہ کی تصدیق")
+    lines.append("- پرووائیڈر ڈیش بورڈ کھولیں اور دکھائیں کہ فائدہ کہاں پہنچا "
+                 "(پلان، کوٹہ، ڈومین پینل) — کوئی جعلی کامیابی اسکرین نہیں۔")
+    lines.append("")
+    lines.append("## CTA")
+    lines.append("- مکمل گائیڈ، اہلیت اور آفیشل لنکس ڈسکرپشن میں ہیں۔ "
+                 "ٹریک شدہ ویب سائٹ لنک استعمال کریں، ملتا جلتا ڈومین نہیں۔")
+    lines.append("")
+    lines.append("## اختتامی خلاصہ")
+    lines.append(f"- مراحل: اوپر {len(checklist)} چیک؛ آخری تاریخ {expires or '— شرائط دیکھیں'}؛ "
+                 f"جاری قیمت: {renewal.get('regularPrice', 'درج نہیں')} (خودکار تجدید)۔")
+    lines.append("- ذرائع (ویڈیو ڈسکرپشن میں بھی):")
+    for ev in evidence:
+        lines.append(f"  - {ev.get('url')} — ریکارڈ شدہ {_fmt_date(ev.get('captured_at'))}")
+    lines.append("")
+    lines.append("> عالمی نتیجہ ہرگز نہ دکھائیں: آخر میں علاقہ اور اہلیت کی حدود دوبارہ بتائیں۔")
+    return "\n".join(lines)
+
+
 def _eligibility_line(offer: dict) -> str:
     eligibility = decode_mapping(offer.get("eligibility"))
     parts = []
@@ -240,14 +357,47 @@ def _eligibility_line(offer: dict) -> str:
     return " · ".join(parts) + "."
 
 
-def generate(offer: dict, evidence: list[dict]) -> dict:
+def _eligibility_line_ur(offer: dict) -> str:
+    eligibility = decode_mapping(offer.get("eligibility"))
+    parts = []
+    if eligibility.get("countries"):
+        parts.append(f"علاقہ: {', '.join(eligibility['countries'])}")
+    if eligibility.get("studentStatus"):
+        parts.append("صرف طلبہ (تصدیق ضروری)" if eligibility.get("verificationRequired") else "طلبہ")
+    if eligibility.get("startupStatus"):
+        parts.append("اسٹارٹ اپس (درخواست کے ذریعے)")
+    if eligibility.get("newCustomerOnly"):
+        parts.append("صرف نئے صارفین")
+    if not parts:
+        return "کھلی اہلیت — لیکن کلیم سے پہلے آفیشل صفحے پر موجودہ شرائط ضرور دیکھیں۔"
+    return " · ".join(parts) + "۔"
+
+
+def generate(offer: dict, evidence: list[dict], language: str = "en") -> dict:
     """Full generation pipeline. Raises ScriptGateError for unverified offers."""
     assert_video_allowed(offer.get("state", ""))
     checklist = build_checklist(offer)
     command_cards = build_command_cards(decode_list(offer.get("claim_steps")))
-    markdown = render_script_md(offer, checklist, command_cards, evidence)
+    markdown = render_script_md(offer, checklist, command_cards, evidence, language=language)
     return {
         "markdown": markdown,
         "checklist": checklist,
         "command_cards": command_cards,
+        "language": language,
+        "beats": build_beats(offer, checklist),
+    }
+
+
+def generate_multilingual(offer: dict, evidence: list[dict],
+                          languages: tuple[str, ...] = SUPPORTED_LANGUAGES) -> dict:
+    """Generate every requested language from the same verified facts."""
+    if not languages:
+        raise ValueError("at least one language is required")
+    for language in languages:
+        if language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"unsupported language '{language}' — known: {', '.join(SUPPORTED_LANGUAGES)}")
+    generated = {language: generate(offer, evidence, language=language) for language in languages}
+    return {
+        "languages": generated,
+        "beats": generated[languages[0]]["beats"],
     }

@@ -73,6 +73,24 @@ log = logging.getLogger("publishing")
 class Publisher:
     def __init__(self, api_url: str = API_URL_DEFAULT):
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"), headers=_api_auth_headers())
+        self.policy: dict | None = None
+
+    # -------------------------------------------------------------- policy
+
+    def _load_policy(self) -> dict | None:
+        """Read the operator's automation policy. None (old/unreachable API)
+        keeps the legacy behaviour — publishing already-approved posts."""
+        try:
+            resp = self.api.get("/automation/policy")
+            if resp.status_code >= 300:
+                return None
+            return (resp.json() or {}).get("policy")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("automation policy unavailable, using legacy behaviour: %s", exc)
+            return None
+
+    def _limits(self) -> dict:
+        return (self.policy or {}).get("guardrails") or {}
 
     # ------------------------------------------------------------ adapters
 
@@ -173,6 +191,11 @@ class Publisher:
 
     def run_once(self) -> int:
         now = datetime.now(timezone.utc)
+        self.policy = self._load_policy()
+        if self.policy and self.policy.get("paused"):
+            log.info("automation is PAUSED in Settings — publishing sweep skipped "
+                     "(already-approved posts stay queued)")
+            return 0
         if not self._acquire_sweep_lock("publishing"):
             return 0
         try:
@@ -185,6 +208,10 @@ class Publisher:
 
         posts = self.api.get("/schedules", params={"state": "scheduled", "limit": 200}).json()
         due = [p for p in posts if _is_due(p.get("local_time"), now)]
+        if self.policy and self.policy.get("dry_run"):
+            log.info("automation is in DRY-RUN mode — %d due post(s) would publish; "
+                     "no upload, retry, or correction was performed", len(due))
+            return 0
         if due:
             log.info("%d scheduled post(s) due", len(due))
 
@@ -265,6 +292,12 @@ class Publisher:
         changed since approval) leaves the post failed for operator review.
         """
         now = now or datetime.now(timezone.utc)
+        limits = self._limits()
+        if limits.get("auto_retry") is False:
+            log.info("auto-retry is disabled in Settings — failed posts wait for a human")
+            return 0
+        max_retries = int(limits.get("retry_max_attempts", self.MAX_RETRIES))
+        retry_base = int(limits.get("retry_base_seconds", self.RETRY_BASE_S))
         try:
             failed = self.api.get("/schedules", params={"state": "failed", "limit": 500}).json()
         except httpx.HTTPError as exc:
@@ -280,11 +313,11 @@ class Publisher:
                          post["id"])
                 continue
             attempts = post.get("retry_count", 0) or 0
-            if attempts >= self.MAX_RETRIES:
+            if attempts >= max_retries:
                 log.info("schedule %s: giving up auto-retry after %d attempts — operator review",
                          post["id"], attempts)
                 continue
-            delay = self.RETRY_BASE_S * (2 ** attempts)
+            delay = retry_base * (2 ** attempts)
             updated = post.get("updated_at")
             if updated:
                 tried = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
@@ -296,13 +329,13 @@ class Publisher:
                 resp = self.api.post(
                     f"/schedules/{post['id']}/transition",
                     json={"to": "scheduled",
-                          "note": f"auto-retry {attempts + 1}/{self.MAX_RETRIES} "
+                          "note": f"auto-retry {attempts + 1}/{max_retries} "
                                   f"(backoff {delay}s)"},
                 )
                 if resp.status_code == 200:
                     requeued += 1
                     log.info("schedule %s: auto-retry %d/%d requeued",
-                             post["id"], attempts + 1, self.MAX_RETRIES)
+                             post["id"], attempts + 1, max_retries)
                 else:
                     # 409 = script hash changed / illegal transition → human review
                     log.warning("schedule %s: auto-retry refused (%s) — operator review",

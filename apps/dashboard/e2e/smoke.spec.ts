@@ -12,12 +12,14 @@ test("app shell: brand, primary nav, and a green API health dot", async ({ page 
 
   await expect(page.locator(".brand")).toContainText("MTK RADAR");
   for (const label of [
-    "Inbox",
-    "Review desk",
+    "Overview",
+    "Radar",
+    "Review",
     "Queue",
-    "Sources",
+    "Studio",
     "Calendar",
-    "Analytics",
+    "Growth",
+    "Sources",
     "Connections",
     "Settings",
   ]) {
@@ -33,9 +35,17 @@ test("app shell: brand, primary nav, and a green API health dot", async ({ page 
   );
 });
 
-test("inbox and analytics load real data from the API", async ({ page }) => {
+test("overview, radar, studio and analytics load real data from the API", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator("h1")).toContainText("MTK RADAR AI");
+  await expect(page.locator("h1")).toContainText("Truth-first content radar");
+
+  await page.goto("/radar");
+  await expect(page.locator("h1")).toContainText("Trend radar");
+  await expect(page.locator("main")).not.toContainText("unreachable");
+
+  await page.goto("/studio");
+  await expect(page.locator("h1")).toContainText("Content studio");
+  await expect(page.locator("main")).not.toContainText("unreachable");
 
   await page.goto("/analytics");
   await expect(page.locator("h1")).toContainText("Analytics");

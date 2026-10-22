@@ -95,6 +95,29 @@ def test_api_unreachable_sweep_is_nonfatal(monkeypatch, tmp_path):
     assert render_main.sweep("http://fake", tmp_path, ["landscape"], True) == 0
 
 
+def test_render_job_skips_a_disabled_voiceover_language(monkeypatch, tmp_path):
+    _patch_client(monkeypatch, [])
+    job = render_main.RenderJob("off-1", "http://fake", tmp_path)
+    job.language_policy = {"narration_languages": ["en"]}
+    calls = []
+    monkeypatch.setattr(job, "_run_language",
+                        lambda *args: calls.append(args[-1]))
+
+    job.run(None, ["landscape"], True, languages=("en", "ur"))
+
+    assert calls == ["en"], "Urdu must never render while disabled in Settings"
+
+
+def test_render_job_refuses_when_every_requested_language_is_disabled(monkeypatch, tmp_path):
+    _patch_client(monkeypatch, [])
+    job = render_main.RenderJob("off-1", "http://fake", tmp_path)
+    job.language_policy = {"narration_languages": ["en"]}
+    monkeypatch.setattr(job, "_run_language", lambda *args: None)
+
+    with pytest.raises(SystemExit, match="Language policy"):
+        job.run(None, ["landscape"], True, languages=("ur",))
+
+
 def test_missing_ffmpeg_is_reported_with_the_configured_path(monkeypatch):
     """The preflight must honour FFMPEG_PATH (the render/narration modules do)
     and name the binary it looked for — a wrong PATH used to hide the real

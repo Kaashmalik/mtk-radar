@@ -24,11 +24,13 @@ def build_ffmpeg_cmd(
     preset: Preset,
     captions: Optional[str] = None,
     narration: Optional[str] = None,
+    motion: Optional[str] = None,
 ) -> list[str]:
     """Build the full ffmpeg invocation for one preset.
 
     - video/narration/captions are RELATIVE paths (run with cwd=project dir)
       so subtitles filters never need OS-specific escaping.
+    - `motion` is a filter fragment from motion.py (push/crop/lower-third).
     """
     for asset in (video, output, captions, narration):
         if asset and (Path(asset).is_absolute() or PureWindowsPath(asset).is_absolute()):
@@ -41,6 +43,8 @@ def build_ffmpeg_cmd(
         audio_map = "1:a"  # narration replaces capture audio
 
     vf = preset.filter_chain
+    if motion:
+        vf += f",{motion}"
     if captions:
         vf += f",subtitles={captions}"
     cmd += ["-map", "0:v", "-map", audio_map]

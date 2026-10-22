@@ -36,3 +36,80 @@
         .small { font-size: 0.8rem; }
         a { color: var(--accent); text-decoration: none; }
         ul { list-style: none; padding: 0; margin: 0.4rem 0; }
+
+        /* v0.26 automation control */
+        .settings-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.6rem;
+        }
+        .automation-form { display: grid; gap: 0.85rem; }
+        .automation-topline {
+          display: flex;
+          gap: 1rem;
+          align-items: flex-start;
+          justify-content: space-between;
+          flex-wrap: wrap;
+          padding: 0.75rem 0.9rem;
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          background: var(--bg-inset);
+        }
+        .automation-killswitch { display: flex; gap: 0.5rem; }
+        .preset-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .preset {
+          padding: 0.35rem 0.9rem;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--text-muted);
+          font: inherit;
+          font-size: 0.8rem;
+          cursor: pointer;
+          text-transform: capitalize;
+        }
+        .preset:hover:not(:disabled) { color: var(--text); background: var(--bg-elev); }
+        .preset-active {
+          color: var(--accent-contrast);
+          background: var(--accent);
+          border-color: var(--accent);
+          font-weight: 600;
+        }
+        .preset:disabled { opacity: 0.55; cursor: not-allowed; }
+        .automation-table select,
+        .guardrail-grid input,
+        .guardrail-grid select,
+        .automation-form select {
+          width: 100%;
+          padding: 0.32rem 0.5rem;
+          font: inherit;
+          font-size: 0.8rem;
+          border-radius: var(--radius-sm);
+          border: 1px solid var(--border);
+          background: var(--bg-inset);
+          color: var(--text);
+        }
+        .automation-table select { width: auto; min-width: 11rem; }
+        .automation-subhead {
+          margin: 0.2rem 0 0;
+          font-size: 0.92rem;
+        }
+        .guardrail-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 0.7rem;
+        }
+        .guardrail-grid label { display: grid; gap: 0.2rem; color: var(--text-muted); }
+        .platforms {
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-sm);
+          padding: 0.5rem 0.75rem;
+          display: flex;
+          gap: 1rem;
+          flex-wrap: wrap;
+        }
+        .platform-check { display: inline-flex; gap: 0.35rem; align-items: center; text-transform: capitalize; }
+        .checkbox-row { display: grid; gap: 0.35rem; }
+        .checkbox-row label { display: inline-flex; gap: 0.4rem; align-items: flex-start; color: var(--text-muted); }
+        .automation-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
