@@ -53,7 +53,8 @@ API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
 
 log = logging.getLogger("metrics")
 
-_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+_API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
+              or os.environ.get("MTK_API_TOKEN") or "").strip()
 
 
 def _adapter_for_account(account: dict):

@@ -1642,14 +1642,17 @@ def test_reviewer_token_binds_audit_actor_over_body_strings(auth_client):
     assert tr.status_code == 200, tr.text
 
 
-def test_service_token_supports_explicit_reviewer_fallback(auth_client):
+def test_service_token_cannot_supply_a_human_reviewer_name(auth_client):
+    """Service credentials are audited under a role default, never a body name."""
     res = auth_client.post("/offers", headers=SVC, json={
         "provider": "Svc Co", "category": "domains", "offer_type": "coupon",
+        "reviewer": "Alice Approver",
     })
     assert res.status_code == 201, res.text
     rows = _run("SELECT actor FROM audit_log WHERE entity = 'offers' AND entity_id = $1 "
                 "ORDER BY created_at DESC LIMIT 1", __import__("uuid").UUID(res.json()["id"]))
-    assert rows[0]["actor"] == "reviewer"  # dev default preserved for service callers
+    assert rows[0]["actor"] == "reviewer"
+    assert rows[0]["actor"] != "Alice Approver"
 
 
 def test_unknown_token_rejected(auth_client):
@@ -1661,8 +1664,14 @@ def test_revoked_reviewer_token_rejected(auth_client):
     auth_client.get("/whoami", headers=AUTH)  # populate the positive cache
     _run("UPDATE reviewers SET active = FALSE WHERE name = $1", REVIEWER)
     api_hardening.reset_reviewer_cache()
-    r = auth_client.get("/whoami", headers=AUTH)
-    assert r.status_code == 401, "revocation must take effect"
+    try:
+        r = auth_client.get("/whoami", headers=AUTH)
+        assert r.status_code == 401, "revocation must take effect"
+    finally:
+        # Later tests exercise human-only actions with this shared reviewer
+        # token; restore it once the revocation behaviour is proven.
+        _run("UPDATE reviewers SET active = TRUE WHERE name = $1", REVIEWER)
+        api_hardening.reset_reviewer_cache()
 
 
 # ------------------------------------------------- v0.18: settings + metrics
@@ -1906,6 +1915,68 @@ def test_schedule_refuses_a_render_from_a_different_script_version(auth_client):
     })
     assert refused.status_code == 409, refused.text
     assert "different script version" in refused.json()["detail"]
+
+
+def test_scheduling_fails_closed_when_offer_expires_after_approval(auth_client):
+    """A schedule must not be stored as 'scheduled' with offer_evidence_ok=false.
+
+    The offer was fresh when the queue item was prepared; expiring before the
+    final transition is exactly the race the release gate exists for. The
+    transition must fail with an actionable reason and leave the post in its
+    prior state so the operator can re-verify instead of publishing stale terms.
+    """
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Freshness Gate Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    markdown = "# freshness script\n\nExact approved words."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+        "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) RETURNING id",
+        offer_id,
+    )[0]["id"]
+    _run(
+        "INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash, "
+        "preset, width, height, video_path, language, status, qc_status) "
+        "VALUES ($1, $2, 1, $3, 'landscape', 1920, 1080, "
+        "'projects/x/fresh.mp4', 'en', 'rendered', 'passed')",
+        offer_id, capture_id, script_version_hash(markdown),
+    )
+    _run("UPDATE offers SET state = 'approved_for_video', "
+         "recheck_at = now() + interval '1 day', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+
+    created = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-02-02T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert created.status_code == 201, created.text
+    sid = __import__("uuid").UUID(created.json()["id"])
+
+    assert auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                            json={"to": "needs_approval"}).status_code == 200
+    # approval is human-only: the service token cannot name a reviewer
+    assert auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                            json={"to": "approved", "reviewer": "pytest"}).status_code == 403
+    approved = auth_client.post(f"/schedules/{sid}/transition", headers=AUTH,
+                                json={"to": "approved"})
+    assert approved.status_code == 200, approved.text
+
+    # The reviewer approved the package, then the offer expired before the
+    # operator could put it on the calendar.
+    _run("UPDATE offers SET expires_at = now() - interval '1 hour' WHERE id = $1", offer_id)
+    refused = auth_client.post(f"/schedules/{sid}/transition", headers=AUTH,
+                               json={"to": "scheduled"})
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "schedule blocked" in detail and "expired" in detail
+
+    row = _run("SELECT state::text AS state, offer_evidence_ok "
+               "FROM schedules WHERE id = $1", sid)[0]
+    assert row["state"] == "approved", "a refused schedule must keep its prior state"
+    assert row["offer_evidence_ok"] is False, "no false freshness result may be recorded as scheduled"
 
 
 def test_qc_failed_render_blocks_scheduling_and_is_visible(auth_client):
@@ -2198,15 +2269,14 @@ def test_unknown_attempt_requires_explicit_human_acknowledgement_to_requeue(auth
     assert started.status_code == 200, started.text
     auth_client.post(f"/schedules/{sid}/pause", headers=SVC, json={"note": "worker died"})
 
-    blocked = auth_client.post(f"/schedules/{sid}/transition", headers=SVC, json={
-        "to": "scheduled", "reviewer": "pytest",
+    blocked = auth_client.post(f"/schedules/{sid}/transition", headers=AUTH, json={
+        "to": "scheduled",
     })
     assert blocked.status_code == 409, "an unknown attempt cannot be silently cleared"
     assert "acknowledge_unknown_attempt" in blocked.json()["detail"]
 
-    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=SVC, json={
-        "to": "scheduled", "reviewer": "pytest",
-        "acknowledge_unknown_attempt": True,
+    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=AUTH, json={
+        "to": "scheduled", "acknowledge_unknown_attempt": True,
     })
     assert resumed.status_code == 200, resumed.text
     assert resumed.json()["state"] == "scheduled"
@@ -2214,7 +2284,7 @@ def test_unknown_attempt_requires_explicit_human_acknowledgement_to_requeue(auth
         "SELECT outcome_detail::text AS detail FROM schedules WHERE id = $1", sid,
     )[0]["detail"])
     assert detail.get("attempt") is None, "the acknowledged marker must be cleared"
-    assert detail["attempt_resolved"]["resolved_by"] == "pytest"
+    assert detail["attempt_resolved"]["resolved_by"] == REVIEWER
 
     again = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
     assert again.status_code == 200, "after acknowledgement a fresh attempt is allowed"
@@ -2273,6 +2343,8 @@ def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
         "provider": "Hold Co", "category": "domains", "offer_type": "coupon",
     }).json()
     offer_id = __import__("uuid").UUID(offer["id"])
+    _run("UPDATE offers SET state = 'verified', recheck_at = now() + interval '1 day', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
     sid = _run(
         """
         INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
@@ -2296,8 +2368,8 @@ def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
     version_hash = script_version_hash("# hold script")
     _run("UPDATE schedules SET version_hash = $2 WHERE id = $1",
          __import__("uuid").UUID(str(sid)), version_hash)
-    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
-                                json={"to": "scheduled", "reviewer": "pytest"})
+    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=AUTH,
+                                json={"to": "scheduled"})
     assert resumed.status_code == 200, resumed.text
     row = _run("SELECT outcome_detail::text AS d FROM schedules WHERE id = $1",
                __import__("uuid").UUID(str(sid)))[0]
@@ -2376,12 +2448,13 @@ def test_human_stage_refuses_automation_actor(auth_client):
     auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
                      json={"to": "evidence_needed", "reviewer": "pytest"})
     terms = "Free for new customers until 31 Dec 2026."
-    evidence = auth_client.post(f"/offers/{offer_id}/evidence", headers=SVC, json={
+    # Human-attested snapshot: the reviewer token binds identity. A service
+    # token may not claim a person reviewed these bytes.
+    evidence = auth_client.post(f"/offers/{offer_id}/evidence", headers=AUTH, json={
         "url": "https://gate.example/terms",
         "official": True,
         "excerpt": terms,
         "captured_content": terms,
-        "reviewer": "pytest",
         "supported_fields": ["value", "eligibility"],
     })
     assert evidence.status_code == 201, evidence.text
@@ -2427,7 +2500,7 @@ def test_human_stage_refuses_automation_actor(auth_client):
     })
     assert capture.status_code == 201, capture.text
     reviewed = auth_client.post(f"/captures/{capture.json()['id']}/redaction-review",
-                                headers=SVC, json={"approved": True, "reviewer": "pytest"})
+                                headers=AUTH, json={"approved": True})
     assert reviewed.status_code == 200, reviewed.text
 
     scripts = auth_client.get(f"/offers/{offer_id}/scripts", headers=SVC).json()
@@ -2564,8 +2637,7 @@ def test_human_stage_refuses_automation_actor(auth_client):
                                          json={"to": "scheduled",
                                                "reviewer": "automation:schedule"})
     assert denied_transition.status_code == 403, denied_transition.text
-    assert auth_client.post(f"/schedules/{sid}/resume", headers=SVC,
-                            params={"reviewer": "pytest"}).status_code == 200
+    assert auth_client.post(f"/schedules/{sid}/resume", headers=AUTH).status_code == 200
 
     # automation cannot mark an offer published directly: only a publishing
     # result may do that, so the stage map deliberately has no 'published'.

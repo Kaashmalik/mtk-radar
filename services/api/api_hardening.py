@@ -5,15 +5,26 @@ Auth model: when MTK_API_TOKEN is set, every route except /health requires
 this matches the runbook's local-development path while closing the exposed
 deployment gap.
 
-Two credential classes (v0.16):
-- the shared MTK_API_TOKEN — for workers/extension; carries NO identity
-  (audit actor falls back to the request body's reviewer field as before)
+Credential classes (v0.31):
+- MTK_API_TOKEN — service credential for the dashboard server and trusted
+  control-plane reads. It carries NO human identity.
+- MTK_WORKER_TOKEN — optional worker credential. When absent, workers use the
+  service token and are treated as a service principal.
+- MTK_EXTENSION_TOKEN — optional browser-extension credential.
 - personal reviewer tokens (reviewers table, sha256-hashed at rest, minted
   with services/api/scripts/mint_reviewer.py) — carry the owner's identity:
   request.state.actor is set and routers bind audit/reviewer fields to it.
   This is what lets the dashboard authenticate WITHOUT the master token in
   the browser. Revocation (active=false) is instant; positive lookups are
   cached for 60s.
+
+A service/worker/extension credential may only name an `automation:<stage>`
+or `system:` actor. It can never supply a human reviewer name for an approval,
+ToS review, redaction review or correction. That separation is what prevents a
+compromised worker from appearing as a human approver in audit_log. During
+local dev-open mode (no configured token) the old body fallback remains, since
+there is no credential boundary to protect; production always configures a
+token.
 
 Read identity: GET /whoami → {actor, auth}. Bad reviewer token → 401, same
 as any other unauthorized call.
@@ -37,7 +48,18 @@ logger = logging.getLogger("mtk.api")
 
 OPEN_PATHS = frozenset({"/health"})
 TOKEN_ENV = "MTK_API_TOKEN"
+WORKER_TOKEN_ENV = "MTK_WORKER_TOKEN"
+EXTENSION_TOKEN_ENV = "MTK_EXTENSION_TOKEN"
 REVIEWER_CACHE_TTL_S = 60.0
+
+# Credential classes stored on request.state.credential_class.
+CREDENTIAL_DISABLED = "disabled"
+CREDENTIAL_REVIEWER = "reviewer"
+CREDENTIAL_SERVICE = "service"
+CREDENTIAL_WORKER = "worker"
+CREDENTIAL_EXTENSION = "extension"
+SYSTEM_CLASSES = frozenset({CREDENTIAL_SERVICE, CREDENTIAL_WORKER, CREDENTIAL_EXTENSION})
+_AUTOMATION_PREFIXES = ("automation:", "system:")
 
 # token_hash -> (name, cached_at). Positives only; revocation takes effect on
 # the next request or ≤TTL. reset_reviewer_cache() clears it immediately.
@@ -60,49 +82,100 @@ def token_hash(token: str) -> str:
 
 
 def actor_of(request: Request) -> str | None:
-    """Authenticated reviewer identity for THIS request (None = service token,
-    unauthenticated dev mode, or a system/writer actor)."""
+    """Authenticated reviewer identity for THIS request (None = service,
+    worker, extension, or unauthenticated dev mode)."""
     return getattr(request.state, "actor", None)
+
+
+def credential_class(request: Request) -> str:
+    """Which credential authenticated this request (fail closed to service)."""
+    return getattr(request.state, "credential_class", CREDENTIAL_SERVICE)
+
+
+def _is_system_actor(value: Optional[str]) -> bool:
+    return bool(value) and str(value).strip().lower().startswith(_AUTOMATION_PREFIXES)
 
 
 def effective_reviewer(
     request: Request, supplied: Optional[str], *, default: Optional[str] = None,
     require: bool = False,
 ) -> Optional[str]:
-    """The reviewer actually on record: the authenticated reviewer token wins;
-    the request-body/query string is the fallback for service-token callers
-    and open-dev mode. `require=True` enforces the §3/§17 rule that approval
-    actions always name a human."""
-    who = actor_of(request) or (supplied or "").strip() or default
-    if require and not who:
-        from fastapi import HTTPException
+    """The reviewer actually on record for this request.
 
-        raise HTTPException(
-            status_code=403,
-            detail="this action requires a recorded reviewer (authentication binds "
-                   "identity, or pass reviewer= explicitly)",
-        )
-    return who
+    - A personal reviewer token binds its owner, overriding every body field.
+    - A service/worker/extension credential may only claim an explicit
+      automation/system actor. It cannot name a human for `require=True`
+      actions, and its human-looking body fields are ignored everywhere else.
+    - In dev-open mode (no token configured) the legacy body fallback remains.
+    """
+    from fastapi import HTTPException
+
+    who = actor_of(request)
+    if who:
+        return who
+
+    cls = credential_class(request)
+    candidate = (supplied or "").strip()
+
+    if cls == CREDENTIAL_DISABLED:
+        who = candidate or default
+        if require and not who:
+            raise HTTPException(
+                status_code=403,
+                detail="this action requires a recorded reviewer; pass reviewer= explicitly",
+            )
+        return who
+
+    if cls in SYSTEM_CLASSES:
+        if _is_system_actor(candidate):
+            return candidate
+        if require:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "this action requires a human reviewer credential; service, "
+                    "worker and extension credentials cannot approve or attest "
+                    "on a person's behalf"
+                ),
+            )
+        return default
+
+    # Unknown class: never let it satisfy a human-only gate.
+    if require:
+        raise HTTPException(status_code=403, detail="unsupported credential class")
+    return default
+
+
+def service_tokens(token: str | None = None) -> dict[str, str]:
+    """Configured non-human credentials, mapped to their class.
+
+    An explicit `token` (tests, embedded app) overrides only the service env.
+    Worker/extension env vars are additive; an unset worker token means workers
+    fall back to the service token and remain non-human.
+    """
+    out: dict[str, str] = {}
+    service = (token if token is not None else token_from_env() or "").strip()
+    if service:
+        out[service] = CREDENTIAL_SERVICE
+    worker = os.environ.get(WORKER_TOKEN_ENV, "").strip()
+    if worker:
+        out.setdefault(worker, CREDENTIAL_WORKER)
+    extension = os.environ.get(EXTENSION_TOKEN_ENV, "").strip()
+    if extension:
+        out.setdefault(extension, CREDENTIAL_EXTENSION)
+    return out
 
 
 def register(app, token: str | None = None, db_url: str | None = None) -> None:
-    """Attach auth + request-logging middleware. `token` overrides the env;
-    `db_url` enables personal reviewer-token resolution."""
-    global _effective_token
-    _effective_token = token if token is not None else token_from_env()
-
-    app.add_middleware(
-        _TokenAuthMiddleware,
-        token=token if token is not None else token_from_env(),
-        db_url=db_url,
-    )
+    """Attach auth + request-logging middleware. `token` overrides the service
+    env; `db_url` enables personal reviewer-token resolution."""
+    tokens = service_tokens(token)
+    app.add_middleware(_TokenAuthMiddleware, tokens=tokens, db_url=db_url)
     # logging added last → outermost, so auth rejections are logged too
     app.add_middleware(_RequestLogMiddleware)
 
 
 router = APIRouter(tags=["meta"])
-
-_effective_token: Optional[str] = None  # what register() actually configured
 
 
 @router.get("/whoami")
@@ -111,29 +184,26 @@ async def whoami(request: Request) -> dict:
     valid token when auth is enabled — doubles as a liveness check for
     pasted reviewer tokens from the dashboard."""
     actor = actor_of(request)
-    if actor:
-        auth = "reviewer"
-    elif _effective_token or token_from_env():
-        auth = "service"
-    else:
-        auth = "disabled"
+    auth = credential_class(request)
     return {"actor": actor, "auth": auth}
 
 
 class _TokenAuthMiddleware(BaseHTTPMiddleware):
     """Bearer-token gate. 401 without/with bad credentials, 503 misconfigured."""
 
-    def __init__(self, app, token: str | None, db_url: str | None = None):  # noqa: ANN001
+    def __init__(self, app, tokens: dict[str, str], db_url: str | None = None):  # noqa: ANN001
         super().__init__(app)
-        self._token = token
+        self._tokens = dict(tokens)
         self._db_url = db_url
 
     async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
-        if self._token is None:
+        if not self._tokens:
             # dev-open mode: no auth, no identity binding
             request.state.actor = None
+            request.state.credential_class = CREDENTIAL_DISABLED
             return await call_next(request)
         if request.url.path in OPEN_PATHS:
+            request.state.credential_class = CREDENTIAL_DISABLED
             return await call_next(request)
 
         header = request.headers.get("authorization", "")
@@ -141,12 +211,14 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
         if scheme.lower() != "bearer" or not credential:
             return _auth_required("missing or malformed Authorization header")
 
-        # constant-time compare for the shared secret
+        # constant-time compare for every configured non-human credential
         import hmac
 
-        if hmac.compare_digest(credential, self._token):
-            request.state.actor = None  # service token → body supplies actors
-            return await call_next(request)
+        for configured, cls in self._tokens.items():
+            if hmac.compare_digest(credential, configured):
+                request.state.actor = None
+                request.state.credential_class = cls
+                return await call_next(request)
 
         if self._db_url:
             try:
@@ -158,6 +230,7 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
                 )
             if reviewer:
                 request.state.actor = reviewer
+                request.state.credential_class = CREDENTIAL_REVIEWER
                 return await call_next(request)
 
         return _auth_required("invalid token")

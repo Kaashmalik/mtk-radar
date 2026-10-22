@@ -57,20 +57,27 @@ def growth_score(rows: Iterable[dict[str, Any]]) -> float:
     # Normalize each signal to 0–100 with transparent, conservative ceilings.
     reach_score = min(100.0, mean(reach) / 10_000 * 100) if reach else 0.0
     engagement_score = min(100.0, mean(engagement) / 8 * 100) if engagement else 0.0
-    retention_score = min(100.0, mean(retention) / 45 * 100) if any(retention) else 0.0
-    click_score = min(100.0, mean(clicks) / 100 * 100) if any(clicks) else 0.0
+    retention_score = min(100.0, mean(retention) / 45 * 100) if retention else 0.0
+    click_score = min(100.0, mean(clicks) / 100 * 100) if clicks else 0.0
 
-    available = [
-        (reach_score, 0.40),
-        (engagement_score, 0.25),
-        (retention_score, 0.25),
-        (click_score, 0.10),
-    ]
-    # Renormalize when a platform does not expose a signal (e.g. no CTR yet).
-    total_weight = sum(weight for score, weight in available if score > 0)
+    # A measured zero is not a missing signal. If views exist, engagement is
+    # known (and may honestly be 0%); if retention/a CTR were reported, a zero
+    # value still belongs in the weighting. Only genuinely unavailable fields
+    # are renormalized away.
+    available: list[tuple[float, float]] = []
+    if any(r.get("views") is not None or r.get("impressions") is not None for r in rows):
+        available.append((reach_score, 0.40))
+    if any(_num(r.get("views")) > 0 for r in rows):
+        available.append((engagement_score, 0.25))
+    if any(r.get("retention_3s") is not None or r.get("avg_view_duration_s") is not None
+           for r in rows):
+        available.append((retention_score, 0.25))
+    if any(r.get("link_clicks") is not None for r in rows):
+        available.append((click_score, 0.10))
+    total_weight = sum(weight for _score, weight in available)
     if total_weight == 0:
         return 0.0
-    blended = sum(score * weight for score, weight in available if score > 0) / total_weight
+    blended = sum(score * weight for score, weight in available) / total_weight
     return _clamp_score(blended)
 
 
@@ -190,6 +197,10 @@ def summarize(
 
     return {
         "score": growth_score(rows),
+        # This is an internal directional blend of the fields the platform
+        # happened to expose. It is not a platform metric or a compliance
+        # signal; label it that way wherever it is displayed.
+        "score_label": "internal directional health signal, not a platform metric",
         "measured_posts": len(rows),
         "by_platform": [
             {"platform": platform, **values}

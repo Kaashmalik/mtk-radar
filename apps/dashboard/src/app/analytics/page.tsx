@@ -75,6 +75,7 @@ type Analytics = {
   }[];
   growth: {
     score: number;
+    score_label?: string;
     measured_posts: number;
     by_platform: { platform: string; posts: number; views: number; engagement: number; reach: number }[];
     recommendations: { priority: string; title: string; detail: string; metric: string }[];
@@ -261,8 +262,17 @@ export default async function AnalyticsPage() {
                 <h2>Growth loop</h2>
                 <p>Conservative recommendations from measured posts — test, do not assume causality.</p>
               </div>
-              <span className="tag tag-accent">{data.growth?.score ?? 0}/100</span>
+              <span
+                className="tag tag-accent"
+                title={data.growth?.score_label ?? "Internal directional signal, not a platform metric"}
+              >
+                Internal health {data.growth?.score ?? 0}/100
+              </span>
             </div>
+            <p className="small muted" style={{ margin: "0 0 0.7rem" }}>
+              Directional internal signal built only from measured fields — not a
+              platform metric and not evidence of YouTube API compliance.
+            </p>
             {!data.growth || data.growth.measured_posts === 0 ? (
               <div className="empty-state">
                 No measured posts yet. Publish a private test, run the metrics worker, then

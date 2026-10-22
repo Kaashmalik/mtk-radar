@@ -40,7 +40,8 @@ from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # optional; raises rate limits
-MTK_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+MTK_API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
+                 or os.environ.get("MTK_API_TOKEN") or "").strip()
 
 
 def _api_auth_headers() -> dict:
