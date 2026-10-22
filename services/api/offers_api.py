@@ -199,7 +199,8 @@ async def stale_offers() -> list[dict]:
 
 
 @router.get("/audit/verified")
-async def audit_verified(limit: int = Query(default=200, le=2000)) -> dict:
+async def audit_verified(response: Response, limit: int = Query(default=200, le=2000),
+                         cursor: Optional[str] = Query(default=None)) -> dict:
     """Read-only inventory: verified offers that would fail today's gate (slice 14).
 
     The plan's legacy step is a human decision, so this reports candidates
@@ -207,14 +208,31 @@ async def audit_verified(limit: int = Query(default=200, le=2000)) -> dict:
     to `verified` would raise now, because both use `_verified_problems`.
     """
     pool = db.get()
+    from pagination import (
+        decode_cursor,
+        decode_datetime,
+        decode_uuid,
+        encode_cursor,
+        set_next_cursor,
+    )
+    parts = decode_cursor(cursor, 2)
+    before_updated = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT id, title, provider, updated_at FROM offers
         WHERE state = 'verified'
-        ORDER BY updated_at ASC
+          AND ($2::timestamptz IS NULL
+               OR (updated_at, id) > ($2::timestamptz, $3::uuid))
+        ORDER BY updated_at ASC, id ASC
         LIMIT $1
         """,
-        limit,
+        limit, before_updated, before_id,
+    )
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["updated_at"], row["id"]),
     )
     failures = []
     for row in rows:

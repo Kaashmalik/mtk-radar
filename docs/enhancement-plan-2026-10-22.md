@@ -8,88 +8,109 @@
 still not a production-readiness certificate, and not a promise of views,
 subscribers or revenue.
 
-**Implementation status (22 October 2026, after the audit and the P1
-completion pass, plus the follow-up hardening pass):** the plan is **not
+**Implementation status (22 October 2026, after the audit, the P1 completion
+pass, the hardening pass, and the release-integrity pass):** the plan is **not
 completely implemented**. The earlier P0/P1 pass closed several code-scoped
 findings (dashboard login gate, immutable revision/attempt media keys,
 persisted resumable upload sessions, per-preset render-queue coverage,
 authenticated byte-range playback, growth-score zero/unavailable handling, and
-keyset cursors on the core list endpoints). This follow-up pass then closed
-additional correctness and safety gaps:
+keyset cursors on the core list endpoints). The hardening pass then closed:
 
 - **Analytics provenance/degradation:** YouTube metric groups are requested
   separately; a provider-rejected group is recorded as unsupported instead of
-  discarding the whole report. Metrics snapshots now store the report period,
+  discarding the whole report. Metrics snapshots store the report period,
   metric definition, degraded flag/detail, and whether 3-second retention is a
-  nearest-bucket estimate. The dashboard labels estimates (`~X%*`) and partial
-  data; aggregates preserve missing-vs-zero instead of forcing `0`.
-- **Human-only controls:** `require=True` now rejects service, worker,
-  extension **and** `automation:*` identities. Automation policy writes
-  (including the generic `/settings/automation_policy` route), variant
-  approval, experiment decisions, redaction/claim attestations, corrections
-  and ToS reviews require a human reviewer credential.
-- **Backlog draining:** `/trends/scan` now marks scored items processed, so the
-  inbox tail is reachable instead of rescanning the same newest rows forever.
-  `/items` and `/trends` gained keyset cursors; `/trends` keeps exact numeric
-  cursor values (float round-tripping repeated a page). CORS exposes
-  `X-Next-Cursor` to the browser.
+  nearest-bucket estimate. The dashboard labels estimates and partial data;
+  aggregates preserve missing-vs-zero instead of forcing `0`.
+- **Human-only controls:** `require=True` rejects service, worker, extension
+  **and** `automation:*` identities for policy writes, approvals, attestations,
+  corrections and ToS reviews.
+- **Backlog draining:** `/trends/scan` marks scored items processed, so the
+  inbox tail is reachable; `/items` and `/trends` gained keyset cursors.
 - **Per-operation kill switch:** publishing re-reads policy before each post,
-  retry and correction; the render sweep re-reads it before each render; and
-  `POST /schedules/{id}/attempt` refuses upload authorization while automation
-  is paused or in dry-run.
-- **Pinned lookups:** render/publishing fetch a pinned render or capture by id
-  (`GET /renders/{id}`, `GET /captures/{id}`) instead of scanning the first
-  page of a filtered list. The render sweep follows `X-Next-Cursor` instead of
-  seeing only the newest ten candidates. Autopilot dedupes per target
-  (platform/account/language/variant), not merely per platform.
+  retry and correction; the render sweep re-reads it before each render.
+- **Pinned lookups:** renders/captures are fetched by id instead of scanning
+  the first page of a filtered list; the render sweep follows
+  `X-Next-Cursor`.
 
-Verification on the audit machine: **851 backend tests passed** (integration
+The release-integrity pass then made the release gate real and
+single-sourced:
+
+- **One authoritative release check:** `services/api/release_gate.py` now owns
+  "may this go out?". Upload authorization (`POST /schedules/{id}/attempt`),
+  the publishing worker (which calls `GET /schedules/{id}/release-check` and
+  **fails closed** if the gate is unreachable), and the dashboard preview all
+  run the same structured check. The API's offer-freshness helper delegates to
+  the same implementation, so there are no longer three divergent checks.
+- **Mandatory package policy is a hard gate:** a new human-controlled
+  `release_policy` setting (`require_package_assets`, `require_playback_review`,
+  strict defaults) gates upload authorization on thumbnail + captions **file**
+  + approved metadata for YouTube releases — missing data blocks, never annotates.
+- **Final human playback sign-off:** `POST /renders/{id}/playback-review`
+  (refuses automation credentials) records who watched the final export; the
+  release gate refuses renders without an approved sign-off.
+- **Format/claim binding at release:** render registration re-checks
+  `assert_format_wording` (a hand-edited script cannot be rendered), and the
+  release gate re-reads the pinned script format plus the bound capture's
+  recorded `claim_outcome` — a `claim_walkthrough` requires an actual
+  demonstration.
+- **Render idempotency:** a partial unique index makes re-registering the same
+  output for the same script revision return the existing render instead of
+  cloning it.
+- **Durable owed-work record:** new `jobs` table + `/jobs` API
+  (dedupe-keyed enqueue, `SKIP LOCKED` claim/lease, results, dead-lettering,
+  `/jobs/stuck`). Schedule creation records the owed publish work; expired
+  leases and dead jobs surface in `/attention` (kind `job`) and are **never
+  auto-reclaimed** — expired leases are a human decision, like held uploads.
+- **Explicit cancellation:** human-only `POST /schedules/{id}/cancel` moves a
+  post to a new terminal `cancelled` state with a recorded reason, instead of
+  mislabelling it `failed`.
+- **Cursor coverage:** `/render-dead-letter`, `/sources`,
+  `/platform-accounts`, and `/offers/audit/verified` are now keyset-paginated;
+  `/items` gained a `q` search parameter. Attention counts remain global over
+  all rows (items are truncated per kind by design).
+- **CI guard for test discovery:** `scripts/tests/test_pytest_discovery.py`
+  fails any runner where a tests directory exists but is missing from
+  pytest.ini `testpaths` (or a listed path has no tests).
+- **Dashboard:** full inbox page with search, process-filter tabs and cursor
+  pagination; a release-readiness card on the offer page (same gate, same
+  problem list, plus cancel); per-render playback sign-off controls; a
+  connection metadata-test button on Connections; and a release-policy card in
+  Settings.
+
+Verification on the audit machine: **857 backend tests passed** (integration
 tests against a disposable PostgreSQL database with real migrations), Python
-lint/compile, dashboard **typecheck and production build passed**. That is
-code/test evidence only; it is not live-provider, restore or deployment proof.
+lint/compile clean, dashboard production build passed (including the new
+`/inbox` route). That is code/test evidence only; it is not live-provider,
+restore or deployment proof.
 
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
 
-- **P0 dashboard workflows remain partial.** This pass added inbox **Promote**
-  and **Dismiss** controls, and the review desk/offer page can now **verify**
-  or **request re-verification with a recorded reason** instead of requiring a
-  hand-called API. Still missing: inbox search/filters/pagination, per-conflict
-  resolution, raw-snapshot inspection, studio script/metadata/caption/chapter
-  editing and revision save, release-package preview, reschedule/cancel,
-  connection tests, notification tests, storage/backup status, and several
-  "Needs You" actions (render failure, correction, expiry, token reconnect,
-  worker restart). Several pages still render an outage as an empty pipeline
-  or zero metrics instead of "unavailable".
-- **Release gating is still three divergent checks** (API schedule validation,
-  offer freshness helper, publishing worker). This pass made the worker **fail
-  closed on a NULL `recheck_at`** (it previously published), but upload
-  authorization still does not itself re-check offer freshness, and there is no
-  separate public-release endpoint.
-- **Format/claim binding stops at generation.** Render registration and
-  scheduling do not re-read the script format or the capture's
-  `claim_outcome`; the wording guard is English/`official_explainer` only.
-- **Mandatory YouTube package policy is not a hard release gate.** Thumbnail,
-  caption, playlist and comments handling exist, but the set that blocks a
-  release is not fully enforced at scheduling/upload.
-- **Editorial/scene-timeline QC and a final human playback-review gate are not
-  implemented.** Authenticated playback exists; a recorded human sign-off on
-  the final export does not. `-shortest` is gone, but that is not the same as
-  scene-timeline sign-off.
-- **No durable PostgreSQL-backed job/outbox.** Orchestration remains polling +
-  row state. Render registration is not idempotent, upload `lease_expires_at`
-  is written but not enforced, sweep-lock release is not holder-scoped, and
-  collector cadence is in memory. Render **failures now stop retrying after
-  three attempts per script revision/preset** and remain in the dead letter for
-  a human, but there is no terminal queue state or automatic recovery. A restart
-  loses in-flight render work.
-- **Cursor coverage is still partial.** `/render-dead-letter`,
-  `/offers/audit/verified`, `/attention`, analytics truncations, `/sources` and
-  `/platform-accounts` are not fully paginated. CI's explicit test discovery
-  still needs a guard against missing directories.
+- **Workers have not migrated onto the durable job queue.** The `jobs` outbox
+  records owed publishing work and surfaces wedged jobs, but the render and
+  publishing workers still poll their lists; claiming work from `/jobs` is the
+  next migration step. Collector cadence also remains in memory.
+- **Dashboard workflows remain partial.** This pass added inbox
+  search/filter/pagination, the release-readiness card, playback sign-off,
+  cancel, connection tests and the release-policy card. Still missing:
+  per-conflict resolution UI, raw-snapshot inspection, studio
+  script/metadata/caption/chapter editing and revision save, reschedule UI,
+  notification tests, storage/backup status views, and several "Needs You"
+  actions (render failure, correction, expiry, token reconnect, worker
+  restart). Several pages still render an outage as an empty pipeline or zero
+  metrics instead of "unavailable".
+- **The wording guard is English/`official_explainer` only.** Format/claim
+  binding now runs at render registration and in the release gate, but the
+  first-person-result guard itself does not yet cover Urdu or the other
+  formats.
+- **Attention truncation is by design but bounded:** counts are global;
+  per-kind item lists cap at 50 rows.
 - **Live-provider and operational proof** remains outstanding: credentials,
   accounts, domain/TLS, S3/R2, real YouTube upload/metrics, image deployment on
   a private network, and database/media restore in a separate environment.
+  These cannot be proven from the audit machine; they need an operator with
+  real infrastructure.
 
 The system remains a **strong prototype in active hardening**, not
 production-ready or fully autonomous.

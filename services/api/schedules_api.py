@@ -38,6 +38,8 @@ from api_hardening import (
     effective_reviewer,
 )
 from offer_freshness import freshness_problem
+from release_gate import describe as describe_problems
+from release_gate import offer_problems, release_problems
 from automation import (
     AutomationDenied,
     authorize as authorize_automation,
@@ -395,6 +397,22 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
                                               "privacy": body.privacy,
                                               "language": body.language,
                                               "metadata_variant": scheduled_variant_key})
+
+    # Durable owed-work record (§8.A): the queue is now also written to the out
+    # box-style job table, so a restart (or an operator reading the attention
+    # view) can see exactly what publishing work is owed and what wedged —
+    # instead of only polling row state.
+    await pool.execute(
+        """
+        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts)
+        VALUES ('publish_schedule', $1, $2::jsonb, $3, 3)
+        ON CONFLICT (dedupe_key) DO NOTHING
+        """,
+        row["id"],
+        json.dumps({"platform": body.platform, "language": body.language,
+                    "package_hash": package_hash}),
+        f"publish:{row['id']}:{package_hash}",
+    )
     return {"id": row["id"], "state": row["state"], "created": True,
             "idempotency_key": idempotency_key, "language": body.language,
             "metadata_language": metadata.get("language", language_policy["metadata_language"]),
@@ -774,6 +792,16 @@ async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
             detail="upload authorization refused: automation is "
                    + ("paused" if policy.get("paused") else "in dry-run mode"),
         )
+    # One authoritative release check (§17). Upload authorization used to
+    # verify only the automation policy; freshness, package completeness and
+    # playback sign-off were checked (differently) elsewhere or not at all.
+    problems = await release_problems(pool, schedule_id)
+    if problems:
+        raise HTTPException(
+            status_code=409,
+            detail="release gate refused upload authorization: "
+                   + describe_problems(problems),
+        )
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))
@@ -816,6 +844,66 @@ async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
             )
     return {"id": str(schedule_id), "acquired": True,
             "attempt_token": token, "attempt": marker}
+
+
+@router.get("/schedules/{schedule_id}/release-check")
+async def release_check(schedule_id: uuid.UUID) -> dict:
+    """Preview the release gate for a scheduled post (§17).
+
+    The same check the upload authorization runs. The dashboard renders this
+    as the package/readiness card; automation and a human see the same list,
+    so "why is this held?" is never a guess.
+    """
+    problems = await release_problems(db.get(), schedule_id)
+    return {
+        "id": str(schedule_id),
+        "ok": not problems,
+        "problems": problems,
+    }
+
+
+class ScheduleCancelIn(BaseModel):
+    note: str = Field(min_length=3, max_length=1000)
+
+
+@router.post("/schedules/{schedule_id}/cancel")
+async def cancel_schedule(schedule_id: uuid.UUID, body: ScheduleCancelIn,
+                          request: Request) -> dict:
+    """Withdraw a queued post without pretending it failed (§17).
+
+    Cancelling is a human editorial decision (and unlike a failure, it is
+    terminal): retries and automation never touch a cancelled post. The note
+    is recorded in the audit trail against the reviewer.
+    """
+    actor = effective_reviewer(request, None, require=True)
+    pool = db.get()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state::text AS state FROM schedules WHERE id = $1 FOR UPDATE",
+            schedule_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="schedule not found")
+        if row["state"] in ("published", "cancelled"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"a {row['state']} post cannot be cancelled",
+            )
+        await conn.execute(
+            "UPDATE schedules SET state = 'cancelled', "
+            "outcome_detail = outcome_detail || $2::jsonb, updated_at = now() "
+            "WHERE id = $1",
+            schedule_id,
+            json.dumps({"cancelled_by": actor, "cancel_note": body.note}),
+        )
+    await audit_actor_note(pool, schedule_id, actor, body.note)
+    return {"id": str(schedule_id), "state": "cancelled", "by": actor}
+
+
+async def audit_actor_note(pool, schedule_id: uuid.UUID, actor: str, note: str) -> None:
+    from settings_store import audit
+    await audit(pool, actor=actor, action="schedule:cancel", entity="schedules",
+                detail={"schedule_id": str(schedule_id), "note": note})
 
 
 class ScheduleReconcileIn(BaseModel):
@@ -1256,31 +1344,13 @@ async def _current_script_hash(pool, offer_id: uuid.UUID,
 async def _schedule_offer_problem(pool, offer_id: uuid.UUID) -> Optional[str]:
     """Why an offer may not enter (or stay in) the publish queue right now.
 
-    Kept separate from `_revalidate_offer` so API errors can explain exactly
-    which fact failed instead of returning a bare boolean. A missing row, a
-    null recheck deadline and an unexpected state all fail closed.
+    Delegates to release_gate so there is ONE freshness/state implementation —
+    previously this helper, the publishing worker and schedule validation each
+    had their own, and they disagreed (the worker failed open on a NULL
+    recheck deadline).
     """
-    row = await pool.fetchrow(
-        """
-        SELECT state::text AS state,
-               (expires_at IS NULL OR expires_at > now()) AS not_expired,
-               recheck_at > now() AS recheck_ok
-        FROM offers WHERE id = $1
-        """,
-        offer_id,
-    )
-    if row is None:
-        return "offer not found"
-    if not row["not_expired"]:
-        return "offer has expired"
-    if not row["recheck_ok"]:
-        return "offer recheck is overdue (recheck_at)"
-    if row["state"] not in ("approved_for_video", "verified"):
-        return (
-            f"offer state '{row['state']}' does not allow publishing "
-            "(must be verified or approved_for_video)"
-        )
-    return None
+    problems = await offer_problems(pool, offer_id)
+    return describe_problems(problems) if problems else None
 
 
 async def _revalidate_offer(pool, offer_id: uuid.UUID) -> bool:

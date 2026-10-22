@@ -115,6 +115,31 @@ class Publisher:
             return False
         return True
 
+    def _release_gate_ok(self, schedule_id: str) -> bool:
+        """The API owns the release decision (§17). Unreachable gate = no upload.
+
+        Unlike the local pre-filters, this must NOT degrade to legacy behaviour:
+        a blocked gate is exactly the moment the operator needs to know."""
+        try:
+            resp = self.api.get(f"/schedules/{schedule_id}/release-check")
+            status = getattr(resp, "status_code", 500)
+            if status >= 300:
+                self._block(schedule_id, f"release gate unreachable (HTTP {status})")
+                return False
+            body = resp.json()
+            problems = body.get("problems") or []
+            if body.get("ok") is not True:
+                detail = "; ".join(
+                    f"{p.get('code')}: {p.get('detail')}" for p in problems
+                ) or "release gate returned not-ok without details"
+                self._block(schedule_id, f"release gate: {detail}")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 — gate errors must stop the upload
+            self._block(schedule_id, f"release gate unavailable ({exc}) — "
+                                     "upload blocked (fail closed)")
+            return False
+
     # ------------------------------------------------------------ adapters
 
     def build_adapters(self) -> dict[str, object]:
@@ -657,6 +682,13 @@ class Publisher:
         captions_file = self._materialize_checked(
             captions_path, post.get("captions_sha256"), cache / "captions", post, "captions")
         if cover_file is False or captions_file is False:
+            return False
+
+        # §17: the API-side release gate is the ONE authority on "may this go
+        # out" (freshness + package completeness + playback sign-off + format
+        # binding). The local checks above stay as a cheap pre-filter, but the
+        # upload never happens if the gate is unreachable — fail closed.
+        if not self._release_gate_ok(post["id"]):
             return False
 
         if platform == "instagram":

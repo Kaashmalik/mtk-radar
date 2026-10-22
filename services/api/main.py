@@ -30,6 +30,7 @@ from automation_api import router as automation_router
 from captures_api import router as captures_router
 import health_api
 from health_api import router as health_router
+from jobs_api import router as jobs_router
 from locks_api import router as locks_router
 from media_api import router as media_router
 from jsonb import decode_mapping
@@ -94,6 +95,7 @@ app.include_router(settings_router)
 app.include_router(automation_router)
 app.include_router(health_router)
 app.include_router(locks_router)
+app.include_router(jobs_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 app.include_router(trends_router)
@@ -127,8 +129,17 @@ async def shutdown() -> None:
 
 
 @app.get("/sources")
-async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
+async def list_sources(
+    response: Response,
+    enabled: Optional[bool] = None,
+    limit: int = Query(default=100, le=500),
+    cursor: Optional[str] = Query(default=None),
+) -> list[dict]:
     pool = db.get()
+    parts = decode_cursor(cursor, 3)
+    before_tier = parts[0] if parts else None
+    before_provider = decode_datetime(parts[1]) if parts else None
+    before_id = decode_uuid(parts[2]) if parts else None
     rows = await pool.fetch(
         """
         SELECT id, provider, canonical_domain, account_handle, category, adapter,
@@ -137,9 +148,20 @@ async def list_sources(enabled: Optional[bool] = None) -> list[dict]:
                tos_reviewed_at, tos_reviewer, tos_reference
         FROM sources
         WHERE ($1::boolean IS NULL OR enabled = $1)
-        ORDER BY trust_tier, provider
+          AND ($3::text IS NULL
+               OR (trust_tier::text, provider, id) < ($3::text, $4::text, $5::uuid))
+        ORDER BY trust_tier, provider, id
+        LIMIT $2
         """,
         enabled,
+        limit,
+        before_tier,
+        before_provider,
+        before_id,
+    )
+    set_next_cursor(
+        response, [dict(r) for r in rows], limit,
+        lambda row: encode_cursor(row["trust_tier"], row["provider"], row["id"]),
     )
     # `config` is jsonb — asyncpg hands it over as serialized JSON, so decode
     # it into a real object for API consumers (collectors read config.* keys).
@@ -333,6 +355,7 @@ async def create_item(item: ItemIn) -> dict:
 async def list_items(
     response: Response,
     processed: Optional[bool] = None,
+    q: Optional[str] = Query(default=None, max_length=200),
     limit: int = Query(default=50, le=200),
     cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
@@ -340,6 +363,7 @@ async def list_items(
 
     Paginated with an opaque keyset cursor so the inbox tail is reachable;
     a fixed LIMIT previously hid every item older than the newest page.
+    `q` searches title and URL (inbox search/filter, plan §6 P0).
     """
     pool = db.get()
     parts = decode_cursor(cursor, 2)
@@ -354,6 +378,9 @@ async def list_items(
         FROM items i
         LEFT JOIN sources s ON s.id = i.source_id
         WHERE ($1::boolean IS NULL OR i.processed = $1)
+          AND ($5::text IS NULL OR i.title ILIKE '%' || $5 || '%'
+               OR i.url ILIKE '%' || $5 || '%'
+               OR coalesce(i.canonical_url, '') ILIKE '%' || $5 || '%')
           AND ($3::timestamptz IS NULL
                OR (i.observed_at, i.id) < ($3::timestamptz, $4::uuid))
         ORDER BY i.observed_at DESC, i.id DESC
@@ -363,6 +390,7 @@ async def list_items(
         limit,
         before_observed,
         before_id,
+        q,
     )
     out = [dict(r) for r in rows]
     set_next_cursor(

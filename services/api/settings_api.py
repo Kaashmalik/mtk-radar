@@ -29,6 +29,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 KNOWN_KEYS: dict[str, str] = {
     "publish_windows": "list of local (Asia/Karachi) HH:MM times",
     "automation_policy": "human-vs-automation control for every pipeline stage",
+    "release_policy": "what a queued post must prove before upload (package/playback)",
     "brand": "website CTA, CTA copy, languages and hashtag sets used by the studio",
     "media_backup": "laptop/media backup schedule + last run status",
     "language_policy": "English-first metadata/captions + opt-in Urdu voiceover",
@@ -47,6 +48,8 @@ def normalize_setting(key: str, value: Any) -> Any:
         return {"windows": parse_publish_windows(value)}
     if key == "automation_policy":
         return normalize_policy(value)
+    if key == "release_policy":
+        return _normalize_release_policy(value)
     if key == "brand":
         return _normalize_brand(value)
     if key == "media_backup":
@@ -102,6 +105,30 @@ def _normalize_language_policy(value: Any) -> dict:
         "default_narration_language": default_narration,
         "urdu_voiceover_enabled": "ur" in narration_languages,
     }
+
+
+def _normalize_release_policy(value: Any) -> dict:
+    """What a queued post must prove before an upload (§17, plan §5/§6).
+
+    Defaults are STRICT: mandatory YouTube package assets and a recorded human
+    playback sign-off. Turning one off is a recorded operator decision, and
+    the release gate + dashboard read exactly this value.
+    """
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("release_policy must be an object")
+    out: dict = {}
+    for key in ("require_package_assets", "require_playback_review"):
+        flag = value.get(key, True)
+        if not isinstance(flag, bool):
+            raise ValueError(f"release_policy.{key} must be a boolean")
+        out[key] = flag
+    unknown = set(value) - set(out)
+    if unknown:
+        raise ValueError(
+            "unknown release_policy keys: " + ", ".join(sorted(unknown)))
+    return out
 
 
 def _normalize_brand(value: Any) -> dict:
@@ -185,6 +212,14 @@ async def get_setting(key: str) -> dict:
     pool = db.get()
     stored = await get_value(pool, key)
     if not stored:
+        if key == "release_policy":
+            # Unset means the strict default, not "no policy" (§17). Reads must
+            # show what the release gate will actually enforce.
+            return {
+                "key": key,
+                "value": {"require_package_assets": True,
+                          "require_playback_review": True},
+            }
         return {"key": key, "value": None}
     if key == "language_policy":
         # Reads expose the effective policy (including the computed
@@ -208,12 +243,12 @@ async def put_setting(key: str, body: SettingIn, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     pool = db.get()
-    # Automation policy is a human control, not a worker preference. The same
-    # policy can be written through this generic route, so the human gate must
-    # apply here too (not only on /automation/policy).
+    # Automation policy and release policy are human controls, not worker
+    # preferences. The same values can be written through this generic route,
+    # so the human gate must apply here too (not only on /automation/policy).
     updated_by = effective_reviewer(
         request, None, default="operator",
-        require=key == "automation_policy",
+        require=key in ("automation_policy", "release_policy"),
     )
     await put_value(pool, key, normalized, updated_by=updated_by)
     await audit(pool, actor=updated_by, action="settings:update", entity="settings",

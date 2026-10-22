@@ -12,6 +12,7 @@ import IdentityBadge from "./IdentityBadge";
 
 const LINKS: [string, string][] = [
   ["/", "Overview"],
+  ["/inbox", "Inbox"],
   ["/radar", "Radar"],
   ["/review", "Review"],
   ["/queue", "Queue"],

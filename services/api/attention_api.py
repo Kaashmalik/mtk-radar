@@ -128,6 +128,7 @@ async def build_attention(pool=None) -> dict[str, Any]:
                 "verification": "Evidence waiting for verification",
                 "budget": "Automation budget",
                 "worker": "Worker health",
+                "job": "Stuck / dead jobs",
             }.get(kind, kind.replace("_", " ").title()),
         }
 
@@ -393,6 +394,39 @@ async def build_attention(pool=None) -> dict[str, Any]:
     workers = await worker_snapshot(pool)
     worker_items = worker_attention_items(workers)
     add("worker", len(worker_items), worker_items)
+
+    # ---- durable jobs (§8.A): wedged work must surface, never go quiet ----
+    job_items: list[dict[str, Any]] = []
+    expired = await pool.fetch(
+        """
+        SELECT id, kind, lease_holder, lease_expires_at, attempts
+        FROM jobs WHERE status = 'leased' AND lease_expires_at <= now()
+        ORDER BY lease_expires_at ASC LIMIT 20
+        """,
+    )
+    for row in expired:
+        job_items.append(_item(
+            kind="job", entity_id=row["id"], severity="error",
+            title=f"{row['kind']} job lease expired without an outcome",
+            detail=f"holder={row['lease_holder']} attempts={row['attempts']} — "
+                   "a human must check the effects before this work is retried",
+            at=row["lease_expires_at"],
+        ))
+    dead = await pool.fetch(
+        """
+        SELECT id, kind, attempts, max_attempts, last_error, updated_at
+        FROM jobs WHERE status = 'dead'
+        ORDER BY updated_at DESC LIMIT 20
+        """,
+    )
+    for row in dead:
+        job_items.append(_item(
+            kind="job", entity_id=row["id"], severity="warning",
+            title=f"{row['kind']} job dead-lettered after {row['attempts']} attempt(s)",
+            detail=row["last_error"] or "no error detail recorded",
+            at=row["updated_at"],
+        ))
+    add("job", len(job_items), job_items)
 
     # Stable presentation: errors first, then warnings, newest first inside
     # each severity band.

@@ -19,17 +19,18 @@ from seo import PLATFORM_LIMITS, PLATFORMS, build_metadata
 
 SCHEDULE_STATES: Final[tuple[str, ...]] = (
     "draft", "needs_approval", "approved", "scheduled",
-    "published", "failed", "paused",
+    "published", "failed", "paused", "cancelled",
 )
 
 TRANSITIONS: Final[dict[str, tuple[str, ...]]] = {
-    "draft": ("needs_approval", "paused"),
-    "needs_approval": ("approved", "draft"),
-    "approved": ("scheduled", "needs_approval", "paused"),
-    "scheduled": ("published", "failed", "paused"),
-    "paused": ("scheduled", "failed"),  # resume, or operator cancels as failed
+    "draft": ("needs_approval", "paused", "cancelled"),
+    "needs_approval": ("approved", "draft", "cancelled"),
+    "approved": ("scheduled", "needs_approval", "paused", "cancelled"),
+    "scheduled": ("published", "failed", "paused", "cancelled"),
+    "paused": ("scheduled", "failed", "cancelled"),  # resume, cancel, or fail
     "published": (),                     # terminal — corrections create new content
     "failed": ("scheduled", "paused"),   # retry eligible failures only
+    "cancelled": (),                     # terminal — a human withdrew the post
 }
 
 # Plan §6/§17: official-API constraints live in seo.py (single source of

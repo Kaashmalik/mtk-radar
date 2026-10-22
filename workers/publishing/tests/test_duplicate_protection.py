@@ -50,6 +50,8 @@ class FakeAPI:
                                  "recheck_at": "2999-01-01T00:00:00+00:00"})
         if path == "/schedules":
             return FakeResponse([])
+        if path.startswith("/schedules/") and path.endswith("/release-check"):
+            return FakeResponse({"ok": True, "problems": []})
         return FakeResponse({})
 
     def post(self, path, json=None):
