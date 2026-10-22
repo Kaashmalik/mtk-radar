@@ -40,7 +40,8 @@ import notifications
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 
-_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+_API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
+              or os.environ.get("MTK_API_TOKEN") or "").strip()
 
 def _api_auth_headers() -> dict:
     """Authorization headers for the API when MTK_API_TOKEN is configured

@@ -24,7 +24,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import db
-from api_hardening import effective_reviewer
+from api_hardening import (
+    CREDENTIAL_DISABLED,
+    CREDENTIAL_REVIEWER,
+    credential_class,
+    effective_reviewer,
+)
 from offer_freshness import freshness_problem
 from automation import (
     AutomationDenied,
@@ -456,6 +461,19 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
     reviewer_on_record = effective_reviewer(request, body.reviewer)
     policy = await load_policy()
 
+    # Approval and queue entry are human decisions unless an explicit
+    # automation:<stage> actor is authorized below. A service/worker credential
+    # cannot name a person via the request body.
+    if body.to in ("approved", "scheduled") and not is_automation_actor(reviewer_on_record) \
+            and credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"schedule transition to '{body.to}' requires a human reviewer "
+                "credential (or an authorized automation:<stage> actor)"
+            ),
+        )
+
     # v0.26: automation may approve/schedule only when Settings enables that
     # stage. A human reviewer token always wins (identity binding), so this
     # path is reachable only by workers using the service token + explicit
@@ -542,9 +560,17 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
                 status_code=409,
                 detail="script changed since approval — reapproval required (§17)",
             )
-        # revalidate the offer snapshot at scheduling time (§17)
-        offer_ok = await _revalidate_offer(pool, schedule["offer_id"])
-        params.append(offer_ok)
+        # Revalidate the offer snapshot at scheduling time (§17). This is a
+        # release gate, not an observation: a stale/expired offer must not be
+        # stored as "scheduled with offer_evidence_ok=false". The operator gets
+        # an actionable reason and the schedule stays in its prior state.
+        problem = await _schedule_offer_problem(pool, schedule["offer_id"])
+        if problem:
+            raise HTTPException(
+                status_code=409,
+                detail=f"schedule blocked: {problem}; re-verify the offer, then schedule again (§17)",
+            )
+        params.append(True)
         sets.append(f"offer_evidence_ok = ${len(params)}")
 
     resolved_attempt = None
@@ -626,7 +652,7 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
     outcome is unknown. Automation must never put it back in the publishing
     queue on its own.
     """
-    actor = effective_reviewer(request, reviewer, default="operator")
+    actor = effective_reviewer(request, reviewer, require=True)
     if is_automation_actor(actor):
         raise HTTPException(
             status_code=403,
@@ -1045,18 +1071,39 @@ async def _current_script_hash(pool, offer_id: uuid.UUID,
     return script_version_hash(row["markdown"]) if row else None
 
 
-async def _revalidate_offer(pool, offer_id: uuid.UUID) -> bool:
-    """§17: offer still fresh for scheduling, resume or upload — expiry, recheck state."""
+async def _schedule_offer_problem(pool, offer_id: uuid.UUID) -> Optional[str]:
+    """Why an offer may not enter (or stay in) the publish queue right now.
+
+    Kept separate from `_revalidate_offer` so API errors can explain exactly
+    which fact failed instead of returning a bare boolean. A missing row, a
+    null recheck deadline and an unexpected state all fail closed.
+    """
     row = await pool.fetchrow(
         """
-        SELECT (expires_at IS NULL OR expires_at > now())
-           AND recheck_at > now()
-           AND state IN ('approved_for_video', 'verified') AS ok
+        SELECT state::text AS state,
+               (expires_at IS NULL OR expires_at > now()) AS not_expired,
+               recheck_at > now() AS recheck_ok
         FROM offers WHERE id = $1
         """,
         offer_id,
     )
-    return bool(row and row["ok"])
+    if row is None:
+        return "offer not found"
+    if not row["not_expired"]:
+        return "offer has expired"
+    if not row["recheck_ok"]:
+        return "offer recheck is overdue (recheck_at)"
+    if row["state"] not in ("approved_for_video", "verified"):
+        return (
+            f"offer state '{row['state']}' does not allow publishing "
+            "(must be verified or approved_for_video)"
+        )
+    return None
+
+
+async def _revalidate_offer(pool, offer_id: uuid.UUID) -> bool:
+    """§17: offer still fresh for scheduling, resume or upload — expiry, recheck state."""
+    return await _schedule_offer_problem(pool, offer_id) is None
 
 
 def _json_value(value, default):

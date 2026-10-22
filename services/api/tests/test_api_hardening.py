@@ -97,6 +97,56 @@ def test_token_required_when_configured(hardened_app):
         assert client.get("/ping", headers={"Authorization": "Bearer s3cret"}).status_code == 200
 
 
+def test_service_credentials_cannot_satisfy_a_human_reviewer(hardened_app):
+    """A compromised worker must not become a human approver by naming one."""
+    from fastapi import Request
+
+    @hardened_app.get("/human")
+    async def human(request: Request, reviewer: str | None = None):
+        actor = api_hardening.effective_reviewer(request, reviewer, require=True)
+        return {"actor": actor}
+
+    @hardened_app.get("/whoami")
+    async def whoami(request: Request):
+        return {"auth": api_hardening.credential_class(request),
+                "actor": api_hardening.actor_of(request)}
+
+    api_hardening.register(hardened_app, token="svc-secret")
+    hardened_app.include_router(api_hardening.router)
+    with TestClient(hardened_app) as client:
+        denied = client.get(
+            "/human", params={"reviewer": "Alice"},
+            headers={"Authorization": "Bearer svc-secret"},
+        )
+        assert denied.status_code == 403
+        assert "human reviewer credential" in denied.json()["detail"]
+
+        automation = client.get(
+            "/human", params={"reviewer": "automation:approve"},
+            headers={"Authorization": "Bearer svc-secret"},
+        )
+        assert automation.status_code == 200
+        assert automation.json()["actor"] == "automation:approve"
+
+        assert client.get("/whoami", headers={"Authorization": "Bearer svc-secret"}).json() == {
+            "actor": None, "auth": "service",
+        }
+
+
+def test_worker_token_has_a_distinct_credential_class(hardened_app, monkeypatch):
+    monkeypatch.setenv("MTK_WORKER_TOKEN", "worker-secret")
+    api_hardening.register(hardened_app, token="svc-secret")
+    hardened_app.include_router(api_hardening.router)
+    with TestClient(hardened_app) as client:
+        worker = client.get(
+            "/whoami", headers={"Authorization": "Bearer worker-secret"})
+        assert worker.status_code == 200
+        assert worker.json() == {"actor": None, "auth": "worker"}
+        service = client.get(
+            "/whoami", headers={"Authorization": "Bearer svc-secret"})
+        assert service.json() == {"actor": None, "auth": "service"}
+
+
 # ------------------------------------------------------------- logging
 
 

@@ -40,7 +40,8 @@ from redact_local import scan as scan_secrets  # slim copy of the API's scanner
 from qa import run_checks as run_capture_checks
 
 API_URL_DEFAULT = "http://localhost:8000"
-MTK_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
+MTK_API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
+                 or os.environ.get("MTK_API_TOKEN") or "").strip()
 
 
 def _api_auth_headers() -> dict:

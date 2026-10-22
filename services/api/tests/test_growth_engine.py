@@ -26,6 +26,19 @@ def test_growth_score_is_bounded_and_rewards_strong_rows():
     assert score > weak
 
 
+def test_growth_score_counts_a_measured_zero_engagement():
+    """High reach with no engagement is not a missing signal.
+
+    The old blend dropped score-0 signals during renormalization, so 10,000
+    views and zero likes could still score 100/100. A reported zero must carry
+    its weight instead of disappearing.
+    """
+    silent = growth_score([{"views": 10_000, "likes": 0, "comments": 0}])
+    engaged = growth_score([{"views": 10_000, "likes": 500, "comments": 50}])
+    assert silent < 80, "zero engagement must reduce the blended score"
+    assert engaged > silent
+
+
 def test_summary_compares_platforms_and_languages():
     summary = summarize(
         ROWS,
