@@ -47,6 +47,29 @@ def write_captions(project: Path, srt: str, vtt: str,
     return srt_path, vtt_path
 
 
+def write_preset_captions(project: Path, cues: list[dict[str, Any]],
+                          preset_key: str, width: int, height: int,
+                          language: str = "en",
+                          caption_language: str = "en") -> str:
+    """Write a burn-in ASS tuned to ONE delivery frame.
+
+    The same cues are rendered twice: 1920x1080 landscape and 1080x1920
+    vertical. A single 16:9 ASS file scaled into a 9:16 frame produces tiny,
+    badly placed captions, so each preset gets its own PlayRes and margins.
+    The uploaded SRT/VTT remain the canonical caption assets.
+    """
+    from captions import to_ass
+
+    suffix = "" if language == "en" else f".{language}"
+    rel = f"assets/captions-{preset_key}{suffix}.ass"
+    (project / "assets").mkdir(parents=True, exist_ok=True)
+    (project / rel).write_text(
+        to_ass(cues, language=caption_language, width=width, height=height),
+        encoding="utf-8", newline="\n",
+    )
+    return rel
+
+
 def write_step_log(project: Path, step_log: list[dict[str, Any]]) -> Path:
     path = project / "assets" / "step_log.json"
     path.write_text(json.dumps(step_log, indent=2, default=str), encoding="utf-8")

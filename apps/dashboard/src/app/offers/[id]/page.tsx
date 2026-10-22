@@ -53,6 +53,7 @@ type OfferDetail = {
 type RenderRow = {
   id: string;
   preset: string;
+  language: string;
   width: number;
   height: number;
   duration_s: string | null;
@@ -253,7 +254,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         {renders.length > 0 && (
           <div style={{ marginTop: "0.8rem" }}>
             <h3 className="small" style={{ margin: "0 0 0.4rem" }}>Schedule a test post (private first)</h3>
-            <ScheduleForm offerId={offer.id} />
+            <ScheduleForm offerId={offer.id} renders={renders} />
           </div>
         )}
       </section>

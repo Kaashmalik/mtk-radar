@@ -174,6 +174,27 @@ services:
       api:
         condition: service_healthy
 
+  verification:
+    profiles: ["workers"]
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /repo
+    volumes:
+      - ../..:/repo:ro
+    environment:
+      API_URL: http://api:8000
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      # Shared with the API: unsigned machine evidence is refused.
+      MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
+      MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
+      MTK_REQUIRE_TOS_ATTESTATION: ${MTK_REQUIRE_TOS_ATTESTATION:-1}
+    command: >
+      sh -c "pip install -q httpx feedparser &&
+             python workers/verification/main.py"
+    depends_on:
+      api:
+        condition: service_healthy
+
   collectors:
     profiles: ["workers"]
     image: python:3.12-slim

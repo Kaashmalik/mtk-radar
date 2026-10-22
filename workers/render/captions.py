@@ -87,10 +87,21 @@ def build_cues(
         if not text:
             continue
         requested_start = _start_seconds(seg.get("start"))
+        requested_end = _start_seconds(seg.get("end"))
+        requested_duration = _start_seconds(seg.get("duration"))
         start = max(t, requested_start) if requested_start is not None else t
         for chunk_index, chunk in enumerate(_chunk_text(text, max_chars)):
             words = len(chunk.split())
             duration = min(max(words * 60.0 / wpm, min_cue_s), max_cue_s)
+            # Speech-aligned segments carry a measured duration/end. The first
+            # chunk uses it; continuation chunks keep the safe word-count
+            # fallback so a long line can never create one unreadable cue.
+            if chunk_index == 0:
+                if requested_duration is not None and requested_duration > 0:
+                    duration = requested_duration
+                elif requested_end is not None and requested_end > start:
+                    duration = requested_end - start
+                duration = max(min_cue_s, duration)
             cue_start = start if chunk_index == 0 else t
             cues.append({
                 "index": len(cues) + 1,

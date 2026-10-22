@@ -37,6 +37,8 @@ class FakeAPI:
 
     def post(self, path, json=None):
         self.published.append((path, json))
+        if path == "/locks/acquire":
+            return FakeResponse({"acquired": True})
         return FakeResponse({"ok": True})
 
 

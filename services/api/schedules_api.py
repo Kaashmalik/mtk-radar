@@ -11,10 +11,12 @@ master plan §17). Gates enforced server-side:
   idempotency key; remote post IDs are stored for tracking.
 """
 
+import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -31,6 +33,7 @@ from automation import (
 )
 from automation_api import _budget_used, load_policy
 from schedules_state import (
+    PLATFORM_LIMITS,
     PLATFORMS,
     ScheduleTransitionError,
     platform_metadata,
@@ -41,6 +44,17 @@ from settings_store import get_language_policy, get_value
 from state import can_generate_video
 
 router = APIRouter(tags=["schedules"])
+
+# Native aspect for each platform's flagship surface. YouTube long-form and
+# Facebook feed video are 16:9; Instagram Reels and TikTok are 9:16. An
+# operator can override this by pinning an explicit render_id (e.g. a YouTube
+# Short uses a vertical render).
+_PREFERRED_RENDER_PRESET = {
+    "youtube": "landscape",
+    "facebook": "landscape",
+    "instagram": "vertical",
+    "tiktok": "vertical",
+}
 
 
 # ---------------------------------------------------------------- schemas
@@ -59,12 +73,24 @@ class ScheduleIn(BaseModel):
     cover_path: Optional[str] = None
     pinned_comment: Optional[str] = None
     website_url: Optional[str] = None
+    # YouTube-first: pin the exact upload target. When omitted the API picks
+    # the first active account for the platform (if one exists).
+    platform_account_id: Optional[uuid.UUID] = None
+    youtube_playlist_id: Optional[str] = None
+    # Pin the exact rendered file. When omitted the API chooses the newest
+    # render for the language, preferring the platform's native aspect (16:9
+    # for YouTube/Facebook, 9:16 for Instagram/TikTok). YouTube Shorts can pin
+    # a vertical render explicitly.
+    render_id: Optional[uuid.UUID] = None
 
 
 class ScheduleTransitionIn(BaseModel):
     to: str
     reviewer: Optional[str] = None
     note: Optional[str] = None
+    # An open upload-attempt marker means the post may already be live. A
+    # human must explicitly acknowledge the platform check before requeueing.
+    acknowledge_unknown_attempt: bool = False
 
 
 class ScheduleResultIn(BaseModel):
@@ -75,6 +101,16 @@ class ScheduleResultIn(BaseModel):
     # skips held posts (e.g. an interrupted upload whose outcome is unknown:
     # retrying could publish a duplicate).
     hold: bool = False
+    # v0.28: tie the outcome to the exact attempt claim. An outcome without
+    # the matching token is refused rather than accidentally clearing another
+    # worker's in-flight upload marker.
+    attempt_token: Optional[str] = None
+    # Remote confirmation is required before a post becomes `published`.
+    confirmed: bool = False
+    remote_url: Optional[str] = None
+    remote_processing_state: Optional[str] = None
+    remote_privacy: Optional[str] = None
+    remote_metadata: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- create
@@ -109,6 +145,11 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             status_code=400,
             detail=f"unsupported platform — known: {', '.join(PLATFORMS)}",
         )
+    if body.privacy not in ("private", "unlisted", "public"):
+        raise HTTPException(
+            status_code=400,
+            detail="privacy must be 'private', 'unlisted' or 'public'",
+        )
     if body.language not in ("en", "ur"):
         raise HTTPException(status_code=422, detail="language must be 'en' or 'ur'")
     language_policy = await get_language_policy(pool)
@@ -123,25 +164,37 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
     # §17: each queued post must reference an approved video version + valid evidence.
     # v0.27: the render must match the language being scheduled; falling back to a
     # different-language render would put the wrong narration/captions on a post.
+    preferred_preset = _PREFERRED_RENDER_PRESET.get(body.platform) or ""
     render = await pool.fetchrow(
         """
-        SELECT r.id, r.video_path, r.language, r.cover_path,
+        SELECT r.id, r.preset, r.video_path, r.language, r.cover_path, r.captions_path,
+               r.duration_s, r.video_sha256, r.cover_sha256, r.captions_sha256,
+               r.script_version_hash,
+               r.metadata::text AS render_metadata,
                r.disclosure::text AS disclosure, c.redaction_reviewed
         FROM renders r LEFT JOIN capture_sessions c ON c.id = r.capture_id
         WHERE r.offer_id = $1 AND r.language = $2
-        ORDER BY r.created_at DESC LIMIT 1
+          AND ($3::uuid IS NULL OR r.id = $3)
+        ORDER BY (r.preset = $4) DESC, r.created_at DESC LIMIT 1
         """,
-        offer_id, body.language,
+        offer_id, body.language, body.render_id, preferred_preset,
     )
     if not render:
+        if body.render_id:
+            raise HTTPException(
+                status_code=409,
+                detail="the selected render does not exist for this offer and language",
+            )
         raise HTTPException(
             status_code=409,
             detail=f"no {body.language} render exists — render this language first",
         )
-    if render["redaction_reviewed"] is False:
+    # v0.28: NULL means the render was registered without a capture. An
+    # unreviewed capture is not evidence of redaction; fail closed.
+    if render["redaction_reviewed"] is not True:
         raise HTTPException(
             status_code=409,
-            detail="latest render's capture has not passed redaction review (§4)",
+            detail="latest render has no capture that passed redaction review (§4)",
         )
 
     scripts = await pool.fetch(
@@ -150,6 +203,19 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         offer_id, body.language,
     )
     version_hash = script_version_hash(scripts[0]["markdown"]) if scripts else None
+    # Fail at scheduling time, not hours later in the publisher: the pinned
+    # render must have been produced from the exact script a reviewer approved.
+    if not render.get("script_version_hash"):
+        raise HTTPException(
+            status_code=409,
+            detail="the selected render has no approved script hash — re-render it",
+        )
+    if not version_hash or render["script_version_hash"] != version_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="the selected render was made from a different script version — "
+                   "re-render the current approved script before scheduling",
+        )
 
     evidence = await pool.fetch(
         "SELECT url FROM evidence WHERE offer_id = $1 AND official AND domain_ok",
@@ -167,7 +233,7 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
     if body.content_variant_id:
         variant = await pool.fetchrow(
             """
-            SELECT id, kind, platform, language, variant_key, payload::text AS payload
+            SELECT id, kind, platform, language, variant_key, status, payload::text AS payload
             FROM content_variants
             WHERE id = $1 AND offer_id = $2
             """,
@@ -177,6 +243,11 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             raise HTTPException(status_code=404, detail="content variant not found for this offer")
         if variant["kind"] != "metadata":
             raise HTTPException(status_code=409, detail="only metadata variants can be scheduled")
+        if variant["status"] != "approved":
+            raise HTTPException(
+                status_code=409,
+                detail="metadata variant is not approved — approve it in Content Studio first",
+            )
         if variant["platform"] not in (None, body.platform):
             raise HTTPException(status_code=409, detail="content variant belongs to another platform")
         if variant["language"] != body.language:
@@ -185,6 +256,17 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             metadata = json.loads(variant["payload"])
         except ValueError as exc:
             raise HTTPException(status_code=409, detail="content variant payload is invalid") from exc
+        if not isinstance(metadata, dict):
+            raise HTTPException(status_code=409, detail="content variant payload is invalid")
+        # Instagram/TikTok have no separate title field; the caption first line
+        # is the hook. Every platform still needs a non-empty approved caption.
+        missing_title = (PLATFORM_LIMITS[body.platform]["title"] > 0
+                         and not str(metadata.get("title") or "").strip())
+        if missing_title or not str(metadata.get("caption") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail="content variant payload is missing an approved title or caption",
+            )
         scheduled_variant_key = variant["variant_key"]
     else:
         correction_base = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -199,12 +281,56 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             variant=body.metadata_variant,
         )
 
+    # Captions can legitimately differ from the voiceover language: the
+    # default policy keeps English on-screen captions for an Urdu voiceover.
+    # Pin the language of the actual SRT so YouTube labels the track correctly.
+    metadata.setdefault("captions_language", language_policy["captions_language"])
+
     cover_path = body.cover_path or render["cover_path"]
     pinned_comment = body.pinned_comment or metadata.get("pinned_comment")
 
+    # YouTube chapters are part of the reviewable package, not a post-upload
+    # edit. Build them from the render's deterministic beat sheet so the
+    # metadata hash the reviewer approves is exactly what gets uploaded.
+    render_metadata = _json_value(render.get("render_metadata"), {})
+    if body.platform == "youtube":
+        metadata = _attach_youtube_chapters(
+            metadata,
+            render_metadata.get("beats") or [],
+            render.get("duration_s"),
+            language_policy["metadata_language"],
+        )
+        pinned_comment = body.pinned_comment or metadata.get("pinned_comment")
+
+    account_id = await _pin_platform_account(pool, body.platform, body.platform_account_id)
+
+    render_sha256 = render.get("video_sha256") or _hash_local(render.get("video_path"))
+    cover_sha256 = render.get("cover_sha256") or _hash_local(cover_path)
+    captions_sha256 = render.get("captions_sha256") or _hash_local(render.get("captions_path"))
+    metadata_hash = _canonical_hash(metadata)
+    package_hash = _canonical_hash({
+        "offer_id": str(offer_id),
+        "platform": body.platform,
+        "account_id": str(account_id) if account_id else None,
+        "render_id": str(render["id"]),
+        "render_sha256": render_sha256,
+        "metadata_hash": metadata_hash,
+        "cover_sha256": cover_sha256,
+        "captions_sha256": captions_sha256,
+        "script_version_hash": version_hash,
+        "language": body.language,
+        "privacy": body.privacy,
+        "caption_variant": body.caption_variant,
+        "metadata_variant": scheduled_variant_key,
+        "pinned_comment": pinned_comment,
+        "youtube_playlist_id": body.youtube_playlist_id,
+    })
+
     idempotency_key = (
         f"{offer_id}:{body.platform}:{body.local_time.isoformat()}:"
-        f"{body.language}:{body.caption_variant}:{body.metadata_variant}:{version_hash or ''}"
+        f"{body.language}:{body.caption_variant}:{body.metadata_variant}:"
+        f"{body.content_variant_id or ''}:{version_hash or ''}:"
+        f"{render['id']}:{account_id or ''}"
     )
     try:
         row = await pool.fetchrow(
@@ -212,15 +338,19 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             INSERT INTO schedules (offer_id, platform, local_time, timezone, privacy,
                                    caption_variant, idempotency_key, version_hash, metadata,
                                    language, content_variant_id, cover_path, pinned_comment,
-                                   metadata_variant)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14)
+                                   metadata_variant, render_id, platform_account_id,
+                                   package_hash, render_sha256, metadata_hash, cover_sha256,
+                                   captions_sha256, youtube_playlist_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14,
+                    $15, $16, $17, $18, $19, $20, $21, $22)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id, state::text AS state, idempotency_key
             """,
             offer_id, body.platform, body.local_time, body.timezone, body.privacy,
             body.caption_variant, idempotency_key, version_hash, json.dumps(metadata),
             body.language, body.content_variant_id, cover_path, pinned_comment,
-            scheduled_variant_key,
+            scheduled_variant_key, render["id"], account_id, package_hash, render_sha256,
+            metadata_hash, cover_sha256, captions_sha256, body.youtube_playlist_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"schedule insert failed: {exc}") from exc
@@ -243,7 +373,12 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             "idempotency_key": idempotency_key, "language": body.language,
             "metadata_language": metadata.get("language", language_policy["metadata_language"]),
             "cover_path": cover_path, "pinned_comment": pinned_comment,
-            "metadata_variant": scheduled_variant_key, "metadata": metadata}
+            "metadata_variant": scheduled_variant_key, "metadata": metadata,
+            "render_id": str(render["id"]), "render_preset": render["preset"],
+            "package_hash": package_hash,
+            "render_sha256": render_sha256, "metadata_hash": metadata_hash,
+            "cover_sha256": cover_sha256, "captions_sha256": captions_sha256,
+            "platform_account_id": str(account_id) if account_id else None}
 
 
 # ---------------------------------------------------------------- calendar
@@ -262,6 +397,10 @@ async def list_schedules(
                s.privacy, s.caption_variant, s.version_hash, s.approved_by,
                s.metadata::text AS metadata, s.language, s.content_variant_id,
                s.cover_path, s.pinned_comment, s.metadata_variant,
+               s.render_id, s.platform_account_id, s.package_hash, s.render_sha256,
+               s.metadata_hash, s.cover_sha256, s.captions_sha256,
+               s.youtube_playlist_id, s.remote_url, s.remote_processing_state,
+               s.remote_privacy, s.published_confirmed_at, s.remote_metadata::text AS remote_metadata,
                s.retry_count, s.updated_at, s.description_patched_at,
                s.remote_post_id, s.outcome_detail::text AS outcome_detail, s.created_at
         FROM schedules s JOIN offers o ON o.id = s.offer_id
@@ -371,7 +510,8 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
     params.extend([schedule_id, body.to])
 
     if body.to in ("approved", "needs_approval"):
-        current_hash = await _current_script_hash(pool, schedule["offer_id"])
+        current_hash = await _current_script_hash(
+            pool, schedule["offer_id"], schedule.get("language") or "en")
         if not current_hash:
             raise HTTPException(status_code=409, detail="no script exists to approve")
         params.append(current_hash)
@@ -381,7 +521,8 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
             sets.append(f"approved_by = ${len(params)}")
 
     if body.to == "scheduled":
-        expected = await _current_script_hash(pool, schedule["offer_id"])
+        expected = await _current_script_hash(
+            pool, schedule["offer_id"], schedule.get("language") or "en")
         if schedule["version_hash"] != expected:
             raise HTTPException(
                 status_code=409,
@@ -392,10 +533,35 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
         params.append(offer_ok)
         sets.append(f"offer_evidence_ok = ${len(params)}")
 
+    resolved_attempt = None
     if body.to == "scheduled":
-        # a post that was HELD (unknown upload outcome) is being re-queued by
-        # a human decision — clear the hold so it may go out (v0.23)
-        sets.append("outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb")
+        current_detail = _json_value(schedule.get("outcome_detail"), {})
+        open_attempt = current_detail.get("attempt") \
+            if isinstance(current_detail, dict) else None
+        if isinstance(open_attempt, dict):
+            if not body.acknowledge_unknown_attempt:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "an upload attempt has no recorded outcome — the post may "
+                        "already be live. Verify it on the platform, then resend "
+                        "with acknowledge_unknown_attempt=true to requeue, or leave "
+                        "it paused (duplicate protection)."
+                    ),
+                )
+            resolved_attempt = {
+                "started_at": open_attempt.get("started_at"),
+                "resolved_by": reviewer_on_record or "operator",
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            params.append(json.dumps({"hold": False,
+                                      "attempt_resolved": resolved_attempt}))
+            sets.append(f"outcome_detail = (outcome_detail - 'attempt') || "
+                        f"${len(params)}::jsonb")
+        else:
+            # a post that was HELD (unknown upload outcome) is being re-queued
+            # by a human decision — clear the hold so it may go out (v0.23)
+            sets.append("outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb")
 
     row = await pool.fetchrow(
         f"UPDATE schedules SET {', '.join(sets)}, updated_at = now() "
@@ -404,17 +570,23 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
     )
     await _audit(pool, actor=reviewer_on_record or "operator",
                  action=f"schedule:{schedule['state']}->{body.to}",
-                 entity="schedules", entity_id=schedule_id, detail={"note": body.note})
+                 entity="schedules", entity_id=schedule_id,
+                 detail={"note": body.note, "attempt_resolved": resolved_attempt})
     return {"id": schedule_id, "state": row["state"], "version_hash": row["version_hash"]}
 
 
 @router.post("/schedules/{schedule_id}/pause")
 async def pause(schedule_id: uuid.UUID, note: Optional[str] = None,
                 request: Request = None) -> dict:
-    """Operator-visible pause — available from approved or scheduled states."""
+    """Operator-visible pause — available while a post is still actionable.
+
+    `failed` is included so a worker can record a held failure first and then
+    move the post to `paused` without losing the reason (failed → paused is an
+    allowed transition).
+    """
     pool = db.get()
     schedule = await _load(pool, schedule_id)
-    if schedule["state"] not in ("approved", "scheduled"):
+    if schedule["state"] not in ("approved", "scheduled", "failed"):
         raise HTTPException(
             status_code=409,
             detail=f"cannot pause from state '{schedule['state']}' (already paused/published?)",
@@ -431,6 +603,7 @@ async def pause(schedule_id: uuid.UUID, note: Optional[str] = None,
 
 @router.post("/schedules/{schedule_id}/resume")
 async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator"),
+                 acknowledge_unknown_attempt: bool = Query(default=False),
                  request: Request = None) -> dict:
     """Resume revalidates the version hash — modified content stays paused.
 
@@ -449,7 +622,20 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
     schedule = await _load(pool, schedule_id)
     if schedule["state"] != "paused":
         raise HTTPException(status_code=409, detail=f"cannot resume from '{schedule['state']}'")
-    expected = await _current_script_hash(pool, schedule["offer_id"])
+    current_detail = _json_value(schedule.get("outcome_detail"), {})
+    open_attempt = current_detail.get("attempt") \
+        if isinstance(current_detail, dict) else None
+    if isinstance(open_attempt, dict) and not acknowledge_unknown_attempt:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "an upload attempt has no recorded outcome — the post may already "
+                "be live. Verify it on the platform, then resume with "
+                "acknowledge_unknown_attempt=true (duplicate protection)."
+            ),
+        )
+    expected = await _current_script_hash(
+        pool, schedule["offer_id"], schedule.get("language") or "en")
     if schedule["version_hash"] != expected:
         raise HTTPException(
             status_code=409,
@@ -469,83 +655,204 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
         "UPDATE schedules SET state = 'scheduled', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
     )
-    # a human resumed the post: clear the hold so the worker may try again
-    await pool.execute(
-        "UPDATE schedules SET outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb, "
-        "updated_at = now() WHERE id = $1",
-        schedule_id,
-    )
+    # A human resumed the post: clear the hold so the worker may try again.
+    # If an unknown attempt marker was explicitly acknowledged, clear it too
+    # and keep an audit trail of who made that call.
+    if isinstance(open_attempt, dict):
+        resolution = {
+            "hold": False,
+            "attempt_resolved": {
+                "started_at": open_attempt.get("started_at"),
+                "resolved_by": actor,
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+        await pool.execute(
+            "UPDATE schedules SET outcome_detail = "
+            "(outcome_detail - 'attempt') || $2::jsonb, updated_at = now() "
+            "WHERE id = $1",
+            schedule_id, json.dumps(resolution),
+        )
+    else:
+        await pool.execute(
+            "UPDATE schedules SET outcome_detail = outcome_detail || '{\"hold\": false}'::jsonb, "
+            "updated_at = now() WHERE id = $1",
+            schedule_id,
+        )
     await _audit(pool, actor=actor, action="schedule:resume",
-                 entity="schedules", entity_id=schedule_id)
+                 entity="schedules", entity_id=schedule_id,
+                 detail={"attempt_resolved": isinstance(open_attempt, dict)})
     return {"id": schedule_id, "state": row["state"]}
 
 
 class AttemptIn(BaseModel):
-    """The worker announces an upload BEFORE it starts (v0.23). If the worker
-    dies mid-upload, the marker stays open: the next sweep knows the outcome
-    is UNKNOWN and holds the post for a human instead of publishing a
-    duplicate."""
+    """The worker atomically claims an upload before it starts (v0.23/v0.28).
+
+    If the worker dies mid-upload, the marker stays open: the next sweep knows
+    the outcome is UNKNOWN and holds the post for a human instead of
+    publishing a duplicate. An expired lease is NOT stolen automatically —
+    the upload may have reached the platform even if the worker died."""
     detail: Optional[str] = None
     worker: Optional[str] = None
+    lease_s: int = Field(default=900, ge=60, le=3600)
 
 
 @router.post("/schedules/{schedule_id}/attempt")
 async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
-    """Mark an upload attempt as started (idempotent per attempt)."""
+    """Atomically claim an upload attempt. Exactly one worker can hold it."""
     pool = db.get()
-    schedule = await _load(pool, schedule_id)
-    if schedule["state"] != "scheduled":
-        raise HTTPException(
-            status_code=409,
-            detail=f"attempts only apply to scheduled posts (current: {schedule['state']})",
-        )
-    marker = {
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "detail": body.detail,
-        "worker": body.worker or "publishing-worker",
-    }
-    await pool.execute(
-        "UPDATE schedules SET outcome_detail = outcome_detail || $2::jsonb, updated_at = now() "
-        "WHERE id = $1",
-        schedule_id, json.dumps({"attempt": marker}),
-    )
-    return {"id": str(schedule_id), "attempt": marker}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))
+            schedule = await conn.fetchrow(
+                "SELECT state::text AS state, outcome_detail::text AS outcome_detail "
+                "FROM schedules WHERE id = $1 FOR UPDATE",
+                schedule_id,
+            )
+            if not schedule:
+                raise HTTPException(status_code=404, detail="schedule not found")
+            if schedule["state"] != "scheduled":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"attempts only apply to scheduled posts (current: {schedule['state']})",
+                )
+            detail = _json_value(schedule["outcome_detail"], {})
+            existing = detail.get("attempt") if isinstance(detail, dict) else None
+            if isinstance(existing, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "an upload attempt is already open "
+                        f"(started {existing.get('started_at')}) — verify the platform "
+                        "before clearing it"
+                    ),
+                )
+            now = datetime.now(timezone.utc)
+            token = uuid.uuid4().hex
+            marker = {
+                "token": token,
+                "started_at": now.isoformat(),
+                "lease_expires_at": (now + timedelta(seconds=body.lease_s)).isoformat(),
+                "detail": body.detail,
+                "worker": body.worker or "publishing-worker",
+            }
+            await conn.execute(
+                "UPDATE schedules SET outcome_detail = outcome_detail || $2::jsonb, "
+                "updated_at = now() WHERE id = $1",
+                schedule_id, json.dumps({"attempt": marker}),
+            )
+    return {"id": str(schedule_id), "acquired": True,
+            "attempt_token": token, "attempt": marker}
 
 
 @router.post("/schedules/{schedule_id}/result")
 async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
-    """Publishing worker reports outcomes (idempotent by remote post id)."""
+    """Publishing worker reports outcomes (idempotent by remote post id).
+
+    v0.28: a success must be a CONFIRMED remote publication. For YouTube the
+    worker only sends ok=true after videos.list reports the video processed
+    with the expected privacy. An unconfirmed upload is reported as a held
+    failure, never as published.
+    """
     pool = db.get()
     schedule = await _load(pool, schedule_id)
-    if schedule["state"] != "scheduled" and schedule["state"] != "failed":
+    if schedule["state"] not in ("scheduled", "failed", "paused"):
         raise HTTPException(
             status_code=409,
-            detail=f"results only accepted for scheduled/failed posts (current: {schedule['state']})",
+            detail=f"results only accepted for scheduled/failed/paused posts "
+                   f"(current: {schedule['state']})",
+        )
+    if body.ok and schedule["state"] == "paused":
+        raise HTTPException(
+            status_code=409,
+            detail="a paused post cannot be marked published — resume it first",
         )
     if body.ok and not body.remote_post_id:
         raise HTTPException(status_code=400, detail="successful publish requires remote_post_id")
+    if body.ok and not body.confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="remote publication is not confirmed — refusing to mark the post published",
+        )
 
+    # A failure reported against a paused post records why it is paused and
+    # keeps the paused state; it must not silently requeue the post.
     new_state = "published" if body.ok else "failed"
     # a definite outcome clears any open "attempt" marker (the upload either
-    # succeeded or failed — retrying is safe)
-    outcome = {"detail": body.detail, "reported_at": datetime.now().isoformat(),
+    # succeeded or failed — retrying is safe). The token prevents one worker
+    # from clearing another worker's in-flight claim.
+    outcome = {"detail": body.detail, "reported_at": datetime.now(timezone.utc).isoformat(),
                "attempt": None, "hold": bool(body.hold)}
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))
+            current = await conn.fetchrow(
+                "SELECT state::text AS state, outcome_detail::text AS outcome_detail "
+                "FROM schedules WHERE id = $1 FOR UPDATE",
+                schedule_id,
+            )
+            if not current or current["state"] not in ("scheduled", "failed", "paused"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="schedule changed while the result was being recorded",
+                )
+            if body.ok and current["state"] == "paused":
+                raise HTTPException(
+                    status_code=409,
+                    detail="schedule was paused while the result was being recorded",
+                )
+            if not body.ok and current["state"] == "paused":
+                new_state = "paused"
+            current_detail = _json_value(current["outcome_detail"], {})
+            open_attempt = current_detail.get("attempt") if isinstance(current_detail, dict) else None
+            if isinstance(open_attempt, dict):
+                expected_token = open_attempt.get("token")
+                if not expected_token or body.attempt_token != expected_token:
+                    # A held ADVISORY is not an outcome: the worker may need to
+                    # explain why an open attempt must be checked by a human.
+                    # Record the reason but keep the attempt marker intact so a
+                    # blind retry is still impossible.
+                    if body.ok or not body.hold or body.attempt_token:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="result does not match the open upload attempt token",
+                        )
+                    advisory = {
+                        "detail": body.detail,
+                        "reported_at": datetime.now(timezone.utc).isoformat(),
+                        "hold": True,
+                    }
+                    await conn.execute(
+                        "UPDATE schedules SET outcome_detail = outcome_detail || "
+                        "$2::jsonb, updated_at = now() WHERE id = $1",
+                        schedule_id, json.dumps(advisory),
+                    )
+                    return {
+                        "id": str(schedule_id),
+                        "state": current["state"],
+                        "advisory": True,
+                        "detail": "held reason recorded; the open upload attempt is preserved",
+                    }
             if body.remote_post_id:
-                post_id = body.remote_post_id
                 await conn.execute(
                     """
                     UPDATE schedules
                     SET state = $2::schedule_state,
                         remote_post_id = COALESCE(NULLIF($3, ''), remote_post_id),
+                        remote_url = COALESCE($4, remote_url),
+                        remote_processing_state = COALESCE($5, remote_processing_state),
+                        remote_privacy = COALESCE($6, remote_privacy),
+                        remote_metadata = remote_metadata || $7::jsonb,
+                        published_confirmed_at = CASE WHEN $2 = 'published' THEN now()
+                                                      ELSE published_confirmed_at END,
                         retry_count = CASE WHEN $2 = 'failed' THEN retry_count + 1 ELSE retry_count END,
-                        outcome_detail = outcome_detail || $4::jsonb,
+                        outcome_detail = outcome_detail || $8::jsonb,
                         updated_at = now()
                     WHERE id = $1
                     """,
-                    schedule_id, new_state, body.remote_post_id or "", json.dumps(outcome),
+                    schedule_id, new_state, body.remote_post_id or "", body.remote_url,
+                    body.remote_processing_state, body.remote_privacy,
+                    json.dumps(body.remote_metadata, default=str), json.dumps(outcome),
                 )
             else:
                 await conn.execute(
@@ -560,7 +867,10 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
                     schedule_id, new_state, json.dumps(outcome),
                 )
     await _audit(pool, actor="publishing-worker", action=f"result:{new_state}",
-                 entity="schedules", entity_id=schedule_id, detail={"remote_post_id": body.remote_post_id})
+                 entity="schedules", entity_id=schedule_id,
+                 detail={"remote_post_id": body.remote_post_id,
+                         "remote_processing_state": body.remote_processing_state,
+                         "confirmed": body.confirmed})
     return {"id": schedule_id, "state": new_state}
 
 
@@ -574,8 +884,15 @@ class MetricsIn(BaseModel):
     views: Optional[int] = None
     likes: Optional[int] = None
     comments: Optional[int] = None
+    shares: Optional[int] = None
     impressions: Optional[int] = None
     avg_watch_s: Optional[float] = None
+    avg_view_duration_s: Optional[float] = None
+    avg_view_percentage: Optional[float] = None
+    ctr: Optional[float] = None
+    retention_3s: Optional[float] = None
+    link_clicks: Optional[int] = None
+    subscribers_gained: Optional[int] = None
     source: str = Field(min_length=3, max_length=64)
     raw: dict = Field(default_factory=dict)
 
@@ -597,14 +914,22 @@ async def ingest_metrics(schedule_id: uuid.UUID, body: MetricsIn) -> dict:
             await conn.execute(
                 """
                 INSERT INTO post_metrics
-                    (schedule_id, platform, views, likes, comments, impressions, avg_watch_s, source, raw)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                    (schedule_id, platform, views, likes, comments, shares, impressions,
+                     avg_watch_s, avg_view_duration_s, avg_view_percentage, ctr,
+                     retention_3s, link_clicks, subscribers_gained, source, raw)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                        $16::jsonb)
                 """,
                 schedule_id, body.platform, body.views, body.likes, body.comments,
-                body.impressions, body.avg_watch_s, body.source, json.dumps(body.raw),
+                body.shares, body.impressions, body.avg_watch_s, body.avg_view_duration_s,
+                body.avg_view_percentage, body.ctr, body.retention_3s, body.link_clicks,
+                body.subscribers_gained, body.source, json.dumps(body.raw),
             )
     latest = await pool.fetchrow(
-        "SELECT views, likes, comments, impressions, avg_watch_s, captured_at FROM post_metrics WHERE schedule_id = $1 ORDER BY captured_at DESC LIMIT 1",
+        "SELECT views, likes, comments, shares, impressions, avg_watch_s, "
+        "avg_view_duration_s, avg_view_percentage, ctr, retention_3s, link_clicks, "
+        "subscribers_gained, captured_at FROM post_metrics WHERE schedule_id = $1 "
+        "ORDER BY captured_at DESC LIMIT 1",
         schedule_id,
     )
     return {"schedule_id": str(schedule_id), **dict(latest)}
@@ -615,8 +940,10 @@ async def list_metrics(schedule_id: uuid.UUID) -> dict:
     """All snapshots for a post, newest first (dashboard trend display)."""
     pool = db.get()
     rows = await pool.fetch(
-        """SELECT views, likes, comments, impressions, avg_watch_s, source,
-                  captured_at FROM post_metrics WHERE schedule_id = $1
+        """SELECT views, likes, comments, shares, impressions, avg_watch_s,
+                  avg_view_duration_s, avg_view_percentage, ctr, retention_3s,
+                  link_clicks, subscribers_gained, source, captured_at
+           FROM post_metrics WHERE schedule_id = $1
            ORDER BY captured_at DESC LIMIT 90""",
         schedule_id,
     )
@@ -680,7 +1007,10 @@ async def _gate_automation_schedule(pool, schedule: dict) -> None:
 
 async def _load(pool, schedule_id: uuid.UUID) -> dict:
     row = await pool.fetchrow(
-        "SELECT id, offer_id, state::text AS state, version_hash, platform, privacy "
+        "SELECT id, offer_id, state::text AS state, version_hash, platform, privacy, "
+        "language, render_id, platform_account_id, package_hash, render_sha256, "
+        "metadata_hash, cover_sha256, captions_sha256, metadata::text AS metadata, "
+        "outcome_detail::text AS outcome_detail, remote_post_id, youtube_playlist_id "
         "FROM schedules WHERE id = $1",
         schedule_id,
     )
@@ -689,10 +1019,14 @@ async def _load(pool, schedule_id: uuid.UUID) -> dict:
     return dict(row)
 
 
-async def _current_script_hash(pool, offer_id: uuid.UUID) -> Optional[str]:
+async def _current_script_hash(pool, offer_id: uuid.UUID,
+                               language: str = "en") -> Optional[str]:
+    """Hash the latest script for THIS language. A newer Urdu draft must not
+    invalidate an approved English post (or vice versa)."""
     row = await pool.fetchrow(
-        "SELECT markdown FROM offer_scripts WHERE offer_id = $1 ORDER BY version DESC LIMIT 1",
-        offer_id,
+        "SELECT markdown FROM offer_scripts WHERE offer_id = $1 AND language = $2 "
+        "ORDER BY version DESC LIMIT 1",
+        offer_id, language,
     )
     return script_version_hash(row["markdown"]) if row else None
 
@@ -709,6 +1043,178 @@ async def _revalidate_offer(pool, offer_id: uuid.UUID) -> bool:
         offer_id,
     )
     return bool(row and row["ok"])
+
+
+def _json_value(value, default):
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return json.loads(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _hash_local(ref: Optional[str]) -> Optional[str]:
+    """sha256 of a plain local asset, if this API host can see it.
+
+    Managed refs (s3://, local://) are hashed by the render worker that owns
+    the bytes; the API never guesses a digest for an unreadable object.
+    """
+    if not ref or "://" in str(ref):
+        return None
+    path = Path(str(ref))
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_hash(value) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _fmt_timestamp(seconds: int) -> str:
+    hours, rem = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+_CHAPTER_TITLES = {
+    "hook": "The offer",
+    "eligibility": "Eligibility",
+    "proof": "Official proof",
+    "claim": "Live walkthrough",
+    "result": "Result",
+    "cta": "Next step",
+}
+
+
+def _attach_youtube_chapters(metadata: dict, beats: list, duration_s,
+                             language: str = "en") -> dict:
+    """Finalize valid YouTube chapters (0:00 first, >=10s apart, >=3 chapters).
+
+    The chapter text is part of the description the reviewer hashes, so this
+    must happen BEFORE the metadata hash is computed. The adapter uploads the
+    package verbatim and never edits the description afterwards.
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+
+    selected = _trim_short_tail(_valid_chapters(metadata.get("chapters"), duration_s),
+                                duration_s)
+    if len(selected) < 3 or selected[0]["start_s"] != 0:
+        selected = []
+        for beat in beats or []:
+            if not isinstance(beat, dict):
+                continue
+            try:
+                at = int(float(beat.get("at_s") or 0))
+            except (TypeError, ValueError):
+                continue
+            if at < 0:
+                continue
+            if duration_s is not None:
+                try:
+                    if at >= float(duration_s):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            if selected and at < selected[-1]["start_s"] + 10:
+                continue
+            title = _CHAPTER_TITLES.get(
+                str(beat.get("id") or "").lower(),
+                str(beat.get("purpose") or "Chapter").strip().title())
+            selected.append({"start_s": at, "title": _chapter_title(title)})
+        selected = _trim_short_tail(selected, duration_s)
+    if len(selected) < 3 or selected[0]["start_s"] != 0:
+        return metadata
+
+    chapter_lines = "\n".join(
+        f"{_fmt_timestamp(chapter['start_s'])} {chapter['title']}" for chapter in selected
+    )
+    section = ("Chapters:\n" if language == "en" else "ابواب:\n") + chapter_lines
+    caption = str(metadata.get("caption") or "")
+    limit = PLATFORM_LIMITS["youtube"]["caption"]
+    updated = dict(metadata)
+    updated["chapters"] = selected
+    if section not in caption:
+        room = max(0, limit - len(section) - 2)
+        updated["caption"] = (caption[:room].rstrip() + "\n\n" + section)[:limit]
+    return updated
+
+
+def _chapter_title(value) -> str:
+    title = " ".join(str(value or "Chapter").replace("<", "").replace(">", "").split())
+    return title[:80] or "Chapter"
+
+
+def _valid_chapters(value, duration_s) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    selected: list[dict] = []
+    for chapter in value:
+        if not isinstance(chapter, dict):
+            return []
+        try:
+            at = int(float(chapter.get("start_s")))
+        except (TypeError, ValueError):
+            return []
+        if at < 0 or (selected and at < selected[-1]["start_s"] + 10):
+            return []
+        if duration_s is not None:
+            try:
+                if at >= float(duration_s):
+                    return []
+            except (TypeError, ValueError):
+                pass
+        selected.append({"start_s": at, "title": _chapter_title(chapter.get("title"))})
+    return selected
+
+
+def _trim_short_tail(selected: list[dict], duration_s) -> list[dict]:
+    """YouTube requires every chapter, including the last, to be >=10s long."""
+    if not selected or duration_s is None:
+        return selected
+    try:
+        end = float(duration_s)
+    except (TypeError, ValueError):
+        return selected
+    trimmed = list(selected)
+    while len(trimmed) > 1 and end - trimmed[-1]["start_s"] < 10:
+        trimmed.pop()
+    return trimmed
+
+
+async def _pin_platform_account(pool, platform: str,
+                                account_id: Optional[uuid.UUID]) -> Optional[uuid.UUID]:
+    if account_id is not None:
+        row = await pool.fetchrow(
+            "SELECT id FROM platform_accounts WHERE id = $1 AND platform = $2 "
+            "AND status = 'active'",
+            account_id, platform,
+        )
+        if not row:
+            raise HTTPException(
+                status_code=409,
+                detail="platform account not found, not active, or belongs to another platform",
+            )
+        return row["id"]
+    row = await pool.fetchrow(
+        "SELECT id FROM platform_accounts WHERE platform = $1 AND status = 'active' "
+        "ORDER BY created_at LIMIT 1",
+        platform,
+    )
+    return row["id"] if row else None
 
 
 async def _audit(pool, *, actor: str, action: str, entity: str,

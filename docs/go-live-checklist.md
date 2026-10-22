@@ -47,7 +47,7 @@ cp .env.example .env
 docker compose -f infra/docker/docker-compose.yml up -d \
   --profile workers --profile storage
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
-curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.27.0"}
+curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.28.0"}
 ```
 
 Then open **Settings → Automation control** and confirm the default **Assisted**

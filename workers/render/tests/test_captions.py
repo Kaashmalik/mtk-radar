@@ -1,5 +1,7 @@
 """Caption pipeline tests — deterministic cues, valid srt/vtt."""
 
+import pytest
+
 from captions import build_cues, segments_from_step_log, to_ass, to_srt, to_vtt
 
 SEGMENTS = [
@@ -133,3 +135,13 @@ class TestAss:
         monkeypatch.setenv("MTK_CAPTION_FONT", "Inter")
         ass = to_ass([{"text": "Hello", "start": 0, "end": 2}], language="en")
         assert "Style: Default,Inter,52" in ass
+
+
+def test_measured_speech_duration_is_honoured():
+    cues = build_cues([
+        {"text": "First spoken line", "start": 0, "duration": 4.25},
+        {"text": "Second spoken line", "start": 4.25, "duration": 2.5},
+    ])
+    assert cues[0]["end"] - cues[0]["start"] == pytest.approx(4.25, abs=0.01)
+    assert cues[1]["start"] == pytest.approx(4.25, abs=0.01)
+    assert cues[1]["end"] - cues[1]["start"] == pytest.approx(2.5, abs=0.01)

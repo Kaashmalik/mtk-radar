@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { clientFetch } from "@/lib/api-client";
 
 type Variant = {
   id: string;
@@ -27,6 +28,28 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
   );
   const [language, setLanguage] = useState(languages[0] ?? "en");
   const [platform, setPlatform] = useState(platforms[0] ?? "youtube");
+  const [statuses, setStatuses] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function approve(variantId: string) {
+    setBusy(variantId);
+    setError(null);
+    try {
+      const res = await clientFetch(`/studio/variants/${variantId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      setStatuses((current) => ({ ...current, [variantId]: body.status ?? "approved" }));
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   const visible = metadata.filter(
     (variant) => variant.language === language && (variant.platform ?? "all") === platform,
@@ -61,6 +84,7 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
           ))}
         </div>
       </div>
+      {error && <p className="error small">{error}</p>}
       <div className="grid-2">
         {visible.map((variant) => {
           const payload = typeof variant.payload === "string"
@@ -74,7 +98,7 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
             <article className="variant-card" key={variant.id}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                 <h3>Variant {variant.variant_key.toUpperCase()}</h3>
-                <span className="tag">{variant.status}</span>
+                <span className="tag">{statuses[variant.id] ?? variant.status}</span>
               </div>
               <strong style={{ fontSize: "0.86rem" }}>{title}</strong>
               <pre>{caption}</pre>
@@ -83,6 +107,12 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
               )}
               {website && <p className="small" style={{ marginBottom: 0 }}>↗ {website}</p>}
               {pinned && <p className="small muted" style={{ marginBottom: 0 }}>Pinned: {pinned}</p>}
+              {(statuses[variant.id] ?? variant.status) !== "approved" && (
+                <button type="button" className="button small" disabled={busy === variant.id}
+                        onClick={() => approve(variant.id)}>
+                  {busy === variant.id ? "Approving…" : "Approve for scheduling"}
+                </button>
+              )}
             </article>
           );
         })}

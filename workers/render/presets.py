@@ -1,7 +1,9 @@
 """Render presets — deterministic, per-platform exports (master plan §5).
 
-16:9 master (YouTube) and 9:16 vertical (Shorts/Reels/TikTok). Sources are
-recorded at 1280x720; the vertical preset centers a 1080x1920 crop.
+16:9 master (YouTube) and 9:16 vertical (Shorts/Reels/TikTok). Capture is
+native 1920x1080, so the landscape master never upscales. The vertical preset
+keeps the full 16:9 frame (no blind center-crop) on a blurred full-frame
+background, then applies motion/captions on top.
 """
 
 from dataclasses import dataclass
@@ -14,12 +16,13 @@ class Preset:
     label: str
     width: int
     height: int
-    filter_chain: str        # FFmpeg -vf for a 1280x720 source
+    filter_chain: str        # FFmpeg -vf, or -filter_complex when complex
     video_bitrate: str
     bufsize: str
     audio_bitrate: str
     crf: int
     fps: int
+    complex_filter: bool = False
 
 
 LANDSCAPE: Final = Preset(
@@ -40,12 +43,21 @@ VERTICAL: Final = Preset(
     label="9:16 Shorts/Reels/TikTok",
     width=1080,
     height=1920,
-    filter_chain="scale=-2:1920:flags=lanczos,crop=1080:1920",
+    # Full-frame composition: the 16:9 source is fitted on a blurred,
+    # edge-filling 9:16 background instead of losing its left/right thirds.
+    filter_chain=(
+        "[0:v]split=2[bg][fg];"
+        "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=24:2[bg2];"
+        "[fg]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg2];"
+        "[bg2][fg2]overlay=(W-w)/2:(H-h)/2[vbase]"
+    ),
     video_bitrate="6000k",
     bufsize="12000k",
     audio_bitrate="192k",
     crf=21,
     fps=30,
+    complex_filter=True,
 )
 
 PRESETS: Final[dict[str, Preset]] = {

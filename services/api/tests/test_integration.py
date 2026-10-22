@@ -260,6 +260,7 @@ from health_api import router as _health_router
 from locks_api import router as _locks_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
+from content_studio_api import router as _studio_router
 from schedules_state import script_version_hash
 
 
@@ -317,7 +318,7 @@ def auth_client(client):
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
               _settings_router, _analytics_router, _health_router, _locks_router,
-              _automation_router):
+              _automation_router, _studio_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -1810,8 +1811,11 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     _run("INSERT INTO offer_scripts (offer_id, version, markdown) "
          "VALUES ($1, 1, '# queue script') ON CONFLICT DO NOTHING", offer_id)
     version_hash = script_version_hash("# queue script")
-    _run("INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
-         "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE)", offer_id)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+        "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) RETURNING id",
+        offer_id,
+    )[0]["id"]
 
     # the offer must be in a video-allowed state to be a candidate
     _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
@@ -1826,7 +1830,7 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     created = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
         "preset": "landscape", "width": 1920, "height": 1080,
         "video_path": "projects/x/render.mp4", "script_version": 1,
-        "script_version_hash": version_hash,
+        "script_version_hash": version_hash, "capture_id": str(capture_id),
     })
     assert created.status_code == 201, created.text
 
@@ -1847,6 +1851,41 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     assert not [c for c in candidates if c["offer_id"] == other["id"]], \
         "footage that failed redaction review must never reach the renderer"
+
+
+def test_schedule_refuses_a_render_from_a_different_script_version(auth_client):
+    """The reviewer approves a script and a render together. Scheduling a
+    render from another script version would put unapproved words on screen,
+    so it must fail at scheduling time rather than in the publisher later."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Stale Render Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    markdown = "# approved script\n\nExact approved words."
+    version = script_version_hash(markdown)
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+        "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) RETURNING id",
+        offer_id,
+    )[0]["id"]
+    _run(
+        "INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash, "
+        "preset, width, height, video_path, language) "
+        "VALUES ($1, $2, 1, 'a-different-script-hash', 'landscape', 1920, 1080, "
+        "'projects/x/stale.mp4', 'en')",
+        offer_id, capture_id,
+    )
+    _run("UPDATE offers SET state = 'approved_for_video', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+
+    refused = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-02-01T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert refused.status_code == 409, refused.text
+    assert "different script version" in refused.json()["detail"]
 
 
 def test_health_reports_database_and_migration_readiness(auth_client):
@@ -1918,20 +1957,203 @@ def test_upload_attempt_marker_blocks_a_blind_retry(auth_client):
                                json={"detail": "upload started", "worker": "publishing-worker"})
     assert started.status_code == 200, started.text
     assert started.json()["attempt"]["started_at"]
+    token = started.json()["attempt_token"]
 
     listing = auth_client.get("/schedules", params={"state": "scheduled"}, headers=SVC).json()
     mine = [s for s in listing if str(s["id"]) == str(sid)][0]
     detail = json.loads(mine["outcome_detail"]) if isinstance(mine["outcome_detail"], str) else mine["outcome_detail"]
     assert detail["attempt"]["detail"] == "upload started", "the marker must be visible to the worker"
 
+    # a held ADVISORY may explain the open attempt without a token, but must
+    # keep the marker so the post still cannot be retried blindly.
+    advisory = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": False, "hold": True,
+        "detail": "previous upload attempt has no recorded outcome — verify on the platform",
+    })
+    assert advisory.status_code == 200, advisory.text
+    assert advisory.json()["advisory"] is True
+    listing = auth_client.get("/schedules", params={"state": "scheduled"}, headers=SVC).json()
+    mine = [s for s in listing if str(s["id"]) == str(sid)][0]
+    detail = json.loads(mine["outcome_detail"]) if isinstance(mine["outcome_detail"], str) else mine["outcome_detail"]
+    assert detail["attempt"]["token"] == token, "an advisory must preserve the attempt marker"
+    assert "verify on the platform" in detail["detail"]
+
+    # the outcome must carry the attempt token; a blind/foreign result is refused
+    refused = auth_client.post(f"/schedules/{sid}/result", headers=SVC,
+                               json={"ok": False, "detail": "foreign worker"})
+    assert refused.status_code == 409, refused.text
+
     # a definite outcome clears the marker -> retrying is safe again
     reported = auth_client.post(f"/schedules/{sid}/result", headers=SVC,
-                                json={"ok": False, "detail": "upload rejected"})
+                                json={"ok": False, "detail": "upload rejected",
+                                      "attempt_token": token})
     assert reported.status_code == 200, reported.text
     listing = auth_client.get("/schedules", params={"state": "failed"}, headers=SVC).json()
     mine = [s for s in listing if str(s["id"]) == str(sid)][0]
     detail = json.loads(mine["outcome_detail"]) if isinstance(mine["outcome_detail"], str) else mine["outcome_detail"]
     assert detail.get("attempt") is None, "a recorded outcome must clear the attempt marker"
+
+
+def test_attempt_is_exclusive_and_success_requires_remote_confirmation(auth_client):
+    """v0.28: one worker owns an upload attempt, and 'published' requires a
+    confirmed remote processing/visibility state — not merely an upload id."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Confirm Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-confirm-1', 'hash-1') RETURNING id
+        """, offer_id)[0]["id"]
+
+    first = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert first.status_code == 200, first.text
+    second = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert second.status_code == 409, "two workers must never hold the same upload"
+    token = first.json()["attempt_token"]
+
+    unconfirmed = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": True, "remote_post_id": "vid-1", "attempt_token": token,
+        "remote_url": "https://www.youtube.com/watch?v=vid-1",
+    })
+    assert unconfirmed.status_code == 409, "an upload id is not publication confirmation"
+
+    confirmed = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": True, "remote_post_id": "vid-1", "attempt_token": token,
+        "confirmed": True, "remote_url": "https://www.youtube.com/watch?v=vid-1",
+        "remote_processing_state": "succeeded", "remote_privacy": "private",
+        "remote_metadata": {"thumbnail": {"ok": True},
+                            "comment": {"ok": True, "pinned": False}},
+    })
+    assert confirmed.status_code == 200, confirmed.text
+    row = _run(
+        "SELECT state::text AS state, remote_url, remote_processing_state, "
+        "remote_privacy, published_confirmed_at, remote_metadata::text AS remote_metadata "
+        "FROM schedules WHERE id = $1", sid,
+    )[0]
+    assert row["state"] == "published"
+    assert row["published_confirmed_at"] is not None
+    assert row["remote_processing_state"] == "succeeded"
+    assert row["remote_privacy"] == "private"
+    assert json.loads(row["remote_metadata"])["comment"]["pinned"] is False
+
+
+def test_a_paused_post_records_why_it_was_blocked_without_republishing(auth_client):
+    """A preflight block reports a held failure and then pauses. The failure
+    must still be recorded (operators need the reason), while a paused post
+    must never be promoted to published by a stray result."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Paused Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-paused-1', 'hash-1') RETURNING id
+        """, offer_id)[0]["id"]
+
+    paused = auth_client.post(f"/schedules/{sid}/pause", headers=SVC,
+                              json={"note": "preflight block"})
+    assert paused.status_code == 200, paused.text
+
+    blocked = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": False, "hold": True,
+        "detail": "approval integrity: render hash changed",
+    })
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json()["state"] == "paused", "a failure must not requeue a paused post"
+    row = _run("SELECT state::text AS state, outcome_detail::text AS outcome_detail "
+               "FROM schedules WHERE id = $1", sid)[0]
+    assert row["state"] == "paused"
+    assert "approval integrity" in json.loads(row["outcome_detail"])["detail"]
+
+    refused = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": True, "confirmed": True, "remote_post_id": "vid-paused",
+        "remote_privacy": "private",
+    })
+    assert refused.status_code == 409, "a paused post cannot be marked published"
+
+
+def test_unknown_attempt_requires_explicit_human_acknowledgement_to_requeue(auth_client):
+    """A dead worker leaves an unknown outcome. Requeueing must be possible,
+    but only after a named human acknowledges the platform check — otherwise a
+    duplicate public post is one click away."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Ack Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    _run("UPDATE offers SET state = 'verified', recheck_at = now() + interval '1 day', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+    markdown = "# Ack Co walkthrough\n\nVerified details."
+    version = script_version_hash(markdown)
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-ack-1', $2) RETURNING id
+        """, offer_id, version)[0]["id"]
+
+    started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert started.status_code == 200, started.text
+    auth_client.post(f"/schedules/{sid}/pause", headers=SVC, json={"note": "worker died"})
+
+    blocked = auth_client.post(f"/schedules/{sid}/transition", headers=SVC, json={
+        "to": "scheduled", "reviewer": "pytest",
+    })
+    assert blocked.status_code == 409, "an unknown attempt cannot be silently cleared"
+    assert "acknowledge_unknown_attempt" in blocked.json()["detail"]
+
+    resumed = auth_client.post(f"/schedules/{sid}/transition", headers=SVC, json={
+        "to": "scheduled", "reviewer": "pytest",
+        "acknowledge_unknown_attempt": True,
+    })
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["state"] == "scheduled"
+    detail = json.loads(_run(
+        "SELECT outcome_detail::text AS detail FROM schedules WHERE id = $1", sid,
+    )[0]["detail"])
+    assert detail.get("attempt") is None, "the acknowledged marker must be cleared"
+    assert detail["attempt_resolved"]["resolved_by"] == "pytest"
+
+    again = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert again.status_code == 200, "after acknowledgement a fresh attempt is allowed"
+
+
+def test_a_failed_post_can_be_paused_after_its_reason_is_recorded(auth_client):
+    """The worker reports the held reason first, then pauses. Pausing a failed
+    post must work so the reason is not lost and the post is visible as paused."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Block Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-block-1', 'hash-1') RETURNING id
+        """, offer_id)[0]["id"]
+
+    failed = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": False, "hold": True, "detail": "offer expired — publish blocked",
+    })
+    assert failed.status_code == 200 and failed.json()["state"] == "failed"
+    paused = auth_client.post(f"/schedules/{sid}/pause", headers=SVC,
+                              json={"note": "auto pause after block"})
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["state"] == "paused"
+    row = _run("SELECT state::text AS state, outcome_detail::text AS detail "
+               "FROM schedules WHERE id = $1", sid)[0]
+    assert row["state"] == "paused"
+    assert "offer expired" in json.loads(row["detail"])["detail"]
 
 
 def test_attempt_marker_is_refused_for_non_scheduled_posts(auth_client):
@@ -2124,6 +2346,14 @@ def test_human_stage_refuses_automation_actor(auth_client):
         "capture_id": capture.json()["id"],
     })
     assert render.status_code == 201, render.text
+    vertical = auth_client.post(f"/offers/{offer_id}/renders", headers=SVC, json={
+        "preset": "vertical", "width": 1080, "height": 1920,
+        "video_path": "projects/x/render-vertical.mp4",
+        "script_version": scripts[0]["version"],
+        "script_version_hash": scripts[0]["version_hash"],
+        "capture_id": capture.json()["id"],
+    })
+    assert vertical.status_code == 201, vertical.text
 
     approved = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
                                 json={"to": "approved_for_video",
@@ -2141,6 +2371,81 @@ def test_human_stage_refuses_automation_actor(auth_client):
     })
     assert schedule.status_code == 201, schedule.text
     sid = schedule.json()["id"]
+    pins = schedule.json()
+    assert pins["render_id"] == render.json()["id"], \
+        "the schedule must pin the exact render the reviewer approved"
+    assert pins["package_hash"] and pins["metadata_hash"], \
+        "the schedule must pin metadata + package hashes"
+    assert pins["metadata"]["captions_language"] == "en", \
+        "the caption-track language is pinned separately from the voiceover"
+    assert pins["render_sha256"] is None, \
+        "an unreadable legacy path is never guessed; the publisher fails closed"
+
+    # YouTube's flagship surface is 16:9 even though the vertical render was
+    # created later. Instagram/TikTok default to the vertical render, and an
+    # operator can pin vertical explicitly for a YouTube Short.
+    yt_default = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-01-03T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert yt_default.status_code == 201, yt_default.text
+    assert yt_default.json()["render_id"] == render.json()["id"], \
+        "YouTube long-form must default to the landscape render"
+
+    ig_default = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "instagram", "local_time": "2027-01-04T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert ig_default.status_code == 201, ig_default.text
+    assert ig_default.json()["render_id"] == vertical.json()["id"], \
+        "Instagram must default to the vertical render"
+
+    short = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-01-05T13:00:00+00:00",
+        "privacy": "private", "render_id": vertical.json()["id"],
+    })
+    assert short.status_code == 201, short.text
+    assert short.json()["render_id"] == vertical.json()["id"], \
+        "an explicit render pin must win over the platform default"
+
+    # An approved content variant is scheduled verbatim. A variant with no
+    # approved copy is refused instead of becoming a blank upload.
+    variant_id = _run(
+        "INSERT INTO content_variants (offer_id, language, kind, platform, "
+        "variant_key, payload, text_content, status) VALUES "
+        "($1, 'en', 'metadata', 'youtube', 'variant-a', $2::jsonb, "
+        "'Approved A/B', 'approved') RETURNING id",
+        offer_id,
+        json.dumps({
+            "title": "Approved A/B title",
+            "caption": "Approved A/B caption with the reviewed CTA.",
+            "captions_language": "en",
+            "tags": ["verified"],
+        }),
+    )[0]["id"]
+    variant_schedule = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-01-06T13:00:00+00:00",
+        "privacy": "private", "content_variant_id": str(variant_id),
+    })
+    assert variant_schedule.status_code == 201, variant_schedule.text
+    variant_body = variant_schedule.json()
+    assert variant_body["metadata"]["title"] == "Approved A/B title"
+    assert variant_body["metadata_variant"] == "variant-a"
+    assert variant_body["metadata"]["captions_language"] == "en"
+
+    blank_variant = _run(
+        "INSERT INTO content_variants (offer_id, language, kind, platform, "
+        "variant_key, payload, text_content, status) VALUES "
+        "($1, 'en', 'metadata', 'youtube', 'blank', '{}'::jsonb, '', 'approved') "
+        "RETURNING id",
+        offer_id,
+    )[0]["id"]
+    refused_variant = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-01-07T13:00:00+00:00",
+        "privacy": "private", "content_variant_id": str(blank_variant),
+    })
+    assert refused_variant.status_code == 409, refused_variant.text
+    assert "missing an approved title or caption" in refused_variant.json()["detail"]
 
     step = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
                             json={"to": "needs_approval"})
@@ -2211,3 +2516,104 @@ def test_human_stage_refuses_automation_actor(auth_client):
         assert "budget" in exhausted.json()["detail"]
 
     _reset_policy(auth_client)
+
+
+# ------------------------------------------ v0.28 content experiments
+
+def test_variant_approval_gates_experiments_and_decisions_are_audited(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Experiment Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    variant_id = _run(
+        "INSERT INTO content_variants (offer_id, language, kind, platform, "
+        "variant_key, payload, text_content, status) "
+        "VALUES ($1, 'en', 'metadata', 'youtube', 'a', '{}'::jsonb, 'A', 'draft') "
+        "RETURNING id", offer_id,
+    )[0]["id"]
+
+    draft = auth_client.post("/studio/experiments", headers=SVC, json={
+        "offer_id": offer["id"], "variant_id": str(variant_id),
+        "hypothesis": "Question hook lifts 3-second retention",
+        "metric": "retention_3s",
+    })
+    assert draft.status_code == 409, "a draft variant cannot enter an experiment"
+
+    approved = auth_client.post(f"/studio/variants/{variant_id}/approve", headers=SVC, json={"approved": True})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+
+    created = auth_client.post("/studio/experiments", headers=SVC, json={
+        "offer_id": offer["id"], "variant_id": str(variant_id),
+        "hypothesis": "Question hook lifts 3-second retention",
+        "metric": "retention_3s", "platform": "youtube",
+    })
+    assert created.status_code == 201, created.text
+    experiment_id = created.json()["id"]
+
+    plain_schedule = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, timezone, "
+        "privacy, idempotency_key, version_hash) VALUES ($1, 'youtube', 'draft', "
+        "now(), 'Asia/Karachi', 'private', 'itest-exp-plain', 'h') RETURNING id",
+        offer_id,
+    )[0]["id"]
+    mismatch = auth_client.post(f"/studio/experiments/{experiment_id}/assign",
+                                headers=SVC, json={"schedule_id": str(plain_schedule)})
+    assert mismatch.status_code == 409, \
+        "an experiment cannot claim a variant the schedule did not pin"
+
+    variant_schedule = _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, timezone, "
+        "privacy, idempotency_key, version_hash, content_variant_id) VALUES "
+        "($1, 'youtube', 'draft', now(), 'Asia/Karachi', 'private', "
+        "'itest-exp-variant', 'h', $2) RETURNING id",
+        offer_id, variant_id,
+    )[0]["id"]
+    assigned = auth_client.post(f"/studio/experiments/{experiment_id}/assign",
+                                headers=SVC, json={"schedule_id": str(variant_schedule)})
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["status"] == "running"
+
+    decided = auth_client.post(f"/studio/experiments/{experiment_id}/decide", headers=SVC, json={
+        "status": "won", "note": "retention +11%",
+        "result": {"retention_3s": 0.62},
+    })
+    assert decided.status_code == 200, decided.text
+    row = _run("SELECT status, decision_note, decided_by, decided_at, result::text AS result "
+               "FROM content_experiments WHERE id = $1",
+               __import__("uuid").UUID(experiment_id))[0]
+    assert row["status"] == "won"
+    assert row["decision_note"] == "retention +11%"
+    assert row["decided_by"] and row["decided_at"] is not None
+    assert json.loads(row["result"])["retention_3s"] == 0.62
+
+    listed = auth_client.get(f"/studio/offers/{offer['id']}/experiments", headers=SVC)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["status"] == "won"
+
+
+def test_youtube_chapters_are_finalized_before_the_metadata_hash():
+    from schedules_api import _attach_youtube_chapters
+
+    beats = [
+        {"id": "hook", "at_s": 0}, {"id": "eligibility", "at_s": 4},
+        {"id": "proof", "at_s": 9}, {"id": "claim", "at_s": 15},
+        {"id": "result", "at_s": 45}, {"id": "cta", "at_s": 55},
+    ]
+    metadata = _attach_youtube_chapters({"caption": "Approved copy."}, beats, 58)
+    starts = [c["start_s"] for c in metadata["chapters"]]
+    assert starts == [0, 15, 45], "chapters must be >=10s apart with a >=10s tail"
+    assert "0:00 The offer" in metadata["caption"]
+    assert "0:45 Result" in metadata["caption"]
+
+    already = _attach_youtube_chapters(dict(metadata), beats, 58)
+    assert already["caption"].count("Chapters:") == 1, "never duplicate chapter text"
+
+    supplied = _attach_youtube_chapters({
+        "caption": "Copy without a chapter section.",
+        "chapters": [{"start_s": 0, "title": "Hook"},
+                     {"start_s": 12, "title": "Proof"},
+                     {"start_s": 30, "title": "Result"}],
+    }, beats, 60)
+    assert "0:12 Proof" in supplied["caption"], \
+        "reviewed chapters must be written into the hashed description"

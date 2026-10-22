@@ -13,7 +13,7 @@ Usage:
 What it does:
   1. Loads the offer + latest approved script checklist from the API (gated on
      verified state server-side).
-  2. Opens a headed Chromium context recording 1280x720 video.
+  2. Opens a headed Chromium context recording native 1920x1080 video.
   3. For each checklist step with a URL: navigates, waits for the operator to
      press ENTER when the step is complete, appends a timestamped step-log row.
   4. Scans the step log for secret patterns (redaction review) and POSTs the
@@ -99,9 +99,9 @@ class CaptureSession:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
             context = browser.new_context(
-                viewport={"width": 1280, "height": 720},
+                viewport={"width": 1920, "height": 1080},
                 record_video_dir=str(self.out_dir),
-                record_video_size={"width": 1280, "height": 720},
+                record_video_size={"width": 1920, "height": 1080},
             )
             page = context.new_page()
 

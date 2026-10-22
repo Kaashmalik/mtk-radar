@@ -38,14 +38,37 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
   }
 
   const buttons: Array<{ label: string; action: () => void }> = [];
-  if (state === "draft" || state === "failed" || state === "paused") {
+  if (state === "draft") {
     buttons.push({
-      label: state === "paused" ? "▶ Resume" : "→ Needs approval",
-      action: () =>
+      label: "→ Needs approval",
+      action: () => call(
+        `/schedules/${scheduleId}/transition`,
+        { to: "needs_approval", reviewer: getReviewerName() },
+      ),
+    });
+  }
+  if (state === "failed" || state === "paused") {
+    buttons.push({
+      label: state === "paused" ? "▶ Resume" : "↻ Retry",
+      action: () => {
+        // A failed post may have uploaded before the error was recorded. The
+        // worker re-confirms a known remote id, but an unknown outcome must be
+        // checked by a human before this post is allowed back in the queue.
+        const ok = window.confirm(
+          "Only continue after checking the platform. If a previous upload's " +
+          "outcome is unknown, it may already be live and retrying could " +
+          "publish a duplicate. Continue?",
+        );
+        if (!ok) return;
         call(
           `/schedules/${scheduleId}/transition`,
-          { to: state === "paused" ? "scheduled" : "needs_approval", reviewer: getReviewerName() },
-        ),
+          {
+            to: "scheduled",
+            reviewer: getReviewerName(),
+            acknowledge_unknown_attempt: true,
+          },
+        );
+      },
     });
   }
   if (state === "needs_approval") {
@@ -60,7 +83,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
       action: () => call(`/schedules/${scheduleId}/transition`, { to: "scheduled", reviewer: getReviewerName() }),
     });
   }
-  if (state === "approved" || state === "scheduled") {
+  if (state === "approved" || state === "scheduled" || state === "failed") {
     buttons.push({ label: "⏸ Pause", action: () => call(`/schedules/${scheduleId}/pause`) });
   }
 
