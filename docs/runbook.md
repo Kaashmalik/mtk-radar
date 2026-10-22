@@ -27,11 +27,23 @@ Companion documents:
 ## 1. Deployment
 
 ```bash
+bash scripts/deploy.sh --with-workers          # one command: secrets + build + boot + smoke check
+# optional S3-compatible storage alongside workers:
+bash scripts/deploy.sh --with-workers --with-storage
+# or, manually (builds immutable images):
+# docker compose -f infra/docker/docker-compose.yml --profile workers up -d --build
+```
+
+`scripts/deploy.sh` generates `infra/.env` with strong random tokens on first
+run, builds the immutable images, starts the stack, waits for health, and
+runs a connected smoke check (authorized `/attention` + dashboard `/api/health`).
+Schema migrations apply automatically before the API starts (the one-shot
+`migrate` service runs `services/api/db_migrate.py`; re-running only applies
+new files). To upgrade a running host: `git pull && bash scripts/deploy.sh --with-workers`.
+
+```bash
 cp .env.example .env          # then set POSTGRES_PASSWORD for anything real
 ./scripts/mtk-start.sh        # API + dashboard + migrations + worker profile
-# or, manually (builds immutable images):
-# docker compose -f infra/docker/docker-compose.yml up -d --build
-# docker compose -f infra/docker/docker-compose.yml --profile workers up -d
 ```
 
 ### Production images, private networking and dev mode (v0.31)
