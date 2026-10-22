@@ -8,6 +8,11 @@ for operating the platform; the master plan remains the source of truth for
 Companion documents:
 - [`go-live-checklist.md`](go-live-checklist.md) — what the operator adds
   (keys, social connections) and the first real post.
+- [`cost-laptop-vps-2026-10-22.md`](cost-laptop-vps-2026-10-22.md) — cost
+  scenarios, laptop hosting, student/free resources and the split-VPS fallback
+  when the laptop is off.
+- [`notifications.md`](notifications.md) — monitor webhook/email setup,
+  payload schema, Gmail/SMTP example and free-Supabase boundaries.
 - [`master-plan-traceability.md`](master-plan-traceability.md) — every master
   plan item mapped to its code and its proof.
 - [`third-party-notices.md`](third-party-notices.md) / [`upgrade-checklist.md`](upgrade-checklist.md)
@@ -142,6 +147,33 @@ python services/api/scripts/seed_sources.py   # idempotent canonical-URL sources
 | Post `auto-paused: offer state -> expired` | offer died mid-schedule | verify the offer; corrections workflow if facts were wrong |
 | Recheck due > 0 (analytics) | verified offers overdue recheck | human recheck → `/sweep-stale` demotes if skipped |
 | Source stale (analytics red) | collector stopped | check collector worker logs → §4 |
+
+### 5.1 Alert delivery (webhook / email)
+
+The monitor logs every alert even when delivery is unconfigured. To send the
+same digest off-host, set `MTK_NOTIFY_WEBHOOK_URL` and/or the `MTK_SMTP_*` +
+`MTK_NOTIFY_EMAIL_TO` variables from [`.env.example`](../.env.example) and
+restart the monitor. The payload is `mtk-radar.notification.v1`; see
+[`notifications.md`](notifications.md) for the schema and security rules.
+
+```bash
+# One test through every configured channel (prints no secrets)
+python workers/monitor/main.py --test-notification
+
+# Compose
+docker compose -f infra/docker/docker-compose.yml \
+  --profile workers run --rm monitor \
+  python workers/monitor/main.py --test-notification
+```
+
+Delivery is best-effort with no retry queue: a dead webhook or SMTP server is
+logged and the next sweep continues. The monitor log remains the durable
+record. An identical alert set is suppressed for `MTK_NOTIFY_COOLDOWN_S`
+(default one hour) after a fully successful delivery, so a persistent token
+problem does not email every five minutes; a partial failure is retried.
+Email is a digest only when alerts exist — there is no quiet-time heartbeat.
+The notification sender is part of the monitor; it does not need Supabase or
+n8n.
 
 Workers (manual runs when not under compose):
 

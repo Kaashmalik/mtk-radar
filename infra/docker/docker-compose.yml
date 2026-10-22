@@ -266,6 +266,22 @@ services:
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
+      # Optional alert delivery. Blank values disable that channel; the
+      # monitor still logs every alert. See docs/notifications.md.
+      MTK_NOTIFY_WEBHOOK_URL: ${MTK_NOTIFY_WEBHOOK_URL:-}
+      MTK_NOTIFY_WEBHOOK_TOKEN: ${MTK_NOTIFY_WEBHOOK_TOKEN:-}
+      MTK_NOTIFY_EMAIL_TO: ${MTK_NOTIFY_EMAIL_TO:-}
+      MTK_SMTP_HOST: ${MTK_SMTP_HOST:-}
+      MTK_SMTP_PORT: ${MTK_SMTP_PORT:-587}
+      MTK_SMTP_USER: ${MTK_SMTP_USER:-}
+      MTK_SMTP_PASSWORD: ${MTK_SMTP_PASSWORD:-}
+      MTK_SMTP_FROM: ${MTK_SMTP_FROM:-}
+      MTK_SMTP_STARTTLS: ${MTK_SMTP_STARTTLS:-1}
+      MTK_SMTP_SSL: ${MTK_SMTP_SSL:-0}
+      MTK_NOTIFY_TIMEOUT_S: ${MTK_NOTIFY_TIMEOUT_S:-10}
+      MTK_NOTIFY_COOLDOWN_S: ${MTK_NOTIFY_COOLDOWN_S:-3600}
+      MTK_NOTIFY_SUBJECT_PREFIX: "${MTK_NOTIFY_SUBJECT_PREFIX:-[MTK RADAR]}"
     command: >
       sh -c "pip install -q httpx &&
              python workers/monitor/main.py --api http://api:8000 --interval 300"
