@@ -1826,17 +1826,34 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     assert mine[0]["script_version"] == 1
     assert mine[0]["capture_id"]
 
-    # a render for the same script version disqualifies the offer
+    # a QC-rejected attempt stays in the dead letter but does NOT disqualify
+    # the offer from being retried by the render sweep.
+    failed = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": "projects/x/render.mp4", "script_version": 1,
+        "script_version_hash": version_hash, "capture_id": str(capture_id),
+        "status": "qc_failed", "qc_status": "failed",
+        "qc_report": {"version": 1, "status": "failed",
+                      "errors": ["streams: measured 1280x720, expected 1920x1080"]},
+    })
+    assert failed.status_code == 201, failed.text
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in candidates if c["offer_id"] == offer["id"]]
+    assert len(mine) == 1, "a failed QC attempt must not hide the retryable offer"
+
+    # a measured, passed render for this exact script version disqualifies it
     created = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
         "preset": "landscape", "width": 1920, "height": 1080,
         "video_path": "projects/x/render.mp4", "script_version": 1,
         "script_version_hash": version_hash, "capture_id": str(capture_id),
+        "status": "rendered", "qc_status": "passed",
+        "qc_report": {"version": 1, "status": "passed", "errors": []},
     })
     assert created.status_code == 201, created.text
 
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     mine = [c for c in candidates if c["offer_id"] == offer["id"]]
-    assert mine == [], "a rendered script version must not queue again"
+    assert mine == [], "a QC-passed script version must not queue again"
 
     # an unreviewed capture never queues
     other = auth_client.post("/offers", headers=SVC, json={
@@ -1872,9 +1889,9 @@ def test_schedule_refuses_a_render_from_a_different_script_version(auth_client):
     )[0]["id"]
     _run(
         "INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash, "
-        "preset, width, height, video_path, language) "
+        "preset, width, height, video_path, language, status, qc_status) "
         "VALUES ($1, $2, 1, 'a-different-script-hash', 'landscape', 1920, 1080, "
-        "'projects/x/stale.mp4', 'en')",
+        "'projects/x/stale.mp4', 'en', 'rendered', 'passed')",
         offer_id, capture_id,
     )
     _run("UPDATE offers SET state = 'approved_for_video', "
@@ -1886,6 +1903,79 @@ def test_schedule_refuses_a_render_from_a_different_script_version(auth_client):
     })
     assert refused.status_code == 409, refused.text
     assert "different script version" in refused.json()["detail"]
+
+
+def test_qc_failed_render_blocks_scheduling_and_is_visible(auth_client):
+    """A registered QC failure is durable operator evidence, and it cannot
+    enter a schedule package. The offer stays retryable in the render queue."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "QC Gate Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    markdown = "# qc script\n\nExact approved words."
+    version = script_version_hash(markdown)
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+        "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) RETURNING id",
+        offer_id,
+    )[0]["id"]
+    render_id = _run(
+        "INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash, "
+        "preset, width, height, video_path, language, status, qc_status, qc_report) "
+        "VALUES ($1, $2, 1, $3, 'landscape', 1920, 1080, 'projects/x/qc.mp4', "
+        "'en', 'qc_failed', 'failed', "
+        "'{\"version\":1,\"status\":\"failed\",\"errors\":[\"no audio stream\"]}'::jsonb) "
+        "RETURNING id",
+        offer_id, capture_id, version,
+    )[0]["id"]
+    _run("UPDATE offers SET state = 'approved_for_video', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+
+    refused = auth_client.post(f"/offers/{offer['id']}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-03-01T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert refused.status_code == 409, refused.text
+    assert "measured QC" in refused.json()["detail"]
+
+    dead = auth_client.get("/render-dead-letter", headers=SVC)
+    assert dead.status_code == 200, dead.text
+    body = dead.json()
+    assert body["counts"]["qc_failed"] >= 1
+    assert any(str(item["id"]) == str(render_id) for item in body["items"])
+    item = next(item for item in body["items"] if str(item["id"]) == str(render_id))
+    assert "no audio stream" in item["qc_report"]
+
+    analytics = auth_client.get("/analytics", headers=SVC).json()
+    assert analytics["rendering"]["qc_failed"] >= 1
+
+
+def test_render_registration_requires_a_measured_qc_report(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "No QC Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    markdown = "# no qc script"
+    version = script_version_hash(markdown)
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, redaction_reviewed) "
+        "VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) RETURNING id",
+        offer_id,
+    )[0]["id"]
+    _run("UPDATE offers SET state = 'approved_for_video', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+
+    refused = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": "projects/x/no-qc.mp4", "script_version": 1,
+        "script_version_hash": version, "capture_id": str(capture_id),
+    })
+    assert refused.status_code == 422, refused.text
+    assert "QC" in refused.json()["detail"]
 
 
 def test_health_reports_database_and_migration_readiness(auth_client):
@@ -2344,6 +2434,8 @@ def test_human_stage_refuses_automation_actor(auth_client):
         "script_version": scripts[0]["version"],
         "script_version_hash": scripts[0]["version_hash"],
         "capture_id": capture.json()["id"],
+        "status": "rendered", "qc_status": "passed",
+        "qc_report": {"version": 1, "status": "passed", "errors": []},
     })
     assert render.status_code == 201, render.text
     vertical = auth_client.post(f"/offers/{offer_id}/renders", headers=SVC, json={
@@ -2352,6 +2444,8 @@ def test_human_stage_refuses_automation_actor(auth_client):
         "script_version": scripts[0]["version"],
         "script_version_hash": scripts[0]["version_hash"],
         "capture_id": capture.json()["id"],
+        "status": "rendered", "qc_status": "passed",
+        "qc_report": {"version": 1, "status": "passed", "errors": []},
     })
     assert vertical.status_code == 201, vertical.text
 

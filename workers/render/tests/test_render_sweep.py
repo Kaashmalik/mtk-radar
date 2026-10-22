@@ -118,6 +118,99 @@ def test_render_job_refuses_when_every_requested_language_is_disabled(monkeypatc
         job.run(None, ["landscape"], True, languages=("ur",))
 
 
+def test_render_job_persists_a_qc_rejection_and_raises(monkeypatch, tmp_path):
+    """A QC-rejected output is still registered with its report, then the job
+    fails so the sweep does not count it as delivered."""
+    job = render_main.RenderJob("off-1", "http://fake", tmp_path)
+    project = tmp_path / "off-1"
+    capture = project / "capture.mp4"
+    capture.write_bytes(b"capture")
+    job.script_version = 1
+    job.script_version_hash = "a" * 64
+    job.capture_id = "cap-1"
+    job.script_metadata = {}
+    job.caption_language = "en"
+    job.copy_language = "en"
+
+    monkeypatch.setattr(job, "load_sources", lambda *a, **k: {
+        "offer": {"id": "off-1", "title": "Example", "provider": "Acme"},
+        "script": {"markdown": "# script"},
+        "capture": {"step_log": [], "video_path": str(capture)},
+    })
+    monkeypatch.setattr(render_main, "materialize", lambda *a, **k: None)
+    monkeypatch.setattr(render_main.covers_mod, "generate_covers", lambda *a, **k: {
+        "primary": {}, "covers": [],
+    })
+    monkeypatch.setattr(render_main.covers_mod, "cover_for_preset", lambda *a, **k: {})
+    monkeypatch.setattr(render_main.motion_mod, "build_motion_filter", lambda *a, **k: "")
+    monkeypatch.setattr(render_main.motion_mod, "motion_metadata", lambda *a, **k: {})
+    monkeypatch.setattr(render_main.render_mod, "build_ffmpeg_cmd", lambda *a, **k: ["ffmpeg"])
+    monkeypatch.setattr(render_main.render_mod, "describe", lambda cmd: "ffmpeg")
+
+    class Proc:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, project_dir):
+        output = Path(project_dir) / "renders" / "off-1-landscape.mp4"
+        output.write_bytes(b"rendered")
+        return Proc()
+
+    monkeypatch.setattr(render_main.render_mod, "run", fake_run)
+    monkeypatch.setattr(render_main.render_mod, "probe_duration", lambda *a: 10.0)
+    monkeypatch.setattr(render_main, "make_from_env", lambda: None)
+    monkeypatch.setattr(render_main.qc_mod, "run", lambda *a, **k: {
+        "version": 1, "status": "failed", "errors": ["no audio stream"],
+        "warnings": [], "checks": {},
+    })
+
+    class FakeApi:
+        def __init__(self):
+            self.payloads = []
+
+        def post(self, path, json=None):
+            self.payloads.append((path, json))
+
+            class Resp:
+                status_code = 201
+
+                def json(self):
+                    return {"id": "r1"}
+
+            return Resp()
+
+    job.api = FakeApi()
+    with pytest.raises(SystemExit, match="failed"):
+        job._run_language(str(capture), ["landscape"], True, "cap-1", "en")
+
+    assert len(job.api.payloads) == 1
+    payload = job.api.payloads[0][1]
+    assert payload["status"] == "qc_failed"
+    assert payload["qc_status"] == "failed"
+    assert payload["qc_report"]["errors"] == ["no audio stream"]
+    assert payload["captions_path"].endswith("assets/captions.srt")
+
+
+def test_encoder_failure_row_is_a_dead_letter_record(tmp_path):
+    row = render_main._render_failure_row(
+        preset=render_main.get_preset("landscape"),
+        language="en",
+        video_path="projects/off-1/renders/off-1-landscape.mp4",
+        captions_path="projects/off-1/assets/captions.srt",
+        cover_path=None,
+        command="ffmpeg -i capture.mp4 out.mp4",
+        reason="ffmpeg exited 1 for preset landscape",
+        stderr="Invalid data found when processing input",
+        expected_duration=10.0,
+    )
+    assert row["status"] == "render_failed"
+    assert row["qc_status"] == "failed"
+    assert row["qc_report"]["stage"] == "ffmpeg"
+    assert "Invalid data" in row["qc_report"]["details"]["stderr"]
+    assert row["video_sha256"] is None
+    assert row["duration_s"] is None
+
+
 def test_missing_ffmpeg_is_reported_with_the_configured_path(monkeypatch):
     """The preflight must honour FFMPEG_PATH (the render/narration modules do)
     and name the binary it looked for — a wrong PATH used to hide the real

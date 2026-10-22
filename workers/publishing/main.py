@@ -496,6 +496,15 @@ class Publisher:
                 "current render; re-schedule the reviewed package")
             return False
 
+        # v0.29: a render must have a measured, passing QC report. Legacy rows
+        # (qc_status NULL/not_checked) fail closed too: re-render and re-approve.
+        if render.get("status") != "rendered" or render.get("qc_status") != "passed":
+            self._block(
+                post["id"],
+                "render did not pass measured QC — inspect the render "
+                "dead-letter, fix the cause and re-render before publishing")
+            return False
+
         meta = post.get("metadata")
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
         if _canonical_hash(meta) != post["metadata_hash"]:

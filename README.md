@@ -67,7 +67,12 @@ them, so no worker can quietly publish an unapproved language.
 
 Captions are generated from the real capture step log, split into readable
 chunks, and rendered with a legible font, safe margins and 9:16-aware sizing.
-Override the font with `MTK_CAPTION_FONT` if you install another one.
+Override the font with `MTK_CAPTION_FONT` if you install another one. The
+render worker then measures the output — stream metadata, a full decode,
+black/freeze/silence events, loudness/true peak and caption safe area — and only
+a `rendered / passed` row may be scheduled or published. See
+[`docs/render-qc.md`](docs/render-qc.md) for thresholds, intentional-still
+exemptions and the dead-letter workflow.
 
 See [`docs/language-policy.md`](docs/language-policy.md) for defaults,
 validation, and the English-first rationale.
@@ -78,7 +83,7 @@ validation, and the English-first rationale.
 - **Immutable evidence snapshots.** Page URL, retrieval timestamp, publisher identity, text excerpt, and content hash — stored and reviewable.
 - **Tiered trust:** Tier A (provider-owned) can support verification; Tier B (X, Reddit, HN, Discord) only creates leads; Tier C (coupon aggregators, leaked codes) is excluded until official confirmation exists.
 - **Real walkthroughs only.** No staged success screens, no implied universal results, no secrets on camera. Commands come from official docs, are tested in a clean environment, and are shown with expected output.
-- **Human approval before publishing by default,** with pause/cancel/edit controls after scheduling. Automation can be enabled per stage in Settings, but never bypasses evidence, redaction, or script-hash guarantees.
+- **Human approval before publishing by default,** with pause/cancel/edit controls after scheduling. Automation can be enabled per stage in Settings, but never bypasses evidence, redaction, script-hash or measured render-QC guarantees.
 
 ## Architecture
 

@@ -136,7 +136,8 @@ def _render(hash_value):
     path = Path(tempfile.mkdtemp()) / "r.mp4"
     path.write_bytes(b"VIDEO")
     return {"id": "r1", "video_path": str(path), "script_version_hash": hash_value,
-            "cover_path": None, "captions_path": None}
+            "cover_path": None, "captions_path": None,
+            "status": "rendered", "qc_status": "passed"}
 
 
 def _healthy_offer():
@@ -251,6 +252,31 @@ def test_hash_mismatch_blocks_and_pauses():
     # first would make the result endpoint refuse the detail.
     calls = [c for c in p.api.calls if c[0] == "POST" and ("/result" in c[1] or "/pause" in c[1])]
     assert calls[0][1].endswith("/result"), "report the held reason before pausing"
+
+
+def test_qc_failed_render_blocks_upload():
+    render = _render("APPROVED")
+    render["status"] = "qc_failed"
+    render["qc_status"] = "failed"
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(_post(render), {"youtube": adapter})
+
+    assert adapter.uploads == [], "a QC-rejected render must never upload"
+    assert _pause_calls(p.api)
+    assert "QC" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_legacy_render_without_qc_fails_closed():
+    render = _render("APPROVED")
+    render.pop("qc_status")
+    render.pop("status")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(_post(render), {"youtube": adapter})
+
+    assert adapter.uploads == []
+    assert "QC" in _result_calls(p.api)[0][2]["detail"]
 
 
 def test_render_without_bound_hash_fails_closed():

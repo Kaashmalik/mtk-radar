@@ -39,7 +39,8 @@ class FakeAPI:
         if path == "/renders":
             return FakeResponse([{"id": "r1", "video_path": self.video_path,
                                   "script_version_hash": "hash-1",
-                                  "cover_path": None, "captions_path": None}])
+                                  "cover_path": None, "captions_path": None,
+                                  "status": "rendered", "qc_status": "passed"}])
         if path.startswith("/offers/"):
             return FakeResponse({"id": "off-1", "state": "approved_for_video",
                                  "expires_at": None, "recheck_at": None})

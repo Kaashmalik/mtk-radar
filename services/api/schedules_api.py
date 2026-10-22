@@ -2,7 +2,8 @@
 master plan §17). Gates enforced server-side:
 
 - Create: offer must be in an approved-for-video state WITH a rendered export
-  whose capture passed redaction review; test posts default to private.
+  whose measured QC passed and whose capture passed redaction review; test
+  posts default to private.
 - Approve: records reviewer + the EXACT approved script version hash.
 - Schedule: revalidates the current script hash against the approved hash —
   material edits force reapproval (rollback safety, §17).
@@ -169,13 +170,16 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         """
         SELECT r.id, r.preset, r.video_path, r.language, r.cover_path, r.captions_path,
                r.duration_s, r.video_sha256, r.cover_sha256, r.captions_sha256,
-               r.script_version_hash,
+               r.script_version_hash, r.status, r.qc_status,
                r.metadata::text AS render_metadata,
                r.disclosure::text AS disclosure, c.redaction_reviewed
         FROM renders r LEFT JOIN capture_sessions c ON c.id = r.capture_id
         WHERE r.offer_id = $1 AND r.language = $2
           AND ($3::uuid IS NULL OR r.id = $3)
-        ORDER BY (r.preset = $4) DESC, r.created_at DESC LIMIT 1
+        ORDER BY (r.status = 'rendered' AND r.qc_status = 'passed'
+                  AND r.preset = $4) DESC,
+                 (r.status = 'rendered' AND r.qc_status = 'passed') DESC,
+                 (r.preset = $4) DESC, r.created_at DESC LIMIT 1
         """,
         offer_id, body.language, body.render_id, preferred_preset,
     )
@@ -188,6 +192,16 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         raise HTTPException(
             status_code=409,
             detail=f"no {body.language} render exists — render this language first",
+        )
+    # v0.29: only a measured, passed render can enter the publishing package.
+    # Failed attempts remain in the dead-letter view for diagnosis, never here.
+    if render.get("status") != "rendered" or render.get("qc_status") != "passed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the selected render did not pass measured QC — inspect the "
+                "render dead-letter, fix the cause and re-render before scheduling"
+            ),
         )
     # v0.28: NULL means the render was registered without a capture. An
     # unreviewed capture is not evidence of redaction; fail closed.

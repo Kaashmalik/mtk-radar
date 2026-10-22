@@ -19,6 +19,8 @@ type RenderOption = {
   width: number;
   height: number;
   duration_s: string | null;
+  status?: string;
+  qc_status?: string;
 };
 
 export default function ScheduleForm({
@@ -89,7 +91,12 @@ export default function ScheduleForm({
   const platformAccounts = accounts.filter(
     (account) => account.platform === platform && (account.status ?? "active") === "active",
   );
-  const renderOptions = renders.filter((render) => render.language === language);
+  const renderOptions = renders.filter(
+    (render) =>
+      render.language === language &&
+      (render.status ?? "rendered") === "rendered" &&
+      render.qc_status === "passed",
+  );
 
   async function schedule() {
     setBusy(true);
