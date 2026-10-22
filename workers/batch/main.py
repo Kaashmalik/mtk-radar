@@ -30,6 +30,7 @@ import httpx
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
+from api_paging import fetch_all  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
@@ -90,8 +91,8 @@ class Batch:
         created = 0
         for state in ("verified", "approved_for_video"):
             try:
-                offers = self.api.get("/offers", params={"state": state, "limit": 200}).json()
-            except httpx.HTTPError as exc:
+                offers = fetch_all(self.api, "/offers", {"state": state}, limit=200)
+            except (httpx.HTTPError, ValueError) as exc:
                 log.warning("offer list (%s) unavailable: %s", state, exc)
                 continue
             for offer in offers:
@@ -126,8 +127,8 @@ class Batch:
         requires_render = limits.get("auto_approve_requires_render", True)
         approved = 0
         try:
-            offers = self.api.get("/offers", params={"state": "verified", "limit": 200}).json()
-        except httpx.HTTPError as exc:
+            offers = fetch_all(self.api, "/offers", {"state": "verified"}, limit=200)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("approve stage: offer list unavailable: %s", exc)
             return 0
 
@@ -176,9 +177,10 @@ class Batch:
         limits = self._limits(policy)
         platforms = limits.get("auto_schedule_platforms") or ["youtube"]
         try:
-            offers = self.api.get("/offers", params={"state": "approved_for_video", "limit": 200}).json()
-            schedules = self.api.get("/schedules", params={"limit": 500}).json()
-        except httpx.HTTPError as exc:
+            offers = fetch_all(self.api, "/offers",
+                               {"state": "approved_for_video"}, limit=200)
+            schedules = fetch_all(self.api, "/schedules", limit=500)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("schedule stage unavailable: %s", exc)
             return 0
 
@@ -276,8 +278,8 @@ class Batch:
         """What is waiting on whom — the operator's single status read-out."""
         out: dict = {}
         try:
-            offers = self.api.get("/offers", params={"limit": 200}).json()
-        except httpx.HTTPError as exc:
+            offers = fetch_all(self.api, "/offers", limit=200)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("readiness: offer list unavailable: %s", exc)
             return out
         out["awaiting_verification"] = sum(
@@ -286,22 +288,23 @@ class Batch:
             1 for o in offers if o.get("state") == "corrected")
 
         try:
-            captures = self.api.get("/captures", params={"limit": 200}).json()
-        except httpx.HTTPError:
+            captures = fetch_all(self.api, "/captures", limit=200)
+        except (httpx.HTTPError, ValueError):
             captures = []
         out["captures_total"] = len(captures)
         out["captures_awaiting_redaction_review"] = sum(
             1 for c in captures if not c.get("redaction_reviewed"))
 
         try:
-            candidates = self.api.get("/render-candidates", params={"limit": 200}).json()
-        except httpx.HTTPError:
+            candidates = fetch_all(self.api, "/render-candidates", limit=200)
+        except (httpx.HTTPError, ValueError):
             candidates = []
         out["render_candidates"] = len(candidates)
 
         try:
-            scheduled = self.api.get("/schedules", params={"state": "scheduled", "limit": 200}).json()
-        except httpx.HTTPError:
+            scheduled = fetch_all(self.api, "/schedules",
+                                  {"state": "scheduled"}, limit=200)
+        except (httpx.HTTPError, ValueError):
             scheduled = []
         out["scheduled_posts"] = len(scheduled)
         return out

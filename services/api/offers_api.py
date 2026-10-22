@@ -19,11 +19,18 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 
 import db
 from jsonb import decode
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from api_hardening import effective_reviewer
 import tos_review
 from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
@@ -135,10 +142,15 @@ async def create_offer(offer: OfferIn, request: Request) -> dict:
 
 @router.get("")
 async def list_offers(
+    response: Response,
     state: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
     pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    before_updated = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT o.id, o.title, o.provider, o.category, o.offer_type, o.state::text AS state,
@@ -150,13 +162,22 @@ async def list_offers(
                  WHERE x.offer_id = o.id ORDER BY x.created_at DESC LIMIT 1) AS conflicts
         FROM offers o
         WHERE ($1::text IS NULL OR o.state::text = $1)
-        ORDER BY o.updated_at DESC
+          AND ($3::timestamptz IS NULL
+               OR (o.updated_at, o.id) < ($3::timestamptz, $4::uuid))
+        ORDER BY o.updated_at DESC, o.id DESC
         LIMIT $2
         """,
         state if state in OFFER_STATES else None,
         limit,
+        before_updated,
+        before_id,
     )
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["updated_at"], row["id"]),
+    )
+    return out
 
 
 @router.get("/stale")

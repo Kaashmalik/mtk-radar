@@ -74,7 +74,8 @@ type Analytics = {
     description_patched_at: string | null;
   }[];
   growth: {
-    score: number;
+    score: number | null;
+    score_enabled?: boolean;
     score_label?: string;
     measured_posts: number;
     by_platform: { platform: string; posts: number; views: number; engagement: number; reach: number }[];
@@ -266,12 +267,15 @@ export default async function AnalyticsPage() {
                 className="tag tag-accent"
                 title={data.growth?.score_label ?? "Internal directional signal, not a platform metric"}
               >
-                Internal health {data.growth?.score ?? 0}/100
+                {data.growth?.score_enabled && data.growth.score !== null
+                  ? `Internal health ${data.growth.score}/100`
+                  : "Composite score unavailable"}
               </span>
             </div>
             <p className="small muted" style={{ margin: "0 0 0.7rem" }}>
-              Directional internal signal built only from measured fields — not a
-              platform metric and not evidence of YouTube API compliance.
+              {data.growth?.score_enabled
+                ? "Directional internal signal built only from measured fields — not a platform metric and not evidence of YouTube API compliance."
+                : "The blended health score is disabled pending a YouTube API compliance review. Measured fields and recommendations below are still shown; no composite number is invented."}
             </p>
             {!data.growth || data.growth.measured_posts === 0 ? (
               <div className="empty-state">
@@ -280,9 +284,11 @@ export default async function AnalyticsPage() {
               </div>
             ) : (
               <>
-                <div className="score-bar" style={{ height: 10, marginBottom: "0.9rem" }}>
-                  <span style={{ width: `${Math.min(100, data.growth.score)}%` }} />
-                </div>
+                {data.growth.score_enabled && data.growth.score !== null && (
+                  <div className="score-bar" style={{ height: 10, marginBottom: "0.9rem" }}>
+                    <span style={{ width: `${Math.min(100, data.growth.score)}%` }} />
+                  </div>
+                )}
                 <div className="grid-2">
                   <div>
                     <h3 style={{ fontSize: "0.86rem", margin: "0 0 0.4rem" }}>Next actions</h3>

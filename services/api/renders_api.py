@@ -17,10 +17,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 import db
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from schedules_state import script_version_hash
 from settings_store import get_language_policy
 from state import can_generate_video
@@ -180,11 +187,16 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
 
 @router.get("/renders")
 async def list_renders(
+    response: Response,
     offer_id: Optional[uuid.UUID] = Query(default=None),
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
     pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    before_created = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT r.id, r.offer_id, o.title AS offer_title, r.preset, r.width, r.height,
@@ -197,13 +209,22 @@ async def list_renders(
         FROM renders r JOIN offers o ON o.id = r.offer_id
         WHERE ($1::uuid IS NULL OR r.offer_id = $1)
           AND ($3::text IS NULL OR r.status = $3)
-        ORDER BY r.created_at DESC LIMIT $2
+          AND ($4::timestamptz IS NULL
+               OR (r.created_at, r.id) < ($4::timestamptz, $5::uuid))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $2
         """,
         offer_id,
         limit,
         status,
+        before_created,
+        before_id,
     )
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["created_at"], row["id"]),
+    )
+    return out
 
 
 @router.get("/render-dead-letter")
@@ -240,68 +261,118 @@ async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
     return {"counts": dict(counts or {}), "items": [dict(r) for r in rows]}
 
 
+#: Presets the render worker knows about. Kept in sync with
+#: workers/render/presets.py; the worker passes its own list explicitly.
+KNOWN_RENDER_PRESETS = ("landscape", "vertical")
+
+
 @router.get("/render-candidates")
-async def render_candidates(limit: int = Query(default=50, le=200)) -> list[dict]:
+async def render_candidates(
+    response: Response,
+    limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
+    presets: Optional[str] = Query(default=None),
+) -> list[dict]:
     """Offers that are READY to render (v0.19 automation queue).
 
     A candidate has: an approved-for-video/verified offer, a generated
-    script, and a capture session that passed redaction review — but no
-    render registered for that exact script version yet. The render worker
-    polls this endpoint (`workers/render/main.py --sweep`) and the dashboard
-    shows it as a work queue, so rendering no longer needs a human at a
-    terminal. Idempotency: a render for the same script version (same
-    content hash) disqualifies the offer.
+    script, a capture session that passed redaction review, and at least one
+    requested preset with no QC-passed render for that exact script version.
+
+    v0.31: completion is tracked PER PRESET. A finished landscape export no
+    longer hides a still-missing vertical one, and the `LIMIT` is applied
+    after already-rendered variants are removed (keyset pagination via
+    `cursor`), so a long backlog cannot starve the tail.
     """
     pool = db.get()
     language_policy = await get_language_policy(pool)
+
+    requested = [p.strip() for p in (presets or ",".join(KNOWN_RENDER_PRESETS)).split(",")
+                 if p.strip()]
+    unknown = [p for p in requested if p not in KNOWN_RENDER_PRESETS]
+    if not requested or unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "presets must be a comma-separated subset of "
+                + ", ".join(KNOWN_RENDER_PRESETS)
+                + (f" (unknown: {', '.join(unknown)})" if unknown else "")
+            ),
+        )
+    requested = list(dict.fromkeys(requested))
+
+    parts = decode_cursor(cursor, 3)
+    before_created = decode_datetime(parts[0]) if parts else None
+    before_offer = decode_uuid(parts[1]) if parts else None
+    before_language = parts[2] if parts else None
+
+    # `sha256(convert_to(markdown,'UTF8'))` is the SQL equivalent of
+    # schedules_state.script_version_hash, so the NOT EXISTS check binds to the
+    # exact script bytes without sending content through the worker.
     rows = await pool.fetch(
         """
         WITH latest_script AS (
           SELECT DISTINCT ON (offer_id, language)
                  offer_id, language, version, markdown
           FROM offer_scripts ORDER BY offer_id, language, version DESC
+        ),
+        base AS (
+          SELECT o.id AS offer_id, o.title, o.provider, o.state::text AS state,
+                 ls.language, ls.version AS script_version, ls.markdown,
+                 c.id AS capture_id, c.video_path,
+                 c.created_at AS capture_created_at,
+                 ARRAY(
+                   SELECT p.preset
+                   FROM unnest($3::text[]) AS p(preset)
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM renders r
+                     WHERE r.offer_id = o.id
+                       AND r.language = ls.language
+                       AND r.preset = p.preset
+                       AND r.status = 'rendered'
+                       AND r.qc_status = 'passed'
+                       AND r.script_version_hash =
+                           encode(sha256(convert_to(ls.markdown, 'UTF8')), 'hex')
+                   )
+                 ) AS missing_presets
+          FROM offers o
+          JOIN latest_script ls ON ls.offer_id = o.id
+          JOIN LATERAL (
+            SELECT c.* FROM capture_sessions c
+            WHERE c.offer_id = o.id AND c.redaction_reviewed
+            ORDER BY c.created_at DESC LIMIT 1
+          ) c ON TRUE
+          WHERE o.state IN ('verified', 'approved_for_video')
+            AND ls.language = ANY($2::text[])
         )
-        SELECT o.id AS offer_id, o.title, o.provider, o.state::text AS state,
-               ls.language, ls.version AS script_version, ls.markdown,
-               c.id AS capture_id, c.video_path, c.created_at AS capture_created_at
-        FROM offers o
-        JOIN latest_script ls ON ls.offer_id = o.id
-        JOIN LATERAL (
-          SELECT c.* FROM capture_sessions c
-          WHERE c.offer_id = o.id AND c.redaction_reviewed
-          ORDER BY c.created_at DESC LIMIT 1
-        ) c ON TRUE
-        WHERE o.state IN ('verified', 'approved_for_video')
-          AND ls.language = ANY($2::text[])
-        ORDER BY c.created_at DESC
+        SELECT * FROM base
+        WHERE cardinality(missing_presets) > 0
+          AND ($4::timestamptz IS NULL
+               OR (capture_created_at, offer_id, language) <
+                  ($4::timestamptz, $5::uuid, $6::text))
+        ORDER BY capture_created_at DESC, offer_id DESC, language DESC
         LIMIT $1
         """,
-        limit, language_policy["narration_languages"],
+        limit,
+        language_policy["narration_languages"],
+        requested,
+        before_created,
+        before_offer,
+        before_language,
     )
     candidates = [dict(r) for r in rows]
-    if not candidates:
-        return []
-
-    # the approval hash is derived from the script CONTENT (never stored), so
-    # it is computed here and compared against registered renders
-    offer_ids = [c["offer_id"] for c in candidates]
-    rendered = await pool.fetch(
-        "SELECT offer_id, language, script_version_hash FROM renders "
-        "WHERE offer_id = ANY($1::uuid[]) "
-        "AND status = 'rendered' AND qc_status = 'passed'",
-        offer_ids,
-    )
-    done = {(r["offer_id"], r["language"], r["script_version_hash"]) for r in rendered
-            if r["script_version_hash"]}
-
     out: list[dict] = []
     for candidate in candidates:
-        version_hash = script_version_hash(candidate.get("markdown") or "")
-        if (candidate["offer_id"], candidate.get("language", "en"), version_hash) in done:
-            continue  # this exact script version is already rendered for this language
         candidate.pop("markdown", None)  # content never leaves the server
-        candidate["script_version_hash"] = version_hash
+        candidate["missing_presets"] = list(candidate.get("missing_presets") or [])
         out.append(candidate)
+
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(
+            row["capture_created_at"], row["offer_id"], row["language"]
+        ),
+    )
     return out
 
 

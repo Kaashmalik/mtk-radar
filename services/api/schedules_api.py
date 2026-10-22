@@ -20,10 +20,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from api_hardening import (
     CREDENTIAL_DISABLED,
     CREDENTIAL_REVIEWER,
@@ -405,10 +412,15 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
 
 @router.get("/schedules")
 async def list_schedules(
+    response: Response,
     state: Optional[str] = None,
     limit: int = Query(default=100, le=500),
+    cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
     pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    after_time = decode_datetime(parts[0]) if parts else None
+    after_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT s.id, s.offer_id, o.title AS offer_title, o.provider AS offer_provider,
@@ -424,14 +436,23 @@ async def list_schedules(
                s.remote_post_id, s.outcome_detail::text AS outcome_detail, s.created_at
         FROM schedules s JOIN offers o ON o.id = s.offer_id
         WHERE ($1::text IS NULL OR s.state::text = $1)
-        ORDER BY s.local_time
+          AND ($3::timestamptz IS NULL
+               OR (s.local_time, s.id) > ($3::timestamptz, $4::uuid))
+        ORDER BY s.local_time, s.id
         LIMIT $2
         """,
         state if state in ("draft", "needs_approval", "approved", "scheduled",
                            "published", "failed", "paused") else None,
         limit,
+        after_time,
+        after_id,
     )
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["local_time"], row["id"]),
+    )
+    return out
 
 
 @router.get("/schedules/{schedule_id}")

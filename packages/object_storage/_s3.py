@@ -57,6 +57,8 @@ class S3Storage:
         key: str,
         body: bytes | None = None,
         extra_headers: dict[str, str] | None = None,
+        *,
+        stream: bool = False,
     ) -> httpx.Response:
         url = self._url(bucket, key)
         payload_hash = sha256_hex(body) if body is not None else EMPTY_PAYLOAD_SHA256
@@ -75,9 +77,14 @@ class S3Storage:
             region=self.region,
             service=SERVICE,
         )
-        return self._http.request(
-            method, url, content=body, headers=headers
-        ) if body is not None else self._http.request(method, url, headers=headers)
+        request = self._http.build_request(
+            method, url,
+            content=body if body is not None else None,
+            headers=headers,
+        )
+        # `send` (rather than `request`) is the only path that can stream a
+        # large media object without buffering it in memory.
+        return self._http.send(request, stream=stream)
 
     # ------------------------------------------------------------ API
 
@@ -102,6 +109,32 @@ class S3Storage:
     def exists(self, ref: str) -> bool:
         bucket, key = self.parse_ref(ref)
         return self._signed("HEAD", bucket, key).status_code == 200
+
+    def size(self, ref: str) -> int | None:
+        """Object length from HEAD, or None when the object is missing."""
+        bucket, key = self.parse_ref(ref)
+        resp = self._signed("HEAD", bucket, key)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        try:
+            return int(resp.headers.get("content-length", ""))
+        except (TypeError, ValueError):
+            return None
+
+    def open_stream(self, ref: str, start: int | None = None,
+                    end: int | None = None) -> httpx.Response:
+        """Signed GET, optionally for one byte range, left unread.
+
+        The caller is responsible for closing the response. Used by the
+        authenticated media route so video seeking streams instead of
+        downloading an entire export into memory.
+        """
+        bucket, key = self.parse_ref(ref)
+        headers: dict[str, str] = {}
+        if start is not None:
+            headers["Range"] = f"bytes={start}-{'' if end is None else end}"
+        return self._signed("GET", bucket, key, extra_headers=headers, stream=True)
 
     def delete(self, ref: str) -> None:
         bucket, key = self.parse_ref(ref)

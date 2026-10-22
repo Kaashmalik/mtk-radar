@@ -3,6 +3,7 @@ import CorrectionForm from "./CorrectionForm";
 import EvidenceForm from "./EvidenceForm";
 import ExtractionEditor, { type ExtractionSnapshot } from "./ExtractionEditor";
 import GenerateScriptButton from "./GenerateScriptButton";
+import MediaPlayer from "./MediaPlayer";
 import RedactionReview from "./RedactionReview";
 import ScheduleForm from "./ScheduleForm";
 import { apiFetch } from "@/lib/api";
@@ -403,6 +404,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                   </div>
                 )}
                 <div className="muted small">{r.video_path}</div>
+                <MediaPlayer kind="renders" id={r.id} label={`${r.preset} export`} />
               </li>
             ))}
           </ul>

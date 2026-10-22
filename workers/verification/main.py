@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "services", "api"))
 sys.path.insert(0, os.path.dirname(__file__))
 
+from api_paging import iter_pages  # noqa: E402
 from source_adapters import Fetcher, check_robots, fetch_page_snapshot  # noqa: E402
 from source_adapters.egress import EgressPolicy  # noqa: E402
 from document_sections import (  # noqa: E402
@@ -147,7 +148,7 @@ class Verifier:
             self._post("/offers/sweep-stale", json={})
             return
 
-        offers = self._get("/offers", params={"limit": 100})
+        offers = list(iter_pages(self.client, f"{self.api_url}/offers", limit=100))
         targets = [o for o in offers if o.get("state") in VERIFY_STATES]
         if targets:
             log.info("verifying %d offer(s)", len(targets))

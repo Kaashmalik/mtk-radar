@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import MediaPlayer from "./MediaPlayer";
 
 export type CaptureReview = {
   id: string;
@@ -46,6 +47,7 @@ export default function RedactionReview({
         {capture.claim_outcome_reviewer && (
           <> (attested by {capture.claim_outcome_reviewer})</>
         )}
+        {videoPath && <MediaPlayer kind="captures" id={capture.id} label="footage" />}
       </div>
     );
   }
@@ -86,7 +88,12 @@ export default function RedactionReview({
         ) : (
           <span style={{ color: "var(--ok)" }}>no pattern matches</span>
         )}
-        {videoPath && <div className="muted small">Footage: <code>{videoPath}</code></div>}
+        {videoPath && (
+          <>
+            <div className="muted small">Footage: <code>{videoPath}</code></div>
+            <MediaPlayer kind="captures" id={capture.id} label="footage" />
+          </>
+        )}
       </div>
       <p className="muted small" style={{ margin: 0 }}>
         The scan is not the review. Watch the footage, terminal output and

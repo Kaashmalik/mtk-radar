@@ -48,6 +48,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
+from api_paging import fetch_all  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
@@ -244,7 +245,7 @@ class Publisher:
     def _sweep(self, now: datetime) -> int:
         adapters = self.build_adapters()
 
-        posts = self.api.get("/schedules", params={"state": "scheduled", "limit": 200}).json()
+        posts = fetch_all(self.api, "/schedules", {"state": "scheduled"}, limit=200)
         if not isinstance(posts, list):
             log.error("scheduled-post lookup returned an unexpected payload — sweep skipped")
             return 0
@@ -287,8 +288,8 @@ class Publisher:
         schedule description_patched_at, and the sweep skips marked posts.
         """
         try:
-            posts = self.api.get("/schedules", params={"state": "published", "limit": 500}).json()
-        except httpx.HTTPError as exc:
+            posts = fetch_all(self.api, "/schedules", {"state": "published"}, limit=500)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("correction sweep skipped (API unreachable): %s", exc)
             return 0
         if not isinstance(posts, list):
@@ -352,8 +353,8 @@ class Publisher:
         max_retries = int(limits.get("retry_max_attempts", self.MAX_RETRIES))
         retry_base = int(limits.get("retry_base_seconds", self.RETRY_BASE_S))
         try:
-            failed = self.api.get("/schedules", params={"state": "failed", "limit": 500}).json()
-        except httpx.HTTPError as exc:
+            failed = fetch_all(self.api, "/schedules", {"state": "failed"}, limit=500)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("retry sweep skipped (API unreachable): %s", exc)
             return 0
         if not isinstance(failed, list):
