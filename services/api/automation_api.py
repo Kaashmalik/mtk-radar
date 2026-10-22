@@ -37,6 +37,7 @@ from automation import (
     normalize_policy,
     preset_policy,
 )
+from preflight import VALID_MODES, build_preflight
 from schedules_state import default_publish_window, parse_publish_windows
 from settings_store import audit, get_value, put_value
 
@@ -50,6 +51,12 @@ class PolicyIn(BaseModel):
 
 
 class PauseIn(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class StartIn(BaseModel):
+    mode: str = "assisted"
+    confirm_public: bool = False
     note: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -153,6 +160,102 @@ async def resume_automation(request: Request) -> dict[str, Any]:
     actor = effective_reviewer(request, None, default="operator")
     await save_policy(policy, actor=actor, action="automation:resume")
     return {"policy": policy, "summary": describe(policy)}
+
+
+@router.get("/preflight")
+async def preflight(mode: str = Query(default="assisted")) -> dict[str, Any]:
+    """Read-only readiness report for the dashboard Start card.
+
+    The browser cannot start Docker; this endpoint only proves that the
+    host-side launcher has the worker stack healthy and the gates are armed.
+    """
+    if mode not in VALID_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown mode '{mode}' — known: {', '.join(sorted(VALID_MODES))}",
+        )
+    try:
+        return await build_preflight(mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/start")
+async def start_automation(body: StartIn, request: Request) -> dict[str, Any]:
+    """Arm the selected safe preset after a fresh server-side preflight.
+
+    This is deliberately not a Docker control: the host launcher starts the
+    workers, and this endpoint refuses to arm if they are missing or stale.
+    """
+    if body.mode not in VALID_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown mode '{body.mode}' — known: {', '.join(sorted(VALID_MODES))}",
+        )
+    if body.mode == "autopilot_public" and not body.confirm_public:
+        raise HTTPException(
+            status_code=422,
+            detail="public autopilot requires confirm_public=true as an explicit acknowledgement",
+        )
+
+    report = await build_preflight(mode=body.mode)
+    if not report["ready"]:
+        names = "; ".join(c["label"] for c in report["blocking"])
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"preflight failed: {names}",
+                "preflight": report,
+            },
+        )
+
+    if body.mode == "assisted":
+        policy = preset_policy("assisted")
+        policy["guardrails"]["auto_schedule_privacy"] = "private"
+    else:
+        policy = preset_policy("autopilot")
+        # Private is the default for a reason. Public is a separate, explicit
+        # acknowledgement and starts with a one-post-per-day budget.
+        policy["guardrails"]["auto_schedule_privacy"] = (
+            "public" if body.mode == "autopilot_public" else "private"
+        )
+        if body.mode == "autopilot_public":
+            policy["guardrails"]["auto_publish_max_per_day"] = 1
+
+    policy["paused"] = False
+    policy["dry_run"] = False
+    policy = normalize_policy(policy)
+    actor = effective_reviewer(request, None, default="operator")
+    await save_policy(
+        policy, actor=actor, action="automation:start",
+        detail={
+            "mode": body.mode,
+            "note": body.note,
+            "preflight_ready": True,
+            "warning_count": len(report.get("warnings", [])),
+        },
+    )
+    return {
+        "started": True,
+        "mode": body.mode,
+        "policy": policy,
+        "summary": describe(policy),
+        "preflight": report,
+    }
+
+
+@router.post("/stop")
+async def stop_automation(request: Request, body: Optional[PauseIn] = None) -> dict[str, Any]:
+    """Explicit named stop, equivalent to the kill switch but audited as a
+    stop so the operator's intent is unmistakable in the trail."""
+    policy = await load_policy()
+    policy["paused"] = True
+    actor = effective_reviewer(request, None, default="operator")
+    await save_policy(
+        policy, actor=actor, action="automation:stop",
+        detail={"note": (body.note if body else None)},
+    )
+    return {"started": False, "policy": policy, "summary": describe(policy)}
 
 
 @router.get("/next-slot")

@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from object_storage import materialize  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 from platforms import (  # noqa: E402
     FacebookAdapter,
@@ -973,11 +974,20 @@ def main() -> None:
     args = parser.parse_args()
 
     publisher = Publisher(args.api)
+    hb = WorkerHeartbeat(args.api, "publishing")
     if args.once:
-        count = publisher.run_once()
-        log.info("sweep complete: %d published", count)
+        hb.beat("ok", detail="one-shot publish sweep")
+        try:
+            count = publisher.run_once()
+            log.info("sweep complete: %d published", count)
+        finally:
+            hb.beat("stopped", detail="one-shot publish sweep complete")
         return
-    publisher.run_forever()
+    hb.start()
+    try:
+        publisher.run_forever()
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":

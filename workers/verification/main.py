@@ -50,6 +50,7 @@ from fetch_attestation import sign_provenance  # noqa: E402
 
 from allowlist import build_allowlist, domain_ok, host_of  # noqa: E402
 from extractors import extract_document, is_complete  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 SWEEP_INTERVAL = 120  # seconds
@@ -368,7 +369,12 @@ class Verifier:
 
 
 def main() -> None:
-    Verifier().run_forever()
+    hb = WorkerHeartbeat(API_URL, "verification")
+    hb.start()
+    try:
+        Verifier().run_forever()
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":

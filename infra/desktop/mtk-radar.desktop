@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MTK RADAR
+Comment=Start the MTK RADAR dashboard and workers
+Exec=bash -lc 'cd "$HOME/mtk-radar" && ./scripts/mtk-start.sh'
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;

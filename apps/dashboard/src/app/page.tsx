@@ -9,6 +9,7 @@
 import "./styles.css";
 import Link from "next/link";
 
+import AutomationCard from "./AutomationCard";
 import RadarScope, { type RadarCandidate } from "./RadarScope";
 import { apiFetch } from "@/lib/api";
 
@@ -40,6 +41,12 @@ type Trends = {
   summary: { total: number; hot: number; shortlisted: number; average_score: number };
 };
 
+type Attention = {
+  total: number;
+  severity: "ok" | "warning" | "error";
+  counts: Record<string, number>;
+};
+
 async function getJson<T>(path: string, fallback: T): Promise<T> {
   try {
     const res = await apiFetch(path, { cache: "no-store" });
@@ -62,7 +69,7 @@ function big(value: number | string | null | undefined): string {
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const [health, items, analytics, trends] = await Promise.all([
+  const [health, items, analytics, trends, attention] = await Promise.all([
     getJson<{ status?: string }>("/health", {}),
     getJson<ItemRow[]>("/items?processed=false&limit=12", []),
     getJson<Analytics | null>("/analytics", null),
@@ -70,6 +77,7 @@ export default async function Home() {
       candidates: [],
       summary: { total: 0, hot: 0, shortlisted: 0, average_score: 0 },
     }),
+    getJson<Attention | null>("/attention", null),
   ]);
 
   const offers = analytics?.offers_by_state ?? [];
@@ -79,6 +87,7 @@ export default async function Home() {
   const scheduled = (analytics?.schedules_by_state ?? [])
     .filter((row) => ["approved", "scheduled", "needs_approval"].includes(row.state))
     .reduce((sum, row) => sum + Number(row.n), 0);
+  const needsYou = attention?.total ?? reviewCount;
   const growth = analytics?.growth?.score ?? 0;
   const topRecommendation = analytics?.growth?.recommendations?.[0];
 
@@ -97,7 +106,7 @@ export default async function Home() {
           <div className="hero-actions">
             <Link href="/radar" className="btn btn-primary">Open radar →</Link>
             <Link href="/review" className="btn">Review desk</Link>
-            <Link href="/studio" className="btn btn-ghost">Content studio</Link>
+            <Link href="/attention" className="btn btn-ghost">Needs You{needsYou ? ` · ${needsYou}` : ""}</Link>
           </div>
         </div>
         <aside className="panel">
@@ -112,7 +121,7 @@ export default async function Home() {
           </div>
           <div className="metric-row"><span>Radar leads</span><strong>{trends.summary.total}</strong></div>
           <div className="metric-row"><span>Hot leads</span><strong>{trends.summary.hot}</strong></div>
-          <div className="metric-row"><span>Awaiting a human</span><strong>{reviewCount}</strong></div>
+          <div className="metric-row"><span>Awaiting a human</span><strong>{needsYou}</strong></div>
           <div className="metric-row"><span>Scheduled / approval</span><strong>{scheduled}</strong></div>
           <div className="metric-row"><span>Growth score</span><strong>{growth.toFixed(1)}<span className="muted small">/100</span></strong></div>
           {topRecommendation && (
@@ -122,6 +131,8 @@ export default async function Home() {
           )}
         </aside>
       </section>
+
+      <AutomationCard />
 
       <section className="kpi-grid" aria-label="Key metrics">
         <div className="kpi"><strong>{analytics?.items_total ?? "–"}</strong><span>Inbox items</span><small>discovery pool</small></div>

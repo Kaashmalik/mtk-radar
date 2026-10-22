@@ -1,0 +1,16 @@
+[Unit]
+Description=MTK RADAR — API, dashboard and worker stack
+# Docker is a system service; the user unit only needs the docker group/socket.
+# Start Docker at boot (or let Docker Desktop start it) before this unit runs.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Edit this path if the checkout is not ~/mtk-radar (a system unit has no %h).
+WorkingDirectory=%h/mtk-radar
+ExecStart=/usr/bin/env bash %h/mtk-radar/scripts/mtk-start.sh --no-open
+ExecStop=/usr/bin/env bash %h/mtk-radar/scripts/mtk-stop.sh
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

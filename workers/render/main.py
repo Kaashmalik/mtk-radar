@@ -53,6 +53,7 @@ from object_storage import (  # noqa: E402
     render_key,
 )
 from presets import get_preset  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL_DEFAULT = "http://localhost:8000"
 VIDEO_STATES = ("verified", "approved_for_video", "published")
@@ -706,6 +707,11 @@ def main() -> None:
     args = parser.parse_args()
 
     _require_ffmpeg()
+    ffmpeg_path = shutil.which(FFMPEG_PATH) or FFMPEG_PATH
+    hb = WorkerHeartbeat(
+        args.api, "render",
+        metadata={"toolchain": {"ffmpeg": ffmpeg_path}},
+    )
 
     presets = [k.strip() for k in args.presets.split(",") if k.strip()]
     languages = tuple(k.strip() for k in args.languages.split(",") if k.strip())
@@ -715,24 +721,36 @@ def main() -> None:
 
     if args.sweep:
         if not args.watch:
-            sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit,
-                  args.motion)
+            hb.beat("ok", detail="one-shot render sweep")
+            try:
+                sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit,
+                      args.motion)
+            finally:
+                hb.beat("stopped", detail="one-shot render sweep complete")
             return
-        while True:  # service mode: the render queue is self-serving
-            sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit,
-                  args.motion)
-            time.sleep(max(30, args.interval))
+        hb.start()
+        try:
+            while True:  # service mode: the render queue is self-serving
+                sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit,
+                      args.motion)
+                time.sleep(max(30, args.interval))
+        finally:
+            hb.stop()
     if not args.offer:
         raise SystemExit("pass --offer <OFFER_ID> or --sweep")
 
-    RenderJob(args.offer, args.api, Path(args.out),
-              language=languages[0], motion_template=args.motion).run(
-        capture_video=args.video,
-        preset_keys=presets,
-        skip_narration=args.skip_narration,
-        capture_id=args.capture,
-        languages=languages,
-    )
+    hb.start()
+    try:
+        RenderJob(args.offer, args.api, Path(args.out),
+                  language=languages[0], motion_template=args.motion).run(
+            capture_video=args.video,
+            preset_keys=presets,
+            skip_narration=args.skip_narration,
+            capture_id=args.capture,
+            languages=languages,
+        )
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":

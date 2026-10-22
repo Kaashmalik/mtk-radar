@@ -21,10 +21,16 @@ import argparse
 import logging
 import os
 import signal
+import sys
 import time
 from typing import Optional
 
 import httpx
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
+
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
 
@@ -367,10 +373,19 @@ def main() -> None:
 
     _install_stop_handlers()
     batch = Batch(args.api)
+    hb = WorkerHeartbeat(args.api, "batch")
     if args.once:
-        batch.run_once()
+        hb.beat("ok", detail="one-shot batch")
+        try:
+            batch.run_once()
+        finally:
+            hb.beat("stopped", detail="one-shot batch complete")
         return
-    batch.run_forever(args.interval)
+    hb.start()
+    try:
+        batch.run_forever(args.interval)
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,13 @@ channels so an alert does not depend on somebody watching a terminal:
 Both are best-effort. If the webhook or SMTP server is down, the monitor keeps
 sweeping and logs the failure; it never blocks publishing or approval.
 
+**v0.30 split:** operational failures (worker stale/missing, render/QC,
+publishing failure, expiries, dead credentials) go out as an **immediate**
+alert set. Pending human work (redaction reviews, offer/post approvals,
+verification desk, exhausted budget) goes out as a **digest**. A tick with
+both categories may deliver two messages; identical sets respect the cooldown.
+The dashboard inbox at `/attention` is always the full, current view.
+
 > **Where this runs:** in the existing Python `monitor` worker. It does not
 > need Supabase, a serverless function, or a new service. Supabase Free is a
 > database option, not the notification sender — see

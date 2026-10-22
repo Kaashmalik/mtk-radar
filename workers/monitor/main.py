@@ -25,14 +25,19 @@ Usage:
 import argparse
 import json
 import logging
+import os
+import signal
+import sys
 import time
 from datetime import datetime, timezone
 
-import os
-import signal
 import httpx
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
+
 import notifications
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 
 _API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
@@ -192,17 +197,92 @@ def check_metrics_freshness(client: httpx.Client) -> list[dict]:
     return alerts
 
 
+_DIGEST_KINDS = {
+    "redaction",
+    "offer_approval",
+    "schedule_approval",
+    "verification",
+    "budget",
+}
+_IMMEDIATE_ERROR_KINDS = {
+    "render_failed",
+    "publish_failed",
+    "offer_expiry",
+    "worker",
+}
+
+
+def check_attention(client: httpx.Client) -> list[dict]:
+    """Turn the dashboard's Needs You counts into alert-group summaries.
+
+    One alert per category, not one per row: a dozen pending approvals should
+    be one actionable email, not a mailbox full of noise. Credential alerts
+    are omitted here because check_platform_accounts already reports them with
+    more detail.
+    """
+    try:
+        data = client.get("/attention").json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("cannot read attention inbox: %s", exc)
+        return []
+    if not isinstance(data, dict):  # legacy API without /attention
+        return []
+
+    alerts: list[dict] = []
+    by_kind = data.get("by_kind") or {}
+    items = data.get("items") or []
+    for kind, raw_count in (data.get("counts") or {}).items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0 or kind == "token":
+            continue
+        meta = by_kind.get(kind) or {}
+        examples = [
+            str(item.get("title")) for item in items if item.get("kind") == kind
+        ][:3]
+        label = str(meta.get("label") or kind.replace("_", " "))
+        noun = "item" if count == 1 else "items"
+        verb = "needs" if count == 1 else "need"
+        message = f"{label}: {count} {noun} {verb} attention."
+        if examples:
+            message += " Examples: " + "; ".join(examples) + "."
+        delivery = "digest" if kind in _DIGEST_KINDS else "immediate"
+        severity = "error" if kind in _IMMEDIATE_ERROR_KINDS else "warning"
+        log_fn = log.error if severity == "error" else log.warning
+        log_fn("ALERT %s", message)
+        alerts.append({
+            "severity": severity,
+            "event": f"attention.{kind}",
+            "message": message,
+            "details": {
+                "kind": kind,
+                "count": count,
+                "href": meta.get("href") or "/attention",
+                "examples": examples,
+            },
+            "delivery": delivery,
+        })
+    return alerts
+
+
 def run_once(client: httpx.Client) -> list[dict]:
     alerts: list[dict] = []
     alerts.extend(sweep_offers(client))
     alerts.extend(check_platform_accounts(client))
     alerts.extend(check_metrics_freshness(client))
-    if alerts:
+    alerts.extend(check_attention(client))
+    # Immediate failures page now; pending human work travels in a digest.
+    for delivery in ("immediate", "digest"):
+        group = [a for a in alerts if a.get("delivery", "immediate") == delivery]
+        if not group:
+            continue
         try:
-            result = notifications.notify(alerts)
-            log.info("notification result: %s", result)
+            result = notifications.notify(group)
+            log.info("%s notification result: %s", delivery, result)
         except Exception as exc:  # noqa: BLE001 — alerting must not stop the sweep
-            log.exception("notification delivery crashed: %s", exc)
+            log.exception("%s notification delivery crashed: %s", delivery, exc)
     return alerts
 
 
@@ -261,21 +341,36 @@ def main() -> None:
 
     client = httpx.Client(timeout=60, base_url=args.api.rstrip("/"), headers=_api_auth_headers())
     _install_stop_handlers()
+    hb = WorkerHeartbeat(
+        args.api, "monitor",
+        metadata={"notification_channels": {
+            "webhook": config.webhook_enabled,
+            "email": config.email_enabled,
+        }},
+    )
     if args.once:
-        run_once(client)
-        log.info("monitor sweep complete")
+        hb.beat("ok", detail="one-shot monitor sweep")
+        try:
+            run_once(client)
+            log.info("monitor sweep complete")
+        finally:
+            hb.beat("stopped", detail="one-shot monitor complete")
         return
 
     log.info("monitor started against %s (interval %ss)", client.base_url, args.interval)
-    while not _STOP:
-        try:
-            run_once(client)
-            if _STOP:
-                break
-            time.sleep(args.interval)
-        except Exception as exc:  # noqa: BLE001 — monitor must never die
-            log.exception("monitor tick failed: %s", exc)
-            time.sleep(args.interval)
+    hb.start()
+    try:
+        while not _STOP:
+            try:
+                run_once(client)
+                if _STOP:
+                    break
+                time.sleep(args.interval)
+            except Exception as exc:  # noqa: BLE001 — monitor must never die
+                log.exception("monitor tick failed: %s", exc)
+                time.sleep(args.interval)
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":
