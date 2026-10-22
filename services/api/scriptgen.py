@@ -21,6 +21,12 @@ from offer_terms import CONTRADICTED, SUPPORTED, UNKNOWN
 
 VIDEO_STATES: Final = frozenset({"verified", "approved_for_video", "published"})
 SUPPORTED_LANGUAGES: Final = ("en", "ur")
+SCRIPT_FORMATS: Final = (
+    "official_explainer",
+    "tested_tutorial",
+    "claim_walkthrough",
+)
+DEFAULT_FORMAT: Final = "official_explainer"
 
 
 class ScriptGateError(PermissionError):
@@ -49,6 +55,37 @@ def assert_video_allowed(state: str) -> None:
         raise ScriptGateError(
             f"script generation blocked: offer state is '{state}' — verified "
             "with official evidence is required (master plan §3)"
+        )
+
+
+def assert_format_allowed(script_format: str, capture: dict | None) -> None:
+    """A format may only claim what the recorded evidence/capture supports.
+
+    - official_explainer explains the published terms; it needs no capture and
+      must not use first-person success wording.
+    - tested_tutorial needs a capture whose redaction was reviewed by a human.
+    - claim_walkthrough additionally needs that reviewer to attest the benefit
+      was actually demonstrated in the footage. Footage alone is not success.
+    """
+    if script_format not in SCRIPT_FORMATS:
+        raise ScriptGateError(
+            f"unknown script format '{script_format}' — known: {', '.join(SCRIPT_FORMATS)}"
+        )
+    if script_format == "official_explainer":
+        return
+    if not capture or not capture.get("redaction_reviewed"):
+        raise ScriptGateError(
+            f"script format '{script_format}' requires a capture whose redaction "
+            "was reviewed by a human; generate a capture first or use "
+            "official_explainer"
+        )
+    if script_format == "claim_walkthrough" \
+            and capture.get("claim_outcome") != "demonstrated":
+        raise ScriptGateError(
+            "claim_walkthrough requires a reviewer-attested demonstrated claim; "
+            "the capture outcome is "
+            f"'{capture.get('claim_outcome') or 'not recorded'}'. Use "
+            "tested_tutorial or official_explainer until the outcome is demonstrated."
         )
 
 
@@ -123,18 +160,47 @@ def _unsafe_reasons(step: dict) -> list[str]:
     return reasons
 
 
-def build_beats(offer: dict, checklist: list[dict]) -> list[dict]:
+def build_beats(offer: dict, checklist: list[dict],
+                script_format: str = DEFAULT_FORMAT,
+                capture: dict | None = None) -> list[dict]:
     """A retention-oriented beat sheet shared by English and Urdu scripts.
 
-    The beats are deliberately short and visual: hook → proof → steps → result
-    → CTA. The editor can cut to these markers without re-reading the script.
+    Wording follows the format: only a demonstrated claim walkthrough may say
+    the claim succeeded. An explainer never speaks in the first person.
     """
     title = offer.get("title", "this offer")
     provider = offer.get("provider", "the provider")
+    if script_format == "claim_walkthrough":
+        hook_en = f"I claimed {title} from {provider} — here is the real proof."
+        hook_ur = f"میں نے {provider} سے {title} حقیقت میں کلیم کیا — ثبوت سامنے ہے۔"
+    elif script_format == "tested_tutorial":
+        hook_en = f"I tested the setup steps for {title} from {provider}."
+        hook_ur = f"میں نے {provider} کی {title} سیٹ اپ کے مراحل خود ٹیسٹ کیے۔"
+    else:
+        hook_en = f"Here is what {provider}'s official terms actually say about {title}."
+        hook_ur = f"آفیشل شرائط کے مطابق {provider} کی {title} کی حقیقت یہ ہے۔"
+
+    if script_format == "claim_walkthrough" and capture:
+        result_en = "Show the demonstrated benefit in the provider account — no staged screens."
+        result_ur = "پرووائیڈر اکاؤنٹ میں ثابت شدہ فائدہ دکھائیں — کوئی جعلی اسکرین نہیں۔"
+    elif script_format == "tested_tutorial" and capture:
+        outcome = capture.get("claim_outcome")
+        if outcome == "demonstrated":
+            result_en = "Show the demonstrated result, or state clearly that the benefit was not shown."
+            result_ur = "ثابت شدہ نتیجہ دکھائیں، ورنہ واضح کریں کہ فائدہ نہیں دکھایا گیا۔"
+        elif outcome == "not_demonstrated":
+            result_en = "State that the steps ran but the benefit was not demonstrated in this test."
+            result_ur = "واضح کریں کہ مراحل چلے مگر اس ٹیسٹ میں فائدہ ثابت نہیں ہوا۔"
+        else:
+            result_en = "State that the benefit was not attempted; this is a setup tutorial, not a result."
+            result_ur = "واضح کریں کہ فائدہ آزمایا نہیں گیا؛ یہ سیٹ اپ ٹیوٹوریل ہے، نتیجہ نہیں۔"
+    else:
+        result_en = "Show the relevant official terms on screen; do not imply a result you did not demonstrate."
+        result_ur = "متعلقہ آفیشل شرائط اسکرین پر دکھائیں؛ ایسا نتیجہ نہ دکھائیں جو ثابت نہ ہوا ہو۔"
+
     return [
         {"id": "hook", "at_s": 0, "purpose": "stop the scroll",
-         "en": f"I claimed {title} from {provider} — here is the real proof.",
-         "ur": f"میں نے {provider} سے {title} حقیقت میں کلیم کیا — ثبوت سامنے ہے۔"},
+         "en": hook_en, "ur": hook_ur},
         {"id": "eligibility", "at_s": 4, "purpose": "qualify the viewer early",
          "en": _eligibility_line(offer),
          "ur": _eligibility_line_ur(offer)},
@@ -142,11 +208,14 @@ def build_beats(offer: dict, checklist: list[dict]) -> list[dict]:
          "en": "Official terms and eligibility are on screen; the source is in the description.",
          "ur": "آفیشل شرائط اور اہلیت اسکرین پر ہیں؛ مکمل ذریعہ ڈسکرپشن میں ہے۔"},
         {"id": "claim", "at_s": 15, "purpose": "real-time claim walkthrough",
-         "en": f"{len(checklist)} ordered checks, performed live on a real account.",
-         "ur": f"{len(checklist)} مرحلے، ایک حقیقی اکاؤنٹ پر لائیو کیے گئے۔"},
+         "en": f"{len(checklist)} ordered checks, performed live on a real account."
+               if script_format != "official_explainer"
+               else f"{len(checklist)} ordered checks from the official terms.",
+         "ur": f"{len(checklist)} مرحلے، ایک حقیقی اکاؤنٹ پر لائیو کیے گئے۔"
+               if script_format != "official_explainer"
+               else f"آفیشل شرائط کے {len(checklist)} مرحلے۔"},
         {"id": "result", "at_s": 45, "purpose": "show where the benefit landed",
-         "en": "Open the provider dashboard and show the benefit — no staged success screens.",
-         "ur": "پرووائیڈر ڈیش بورڈ کھول کر فائدہ دکھائیں — کوئی جعلی کامیابی نہیں۔"},
+         "en": result_en, "ur": result_ur},
         {"id": "cta", "at_s": 55, "purpose": "convert without misleading",
          "en": "Full guide, eligibility and source links are in the description.",
          "ur": "مکمل گائیڈ، اہلیت اور آفیشل لنکس ڈسکرپشن میں موجود ہیں۔"},
@@ -154,36 +223,78 @@ def build_beats(offer: dict, checklist: list[dict]) -> list[dict]:
 
 
 def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dict],
-                     evidence: list[dict], language: str = "en") -> str:
+                     evidence: list[dict], language: str = "en",
+                     script_format: str = DEFAULT_FORMAT,
+                     capture: dict | None = None) -> str:
     """Markdown script following §4/§15 sequence, in English or Urdu.
 
     Every factual claim cites evidence; renewal cost is always surfaced (§11).
+    The format decides what the narration may assert about a demonstration.
     """
     if language not in SUPPORTED_LANGUAGES:
         raise ValueError(f"unsupported script language '{language}' — known: {', '.join(SUPPORTED_LANGUAGES)}")
+    if script_format not in SCRIPT_FORMATS:
+        raise ValueError(f"unknown script format '{script_format}'")
     if language == "ur":
-        return _render_ur(offer, checklist, command_cards, evidence)
-    return _render_en(offer, checklist, command_cards, evidence)
+        markdown = _render_ur(offer, checklist, command_cards, evidence,
+                              script_format, capture)
+    else:
+        markdown = _render_en(offer, checklist, command_cards, evidence,
+                              script_format, capture)
+    assert_format_wording(markdown, script_format)
+    return markdown
+
+
+def assert_format_wording(markdown: str, script_format: str) -> None:
+    """Belt and braces: a renderer change cannot smuggle an outcome claim in."""
+    lowered = markdown.lower()
+    if script_format == "official_explainer":
+        for phrase in ("i claimed", "i tested", "i completed", "my result"):
+            if phrase in lowered:
+                raise ScriptGateError(
+                    f"official_explainer must not use first-person result wording ('{phrase}')"
+                )
 
 
 def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
-               evidence: list[dict]) -> str:
+               evidence: list[dict], script_format: str,
+               capture: dict | None) -> str:
     provider = offer.get("provider", "the provider")
     title = offer.get("title", "Offer walkthrough")
     expires = _fmt_date(offer.get("expires_at"))
     renewal = decode_mapping(offer.get("renewal"))
     promo_code = offer.get("promo_code")
+    outcome = capture.get("claim_outcome") if capture else None
 
+    titles = {
+        "official_explainer": "official terms explainer",
+        "tested_tutorial": "tested tutorial",
+        "claim_walkthrough": "real claim walkthrough",
+    }
     lines: list[str] = []
-    lines.append(f"# {title} — real claim walkthrough")
+    lines.append(f"# {title} — {titles[script_format]}")
     lines.append("")
     lines.append(f"_Checked on {datetime.utcnow().strftime('%d %b %Y')}. Terms may change; "
                  "source links below and in the description._")
     lines.append("")
+    lines.append(f"> Format: `{script_format}`. "
+                 + ("This explains the published terms; it does not claim a successful result."
+                    if script_format == "official_explainer"
+                    else "Wording is limited to what the reviewed capture supports."))
+    lines.append("")
     lines.append("## Hook options (choose one, keep it under 3 seconds)")
-    lines.append(f"1. I claimed **{title}** from {provider} — here is the real proof.")
-    lines.append(f"2. This {provider} offer looks too good to be true — I tested the real claim.")
-    lines.append(f"3. Do not pay for {title} until you see what the official terms actually say.")
+    if script_format == "claim_walkthrough":
+        lines.append(f"1. I claimed **{title}** from {provider} — here is the real proof.")
+        lines.append(f"2. This {provider} offer looks too good to be true — I tested the real claim.")
+        lines.append(f"3. Do not pay for {title} until you see what the official terms actually say.")
+    elif script_format == "tested_tutorial":
+        lines.append(f"1. I tested the setup steps for **{title}** from {provider}.")
+        lines.append(f"2. Here is exactly how the {provider} setup works — and where it can fail.")
+        lines.append(f"3. Before you try {title}, check these steps and the current terms.")
+    else:
+        lines.append(f"1. Here is what {provider}'s official terms actually say about **{title}**.")
+        lines.append(f"2. Before you trust {title}, read these exact terms with me.")
+        lines.append(f"3. No hype: the official rules, eligibility and unknowns for {title}.")
     lines.append("")
     lines.append("## Who this is for")
     lines.append(
@@ -219,7 +330,10 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
             lines.append(f"- ⚠️ Ongoing cost {ONGOING_COST_UNKNOWN}. Unknown renewal is not free — "
                          "state the cost on camera or confirm the terms before recommending the offer.")
     lines.append("")
-    lines.append("## Claim steps (perform in real time; pause on irreversible/paid decisions)")
+    if script_format == "official_explainer":
+        lines.append("## Steps described in the official terms")
+    else:
+        lines.append("## Claim steps (perform in real time; pause on irreversible/paid decisions)")
     for step in checklist:
         lines.append(f"{step['order'] + 1}. [{step['kind']}] {step['text']}")
     lines.append("")
@@ -232,9 +346,25 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
             for reason in card["unsafe_reasons"]:
                 lines.append(f"- ⚠️ {reason}")
         lines.append("")
-    lines.append("## Verify the benefit")
-    lines.append("- Open the provider dashboard and show exactly where the benefit landed "
-                 "(plan, quota, domain panel) — no staged success screens.")
+    if script_format == "claim_walkthrough":
+        lines.append("## Demonstrated benefit")
+        lines.append("- Open the provider dashboard and show exactly where the benefit landed "
+                     "(plan, quota, domain panel) — no staged success screens.")
+    elif script_format == "tested_tutorial":
+        lines.append("## Test result (word this exactly as recorded)")
+        if outcome == "demonstrated":
+            lines.append("- The reviewed capture demonstrates the benefit. Show the same evidence "
+                         "on screen and state the eligibility limits.")
+        elif outcome == "not_demonstrated":
+            lines.append("- The reviewed capture completed the steps but did NOT demonstrate the "
+                         "benefit. Say that clearly; do not imply success.")
+        else:
+            lines.append("- The reviewed capture did not attempt the benefit. This is a setup "
+                         "tutorial; do not imply that the benefit was obtained.")
+    else:
+        lines.append("## What the official terms say about the benefit")
+        lines.append("- Quote the official benefit wording and show it on screen. Unknown or "
+                     "unstated facts stay unknown; do not imply a demonstrated result.")
     lines.append("")
     lines.append("## CTA")
     lines.append("- Full guide, eligibility and official source links are in the description. "
@@ -268,23 +398,44 @@ ONGOING_COST_UNKNOWN: Final = "not stated in the inspected terms"
 
 
 def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
-               evidence: list[dict]) -> str:
+               evidence: list[dict], script_format: str,
+               capture: dict | None) -> str:
     provider = offer.get("provider", "پرووائیڈر")
     title = offer.get("title", "آفر")
     expires = _fmt_date(offer.get("expires_at"))
     renewal = decode_mapping(offer.get("renewal"))
     promo_code = offer.get("promo_code")
+    outcome = capture.get("claim_outcome") if capture else None
 
+    titles = {
+        "official_explainer": "آفیشل شرائط کی وضاحت",
+        "tested_tutorial": "ٹیسٹ شدہ ٹیوٹوریل",
+        "claim_walkthrough": "اصلی کلیم گائیڈ",
+    }
     lines: list[str] = []
-    lines.append(f"# {title} — اصلی کلیم گائیڈ")
+    lines.append(f"# {title} — {titles[script_format]}")
     lines.append("")
     lines.append(f"_چیک کیا گیا: {datetime.utcnow().strftime('%d %b %Y')}۔ شرائط بدل سکتی ہیں؛ "
                  "ذرائع نیچے اور ڈسکرپشن میں موجود ہیں۔_")
     lines.append("")
+    lines.append(f"> فارمیٹ: `{script_format}`۔ "
+                 + ("یہ صرف شائع شدہ شرائط کی وضاحت ہے؛ کامیابی کا دعویٰ نہیں۔"
+                    if script_format == "official_explainer"
+                    else "الفاظ صرف ریویو شدہ ریکارڈنگ تک محدود ہیں۔"))
+    lines.append("")
     lines.append("## ہک کے آپشن (ایک منتخب کریں، 3 سیکنڈ سے کم رکھیں)")
-    lines.append(f"1. میں نے {provider} سے **{title}** حقیقت میں کلیم کیا — ثبوت سامنے ہے۔")
-    lines.append(f"2. یہ {provider} آفر بہت اچھی لگ رہی ہے — میں نے اصلی کلیم ٹیسٹ کیا۔")
-    lines.append(f"3. {title} پر پیسے خرچ کرنے سے پہلے آفیشل شرائط ضرور دیکھیں۔")
+    if script_format == "claim_walkthrough":
+        lines.append(f"1. میں نے {provider} سے **{title}** حقیقت میں کلیم کیا — ثبوت سامنے ہے۔")
+        lines.append(f"2. یہ {provider} آفر بہت اچھی لگ رہی ہے — میں نے اصلی کلیم ٹیسٹ کیا۔")
+        lines.append(f"3. {title} پر پیسے خرچ کرنے سے پہلے آفیشل شرائط ضرور دیکھیں۔")
+    elif script_format == "tested_tutorial":
+        lines.append(f"1. میں نے {provider} کی **{title}** سیٹ اپ کے مراحل خود ٹیسٹ کیے۔")
+        lines.append("2. یہ مرحلہ وار سیٹ اپ ہے — اور یہاں کہاں غلطی ہو سکتی ہے۔")
+        lines.append(f"3. {title} آزمانے سے پہلے یہ مراحل اور موجودہ شرائط دیکھیں۔")
+    else:
+        lines.append(f"1. {provider} کی آفیشل شرائط **{title}** کے بارے میں اصل کیا کہتی ہیں؟")
+        lines.append(f"2. {title} پر بھروسہ کرنے سے پہلے یہ شرائط میرے ساتھ پڑھیں۔")
+        lines.append(f"3. بغیر مبالغے کے: آفیشل قواعد، اہلیت اور غیر واضح نکات۔")
     lines.append("")
     lines.append("## یہ کس کے لیے ہے")
     lines.append(_eligibility_line_ur(offer)
@@ -301,7 +452,10 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
             "فائنل کرنے سے پہلے قیمت اور خودکار تجدید اسکرین پر دکھائیں۔"
         )
     lines.append("")
-    lines.append("## کلیم کے مراحل (لائیو کریں؛ ناقابلِ واپسی یا ادائیگی والے قدم پر رکیں)")
+    if script_format == "official_explainer":
+        lines.append("## آفیشل شرائط میں بیان کردہ مراحل")
+    else:
+        lines.append("## کلیم کے مراحل (لائیو کریں؛ ناقابلِ واپسی یا ادائیگی والے قدم پر رکیں)")
     for step in checklist:
         lines.append(f"{step['order'] + 1}. [{step['kind']}] {step['text']}")
     lines.append("")
@@ -314,9 +468,21 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
             for reason in card["unsafe_reasons"]:
                 lines.append(f"- ⚠️ {reason}")
         lines.append("")
-    lines.append("## فائدہ کی تصدیق")
-    lines.append("- پرووائیڈر ڈیش بورڈ کھولیں اور دکھائیں کہ فائدہ کہاں پہنچا "
-                 "(پلان، کوٹہ، ڈومین پینل) — کوئی جعلی کامیابی اسکرین نہیں۔")
+    if script_format == "claim_walkthrough":
+        lines.append("## ثابت شدہ فائدہ")
+        lines.append("- پرووائیڈر ڈیش بورڈ کھولیں اور دکھائیں کہ فائدہ کہاں پہنچا "
+                     "(پلان، کوٹہ، ڈومین پینل) — کوئی جعلی کامیابی اسکرین نہیں۔")
+    elif script_format == "tested_tutorial":
+        lines.append("## ٹیسٹ کا نتیجہ (ٹھیک اسی طرح بیان کریں)")
+        if outcome == "demonstrated":
+            lines.append("- ریویو شدہ ریکارڈنگ فائدہ ثابت کرتی ہے۔ وہی ثبوت اسکرین پر دکھائیں۔")
+        elif outcome == "not_demonstrated":
+            lines.append("- مراحل مکمل ہوئے مگر فائدہ ثابت نہیں ہوا۔ صاف کہیں؛ کامیابی کا تاثر نہ دیں۔")
+        else:
+            lines.append("- فائدہ آزمایا ہی نہیں گیا۔ یہ سیٹ اپ ٹیوٹوریل ہے؛ کامیابی کا دعویٰ نہ کریں۔")
+    else:
+        lines.append("## آفیشل شرائط فائدے کے بارے میں کیا کہتی ہیں")
+        lines.append("- آفیشل الفاظ نقل کریں اور اسکرین پر دکھائیں۔ غیر واضح بات غیر واضح رہے۔")
     lines.append("")
     lines.append("## CTA")
     lines.append("- مکمل گائیڈ، اہلیت اور آفیشل لنکس ڈسکرپشن میں ہیں۔ "
@@ -373,31 +539,47 @@ def _eligibility_line_ur(offer: dict) -> str:
     return " · ".join(parts) + "۔"
 
 
-def generate(offer: dict, evidence: list[dict], language: str = "en") -> dict:
+def generate(offer: dict, evidence: list[dict], language: str = "en",
+             script_format: str = DEFAULT_FORMAT,
+             capture: dict | None = None) -> dict:
     """Full generation pipeline. Raises ScriptGateError for unverified offers."""
     assert_video_allowed(offer.get("state", ""))
+    assert_format_allowed(script_format, capture)
     checklist = build_checklist(offer)
     command_cards = build_command_cards(decode_list(offer.get("claim_steps")))
-    markdown = render_script_md(offer, checklist, command_cards, evidence, language=language)
+    markdown = render_script_md(
+        offer, checklist, command_cards, evidence, language=language,
+        script_format=script_format, capture=capture,
+    )
     return {
         "markdown": markdown,
         "checklist": checklist,
         "command_cards": command_cards,
         "language": language,
-        "beats": build_beats(offer, checklist),
+        "format": script_format,
+        "beats": build_beats(offer, checklist, script_format, capture),
     }
 
 
 def generate_multilingual(offer: dict, evidence: list[dict],
-                          languages: tuple[str, ...] = SUPPORTED_LANGUAGES) -> dict:
+                          languages: tuple[str, ...] = SUPPORTED_LANGUAGES,
+                          script_format: str = DEFAULT_FORMAT,
+                          capture: dict | None = None) -> dict:
     """Generate every requested language from the same verified facts."""
     if not languages:
         raise ValueError("at least one language is required")
     for language in languages:
         if language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"unsupported language '{language}' — known: {', '.join(SUPPORTED_LANGUAGES)}")
-    generated = {language: generate(offer, evidence, language=language) for language in languages}
+    if script_format not in SCRIPT_FORMATS:
+        raise ValueError(f"unknown script format '{script_format}'")
+    generated = {
+        language: generate(offer, evidence, language=language,
+                           script_format=script_format, capture=capture)
+        for language in languages
+    }
     return {
         "languages": generated,
         "beats": generated[languages[0]]["beats"],
+        "format": script_format,
     }

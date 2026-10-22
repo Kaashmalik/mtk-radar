@@ -27,7 +27,12 @@ from api_hardening import effective_reviewer
 from schedules_state import script_version_hash
 from seo import PLATFORMS, build_variants
 from settings_store import audit, get_language_policy, get_value
-from scriptgen import SUPPORTED_LANGUAGES, generate_multilingual
+from scriptgen import (
+    SCRIPT_FORMATS,
+    ScriptGateError,
+    SUPPORTED_LANGUAGES,
+    generate_multilingual,
+)
 from state import can_generate_video
 
 router = APIRouter(prefix="/studio", tags=["studio"])
@@ -39,6 +44,9 @@ class StudioGenerateIn(BaseModel):
     platforms: list[str] = Field(default_factory=lambda: ["youtube", "instagram", "tiktok"])
     website_url: Optional[str] = None
     create_variants: bool = True
+    # Safe default: explain the official terms. First-person formats require a
+    # human-reviewed capture (and, for claim_walkthrough, a demonstrated claim).
+    format: str = Field(default="official_explainer")
 
 
 def _json(value: Any) -> str:
@@ -177,8 +185,31 @@ async def generate_content(offer_id: uuid.UUID, body: StudioGenerateIn,
     correction_url = f"{correction_base}/offers/{offer_id}" if correction_base else None
     disclosure = {"synthetic_narration": True}
 
+    if body.format not in SCRIPT_FORMATS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown script format '{body.format}' — known: {', '.join(SCRIPT_FORMATS)}",
+        )
+    captures = await pool.fetch(
+        """
+        SELECT id, redaction_reviewed, reviewer, claim_outcome
+        FROM capture_sessions WHERE offer_id = $1
+        ORDER BY (claim_outcome = 'demonstrated') DESC, created_at DESC
+        """,
+        offer_id,
+    )
+    capture = next(
+        (dict(r) for r in captures if r["redaction_reviewed"]),
+        None,
+    )
     actor = effective_reviewer(request, None, default="operator")
-    generated = generate_multilingual(offer, evidence_rows, tuple(languages))
+    try:
+        generated = generate_multilingual(
+            offer, evidence_rows, tuple(languages),
+            script_format=body.format, capture=capture,
+        )
+    except ScriptGateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     created_scripts = 0
     created_variants = 0
@@ -197,6 +228,7 @@ async def generate_content(offer_id: uuid.UUID, body: StudioGenerateIn,
             "checklist": payload["checklist"],
             "command_cards": payload["command_cards"],
             "language": language,
+            "format": body.format,
             "voiceover_language": language,
             "copy_language": language_policy["metadata_language"],
             "captions_language": language_policy["captions_language"],
@@ -204,12 +236,12 @@ async def generate_content(offer_id: uuid.UUID, body: StudioGenerateIn,
         row = await pool.fetchrow(
             """
             INSERT INTO offer_scripts
-                (offer_id, version, language, markdown, checklist, command_cards,
-                 created_by, metadata)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb)
+                (offer_id, version, language, format, markdown, checklist,
+                 command_cards, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb)
             RETURNING id
             """,
-            offer_id, version, language, payload["markdown"],
+            offer_id, version, language, body.format, payload["markdown"],
             _json(payload["checklist"]), _json(payload["command_cards"]),
             actor, _json(metadata),
         )

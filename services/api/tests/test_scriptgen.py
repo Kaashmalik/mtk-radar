@@ -4,6 +4,7 @@ import pytest
 
 from scriptgen import (
     ScriptGateError,
+    assert_format_allowed,
     assert_video_allowed,
     build_checklist,
     build_command_cards,
@@ -49,6 +50,49 @@ class TestGate:
     def test_generate_blocked_for_unverified(self):
         with pytest.raises(ScriptGateError):
             generate({**OFFER, "state": "evidence_needed"}, EVIDENCE)
+
+
+REVIEWED_CAPTURE = {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "redaction_reviewed": True,
+    "claim_outcome": "demonstrated",
+}
+
+
+class TestFormats:
+    def test_official_explainer_is_default_and_never_first_person(self):
+        result = generate(OFFER, EVIDENCE)
+        assert result["format"] == "official_explainer"
+        lowered = result["markdown"].lower()
+        assert "official terms explainer" in lowered
+        for phrase in ("i claimed", "i tested", "i completed", "my result"):
+            assert phrase not in lowered
+
+    def test_tested_tutorial_requires_reviewed_capture(self):
+        with pytest.raises(ScriptGateError, match="redaction"):
+            generate(OFFER, EVIDENCE, script_format="tested_tutorial")
+
+    def test_tested_tutorial_wording_follows_attested_outcome(self):
+        capture = {**REVIEWED_CAPTURE, "claim_outcome": "not_demonstrated"}
+        result = generate(OFFER, EVIDENCE, script_format="tested_tutorial",
+                          capture=capture)
+        assert "did not demonstrate" in result["markdown"].lower()
+        assert "demonstrates the benefit" not in result["markdown"].lower()
+
+    def test_claim_walkthrough_requires_demonstrated_outcome(self):
+        with pytest.raises(ScriptGateError, match="demonstrated"):
+            generate(OFFER, EVIDENCE, script_format="claim_walkthrough",
+                     capture={**REVIEWED_CAPTURE, "claim_outcome": "not_demonstrated"})
+
+    def test_claim_walkthrough_allowed_after_human_attestation(self):
+        result = generate(OFFER, EVIDENCE, script_format="claim_walkthrough",
+                          capture=REVIEWED_CAPTURE)
+        assert "real claim walkthrough" in result["markdown"].lower()
+        assert "i claimed" in result["markdown"].lower()
+
+    def test_unknown_format_is_refused(self):
+        with pytest.raises(ScriptGateError, match="unknown script format"):
+            assert_format_allowed("documentary", None)
 
 
 class TestGeneratedScript:
@@ -169,4 +213,4 @@ class TestChecklist:
     def test_render_uses_same_checklist(self):
         checklist = build_checklist(OFFER)
         md = render_script_md(OFFER, checklist, [], EVIDENCE)
-        assert "Claim steps" in md
+        assert "Steps described in the official terms" in md

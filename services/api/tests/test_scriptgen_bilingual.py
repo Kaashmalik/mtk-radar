@@ -29,8 +29,10 @@ def test_multilingual_builds_both_languages_from_the_same_facts():
     assert set(result["languages"]) == {"en", "ur"}
     english = result["languages"]["en"]["markdown"]
     urdu = result["languages"]["ur"]["markdown"]
-    assert "real claim walkthrough" in english
-    assert "اصلی کلیم گائیڈ" in urdu
+    assert "official terms explainer" in english
+    assert "i claimed" not in english.lower()
+    assert "آفیشل شرائط کی وضاحت" in urdu
+    assert "میں نے" not in urdu
     assert english != urdu
     assert "https://example.com/terms" in english
     assert "https://example.com/terms" in urdu

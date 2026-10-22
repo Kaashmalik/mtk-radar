@@ -1,6 +1,9 @@
 import "./styles.css";
 import CorrectionForm from "./CorrectionForm";
+import EvidenceForm from "./EvidenceForm";
+import ExtractionEditor, { type ExtractionSnapshot } from "./ExtractionEditor";
 import GenerateScriptButton from "./GenerateScriptButton";
+import RedactionReview from "./RedactionReview";
 import ScheduleForm from "./ScheduleForm";
 import { apiFetch } from "@/lib/api";
 
@@ -16,14 +19,33 @@ type Evidence = {
   url: string;
   captured_at: string;
   excerpt: string | null;
+  screenshot_path: string | null;
+  supported_fields: string | null;
   official: boolean;
   domain_ok: boolean;
+  reviewer: string | null;
   content_hash: string;
+  raw_hash: string | null;
+  requested_url: string | null;
+  fetch_status: number | null;
+  fetched_at: string | null;
+  parser_version: string | null;
+  fetch_identity: string | null;
+  robots_url: string | null;
+  robots_checked_at: string | null;
+  robots_allowed: boolean | null;
+  robots_status: number | null;
+  fetch_signature: string | null;
+  raw_preserved: boolean;
+  source_provider: string | null;
+  trust_tier: string | null;
 };
 
 type ScriptRow = {
   id: string;
   version: number;
+  language: string;
+  format: string;
   markdown: string;
   command_cards: string;
   created_by: string | null;
@@ -36,7 +58,20 @@ type CaptureRow = {
   secret_findings: string;
   redaction_reviewed: boolean;
   reviewer: string | null;
+  review_note: string | null;
+  claim_outcome: string | null;
+  claim_outcome_reviewer: string | null;
+  claim_outcome_at: string | null;
   created_at: string;
+};
+
+type RawExtraction = {
+  fields: string | null;
+  conflicts: string | null;
+  complete: boolean;
+  model: string | null;
+  created_at: string | null;
+  coverage: Record<string, unknown> | null;
 };
 
 type OfferDetail = {
@@ -47,7 +82,15 @@ type OfferDetail = {
   expires_at: string | null;
   promo_code: string | null;
   evidence: Evidence[];
+  extraction: RawExtraction | null;
   correction_note: string | null;
+};
+
+type SourceOption = {
+  id: string;
+  provider: string;
+  canonical_domain: string | null;
+  trust_tier: string;
 };
 
 type RenderRow = {
@@ -116,6 +159,31 @@ async function getCaptures(id: string): Promise<CaptureRow[]> {
   }
 }
 
+async function getSources(): Promise<SourceOption[]> {
+  try {
+    const res = await apiFetch(`/sources`, { cache: "no-store" });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+function parseExtraction(raw: RawExtraction | null): ExtractionSnapshot | null {
+  if (!raw) return null;
+  const parse = <T,>(value: string | null, fallback: T): T => {
+    if (!value) return fallback;
+    try { return JSON.parse(value) as T; } catch { return fallback; }
+  };
+  return {
+    fields: parse<Record<string, never> | null>(raw.fields, null),
+    conflicts: parse<unknown[] | null>(raw.conflicts, null),
+    coverage: raw.coverage,
+    model: raw.model,
+    created_at: raw.created_at,
+  };
+}
+
 async function getRenders(id: string): Promise<RenderRow[]> {
   try {
     const res = await apiFetch(`/renders?offer_id=${id}`, { cache: "no-store" });
@@ -179,9 +247,12 @@ async function getImpact(id: string): Promise<ImpactRow | null> {
 export default async function OfferPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const offer = await getOffer(id);
-  const scripts = await getScripts(id);
-  const captures = await getCaptures(id);
-  const renders = await getRenders(id);
+  const [scripts, captures, renders, sources] = await Promise.all([
+    getScripts(id),
+    getCaptures(id),
+    getRenders(id),
+    getSources(),
+  ]);
   const [corrections, impact] = await Promise.all([getCorrections(id), getImpact(id)]);
 
   if (!offer) {
@@ -202,6 +273,11 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
       ).filter((c) => c.unsafe_reasons?.length);
     } catch { /* ignore parse issues */ }
   }
+  const extraction = parseExtraction(offer.extraction);
+  const hasReviewedCapture = captures.some((capture) => capture.redaction_reviewed);
+  const hasDemonstratedCapture = captures.some(
+    (capture) => capture.redaction_reviewed && capture.claim_outcome === "demonstrated",
+  );
 
   return (
     <main className="page">
@@ -217,8 +293,12 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
       </p>
 
       <section className="card">
-        <h2>Script ({scripts.length} version{scripts.length === 1 ? "" : "s"})</h2>
-        <GenerateScriptButton offerId={offer.id} />
+        <h2>Scripts ({scripts.length} version{scripts.length === 1 ? "" : "s"})</h2>
+        <GenerateScriptButton
+          offerId={offer.id}
+          hasReviewedCapture={hasReviewedCapture}
+          hasDemonstratedCapture={hasDemonstratedCapture}
+        />
         {unsafeCards.length > 0 && (
           <div className="warnbox">
             <strong>{unsafeCards.length} unsafe command card(s):</strong>
@@ -234,13 +314,19 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         {latestScript && (
           <details open={scripts.length === 1}>
             <summary>
-              Latest: v{latestScript.version} by {latestScript.created_by ?? "unknown"} ·{" "}
+              Latest: v{latestScript.version} · {latestScript.language.toUpperCase()} ·{" "}
+              <code>{latestScript.format}</code> · by {latestScript.created_by ?? "unknown"} ·{" "}
               {new Date(latestScript.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })}
             </summary>
             <pre className="script">{latestScript.markdown}</pre>
           </details>
         )}
         {!latestScript && <p className="muted small">No script yet — generate one above.</p>}
+      </section>
+
+      <section className="card">
+        <h2>Claims &amp; conflicts {offer.extraction?.complete ? "· complete" : "· needs review"}</h2>
+        <ExtractionEditor offerId={offer.id} extraction={extraction} />
       </section>
 
       <section className="card">
@@ -251,16 +337,30 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
             <code> python workers/capture/main.py --offer {offer.id}</code>
           </p>
         ) : (
-          <ul>
+          <ul style={{ paddingLeft: "1rem" }}>
             {captures.map((c) => (
-              <li key={c.id}>
-                {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
-                {c.redaction_reviewed ? (
-                  <span style={{ color: "#3fb950" }}>redaction reviewed ✓</span>
-                ) : (
-                  <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
-                )}
-                {c.reviewer && <span className="muted small"> ({c.reviewer})</span>}
+              <li key={c.id} style={{ marginBottom: "1rem" }}>
+                <div>
+                  {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
+                  {c.redaction_reviewed ? (
+                    <span style={{ color: "#3fb950" }}>redaction reviewed ✓</span>
+                  ) : (
+                    <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
+                  )}
+                  {c.reviewer && <span className="muted small"> ({c.reviewer})</span>}
+                </div>
+                {c.review_note && <div className="muted small">Review note: {c.review_note}</div>}
+                <RedactionReview
+                  capture={{
+                    id: c.id,
+                    redaction_reviewed: c.redaction_reviewed,
+                    findings: c.secret_findings,
+                    reviewer: c.reviewer,
+                    claim_outcome: c.claim_outcome,
+                    claim_outcome_reviewer: c.claim_outcome_reviewer,
+                  }}
+                  videoPath={c.video_path}
+                />
               </li>
             ))}
           </ul>
@@ -368,18 +468,56 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
 
       <section className="card">
         <h2>Evidence ({offer.evidence.length})</h2>
-        <ul>
-          {offer.evidence.map((ev) => (
-            <li key={ev.id}>
-              <a href={ev.url} target="_blank" rel="noreferrer">{ev.url}</a>{" "}
-              {ev.official && <span className="pill ok-pill">official</span>}{" "}
-              {!ev.domain_ok && <span className="pill bad-pill">domain ✗</span>}
-              <div className="muted small">
-                captured {new Date(ev.captured_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} · hash {ev.content_hash.slice(0, 12)}…
-              </div>
-            </li>
-          ))}
-        </ul>
+        {offer.evidence.length === 0 ? (
+          <p className="muted small">
+            No evidence yet. Verification needs at least one official snapshot
+            bound to the provider&apos;s registered domain.
+          </p>
+        ) : (
+          <ul style={{ paddingLeft: "1rem" }}>
+            {offer.evidence.map((ev) => (
+              <li key={ev.id} style={{ marginBottom: "0.7rem" }}>
+                <a href={ev.url} target="_blank" rel="noreferrer">{ev.url}</a>{" "}
+                {ev.official && <span className="pill ok-pill">official</span>}{" "}
+                {!ev.domain_ok && <span className="pill bad-pill">domain ✗</span>}
+                {ev.source_provider && (
+                  <span className="muted small"> · {ev.source_provider} ({ev.trust_tier})</span>
+                )}
+                <div className="muted small">
+                  captured {new Date(ev.captured_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} · hash {ev.content_hash.slice(0, 12)}…
+                  {ev.reviewer ? ` · reviewer-attested by ${ev.reviewer}` : " · machine-collected"}
+                </div>
+                <details className="small" style={{ marginTop: 4 }}>
+                  <summary>Snapshot &amp; provenance</summary>
+                  {ev.excerpt && <p style={{ whiteSpace: "pre-wrap" }}>“{ev.excerpt}”</p>}
+                  <div className="muted small" style={{ display: "grid", gap: 2 }}>
+                    <span>content hash: <code>{ev.content_hash}</code></span>
+                    {ev.raw_hash && <span>raw hash: <code>{ev.raw_hash}</code></span>}
+                    <span>raw snapshot preserved: {ev.raw_preserved ? "yes" : "no"}</span>
+                    {ev.requested_url && <span>requested: {ev.requested_url}</span>}
+                    {ev.fetch_status != null && <span>fetch status: {ev.fetch_status}</span>}
+                    {ev.parser_version && <span>parser: {ev.parser_version}</span>}
+                    {ev.fetch_identity && <span>fetch identity: {ev.fetch_identity}</span>}
+                    {ev.robots_url && (
+                      <span>
+                        robots: {ev.robots_url} → {ev.robots_allowed ? "allowed" : "blocked"}
+                        {ev.robots_status != null ? ` (${ev.robots_status})` : ""}
+                      </span>
+                    )}
+                    {ev.fetch_signature ? (
+                      <span>signed provenance: <code>{ev.fetch_signature.slice(0, 16)}…</code></span>
+                    ) : (
+                      <span>signed provenance: not present</span>
+                    )}
+                    {ev.screenshot_path && <span>screenshot: <code>{ev.screenshot_path}</code></span>}
+                    {ev.supported_fields && <span>supports: <code>{ev.supported_fields}</code></span>}
+                  </div>
+                </details>
+              </li>
+            ))}
+          </ul>
+        )}
+        <EvidenceForm offerId={offer.id} sources={sources} />
       </section>
 
     </main>

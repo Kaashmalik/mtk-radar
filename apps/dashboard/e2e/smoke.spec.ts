@@ -101,6 +101,118 @@ test("sources page lists registered sources and the add form", async ({ page }) 
   await expect(page.locator("#src-adapter")).toBeVisible();
 });
 
+test("source permission can be attested and revoked from the desk", async ({ page }) => {
+  // v0.31: machine collection is blocked until a human records the terms
+  // reference. This drives the real form instead of only asserting a heading.
+  const provider = `E2E Source ${Date.now()}`;
+  await page.goto("/sources");
+  await page.locator("#src-provider").fill(provider);
+  await page.locator("#src-domain").fill("example.com");
+  await page.locator("#src-adapter").selectOption("manual");
+  await page.locator("#src-tier").selectOption("A_provider_owned");
+  await page.getByRole("button", { name: "Register source" }).click();
+  await expect(page.getByText(/Source registered|already registered/)).toBeVisible();
+
+  const row = page.locator("tr", { hasText: provider });
+  await expect(row).toBeVisible();
+  await row.getByLabel(`Terms reference for ${provider}`).fill("https://example.com/terms");
+  await row.getByRole("button", { name: "Attest permission" }).click();
+  await expect(row.getByText("permission current ✓")).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await row.getByRole("button", { name: "Revoke permission" }).click();
+  await expect(row.getByText("not reviewed ⚠")).toBeVisible();
+});
+
+test("verified offer workspace exposes evidence, claims and format-gated script generation", async ({ page }) => {
+  // v0.31: the P0 operator workflows must be reachable from one verified
+  // offer: snapshot provenance, editable claims, and a format chooser that
+  // refuses to invent a first-person claim.
+  const stamp = Date.now();
+  const provider = `E2E Offer ${stamp}`;
+  const source = await page.request.post("/api/backend/sources", {
+    data: {
+      provider,
+      canonical_domain: "example.com",
+      category: "student_programs",
+      adapter: "manual",
+      trust_tier: "A_provider_owned",
+    },
+  });
+  expect(source.ok()).toBeTruthy();
+  const sourceId = (await source.json()).id;
+  const attest = await page.request.post(`/api/backend/sources/${sourceId}/tos-review`, {
+    data: { reference: "https://example.com/terms" },
+  });
+  expect(attest.ok()).toBeTruthy();
+
+  const created = await page.request.post("/api/backend/offers", {
+    data: { provider, category: "student_programs", offer_type: "coupon" },
+  });
+  expect(created.ok()).toBeTruthy();
+  const offerId = (await created.json()).id;
+  expect((await page.request.post(`/api/backend/offers/${offerId}/transition`, {
+    data: { to: "evidence_needed" },
+  })).ok()).toBeTruthy();
+
+  const url = `https://example.com/e2e-${stamp}`;
+  const text = "Use promo code SAVE2026 for verified students only.";
+  const evidence = await page.request.post(`/api/backend/offers/${offerId}/evidence`, {
+    data: {
+      url,
+      source_id: sourceId,
+      official: true,
+      captured_content: text,
+      excerpt: text,
+    },
+  });
+  expect(evidence.ok()).toBeTruthy();
+  const evidenceId = (await evidence.json()).id;
+  const fields = Object.fromEntries(
+    [["promo_code", "SAVE2026"], ["eligibility", "students"]].map(([name, value]) => [
+      name,
+      {
+        value,
+        excerpt: text,
+        evidence_url: url,
+        evidence_id: evidenceId,
+        confidence: 0.8,
+      },
+    ]),
+  );
+  const extraction = await page.request.post(`/api/backend/offers/${offerId}/extraction`, {
+    data: {
+      fields,
+      coverage: {
+        version: "paragraph-groups/1",
+        sections_total: 1,
+        max_section_chars: 6000,
+        evidence_ids: [evidenceId],
+      },
+    },
+  });
+  expect(extraction.ok()).toBeTruthy();
+  const verified = await page.request.post(`/api/backend/offers/${offerId}/transition`, {
+    data: { to: "verified" },
+  });
+  expect(verified.ok()).toBeTruthy();
+
+  await page.goto(`/offers/${offerId}`);
+  await expect(page.locator("h1")).toContainText(provider);
+  await expect(page.getByRole("heading", { name: /Evidence \(1\)/ })).toBeVisible();
+  await expect(page.getByText("Snapshot & provenance")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Claims & conflicts/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Generate script/ })).toBeVisible();
+  await expect(page.locator("label[for^='format-']")).toContainText("Format");
+  await page.locator("select[id^='format-']").selectOption("claim_walkthrough");
+  await expect(page.getByText(/No reviewer-attested demonstrated claim/)).toBeVisible();
+
+  await page.locator("select[id^='format-']").selectOption("official_explainer");
+  await page.getByRole("button", { name: /Generate script/ }).click();
+  await expect(page.getByText(/Latest: v1/)).toBeVisible();
+  await expect(page.getByText("official_explainer", { exact: true })).toBeVisible();
+});
+
 test("start automation and Needs You render the v0.30 operator gates", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".automation-card h2")).toContainText("Start automation");

@@ -46,7 +46,11 @@ from schemas import (
     OfferUpdate,
     TransitionIn,
 )
-from scriptgen import generate as generate_script_payload
+from scriptgen import (
+    SCRIPT_FORMATS,
+    ScriptGateError,
+    generate as generate_script_payload,
+)
 from state import (
     OFFER_STATES,
     VIDEO_ALLOWED_STATES,
@@ -433,14 +437,17 @@ async def add_evidence(offer_id: uuid.UUID, evidence: EvidenceIn, request: Reque
 
 
 @router.post("/{offer_id}/extraction", status_code=201)
-async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
+async def add_extraction(offer_id: uuid.UUID, extraction: ExtractionIn,
+                         request: Request) -> dict:
+    actor = effective_reviewer(request, None, default="worker")
     pool = db.get()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            return await _add_extraction(conn, offer_id, extraction)
+            return await _add_extraction(conn, offer_id, extraction, actor=actor)
 
 
-async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -> dict:
+async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
+                          *, actor: str = "worker") -> dict:
     # Serialize new proposals with verification transitions for this offer.
     offer = await pool.fetchrow(
         "SELECT id, state::text AS state, offer_type FROM offers WHERE id = $1 FOR UPDATE", offer_id,
@@ -448,6 +455,20 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
     offer_type = offer["offer_type"] or ""
+    previous = await pool.fetchrow(
+        "SELECT jsonb_array_length(conflicts) AS conflicts FROM extractions "
+        "WHERE offer_id = $1 ORDER BY created_at DESC LIMIT 1",
+        offer_id,
+    )
+    if previous and previous["conflicts"] and not extraction.conflicts \
+            and not extraction.review_note:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "clearing extraction conflicts requires review_note explaining "
+                "what was checked and why the conflict is resolved"
+            ),
+        )
     per_field, problems, established = await _extraction_problems(pool, offer_id, extraction)
     # The server derives a per-claim fact pack and checks it against the
     # offer-type terms contract. A required claim that is unknown or
@@ -485,12 +506,15 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn) -
         offer_id,
     )
     if offer["state"] in ("verified", "approved_for_video", "published"):
-        await _audit(pool, actor="worker", action=f"transition:{offer['state']}->evidence_needed",
+        await _audit(pool, actor=actor, action=f"transition:{offer['state']}->evidence_needed",
                      entity="offers", entity_id=offer_id,
                      detail={"reason": "new extraction", "extraction_id": str(row["id"])})
-    await _audit(pool, actor="worker", action="add_extraction", entity="extractions",
-                  entity_id=row["id"], detail={"complete": complete,
-                                               "conflicts": len(extraction.conflicts)})
+    await _audit(pool, actor=actor, action="add_extraction", entity="extractions",
+                  entity_id=row["id"],
+                  detail={"complete": complete,
+                          "conflicts": len(extraction.conflicts),
+                          "review_note": extraction.review_note,
+                          "fields": sorted(extraction.fields)})
     return {"id": row["id"], "complete": complete, "validation_errors": problems,
             "fact_pack": fact_pack, "coverage": coverage}
 
@@ -715,7 +739,10 @@ async def _count_scheduled(pool: asyncpg.Pool, offer_id: uuid.UUID) -> int:
 
 @router.post("/{offer_id}/script", status_code=201)
 async def create_script(offer_id: uuid.UUID, request: Request,
-                        created_by: str = Query(default="reviewer")) -> dict:
+                        created_by: str = Query(default="reviewer"),
+                        script_format: str = Query(default="official_explainer",
+                                                   alias="format"),
+                        language: str = Query(default="en")) -> dict:
     created_by_actor = effective_reviewer(request, created_by, default="reviewer")
     """Generate a versioned claim script + checklist + command cards.
 
@@ -760,34 +787,74 @@ async def create_script(offer_id: uuid.UUID, request: Request,
         """,
         offer_id,
     )
+    if script_format not in SCRIPT_FORMATS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown script format '{script_format}' — known: {', '.join(SCRIPT_FORMATS)}",
+        )
+    captures = await pool.fetch(
+        """
+        SELECT id, redaction_reviewed, reviewer, claim_outcome
+        FROM capture_sessions
+        WHERE offer_id = $1
+        ORDER BY (claim_outcome = 'demonstrated') DESC, created_at DESC
+        """,
+        offer_id,
+    )
+    # The format gate needs the strongest reviewed capture available. A
+    # demonstrated one is preferred; an unreviewed one can never satisfy a
+    # first-person format.
+    capture = next(
+        (dict(r) for r in captures if r["redaction_reviewed"]),
+        None,
+    )
     offer_row = dict(offer)
     offer_row["fact_pack"] = decode(fact_pack["fact_pack"]) if fact_pack else {}
-    payload = generate_script_payload(offer_row, [dict(r) for r in evidence])
+    try:
+        payload = generate_script_payload(
+            offer_row, [dict(r) for r in evidence], language=language,
+            script_format=script_format, capture=capture,
+        )
+    except ScriptGateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     unsafe = [c for c in payload["command_cards"] if c["unsafe_reasons"]]
     version_row = await pool.fetchrow(
-        "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM offer_scripts WHERE offer_id = $1",
-        offer_id,
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM offer_scripts "
+        "WHERE offer_id = $1 AND language = $2",
+        offer_id, language,
     )
     version = version_row["next"]
     row = await pool.fetchrow(
         """
-        INSERT INTO offer_scripts (offer_id, version, markdown, checklist, command_cards, created_by)
-        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+        INSERT INTO offer_scripts
+            (offer_id, version, language, format, markdown, checklist,
+             command_cards, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
         RETURNING id, version
         """,
-        offer_id, version, payload["markdown"], _json(payload["checklist"]),
-        _json(payload["command_cards"]), created_by_actor,
+        offer_id, version, language, script_format, payload["markdown"],
+        _json(payload["checklist"]), _json(payload["command_cards"]),
+        created_by_actor,
     )
     await _audit(pool, actor=created_by_actor, action="generate_script", entity="offer_scripts",
                  entity_id=row["id"],
-                 detail={"version": version, "unsafe_command_cards": len(unsafe)})
+                 detail={"version": version, "language": language,
+                         "format": script_format,
+                         "capture_id": str(capture["id"]) if capture else None,
+                         "claim_outcome": capture.get("claim_outcome") if capture else None,
+                         "unsafe_command_cards": len(unsafe)})
     return {
         "id": row["id"],
         "version": version,
+        "format": script_format,
+        "language": language,
         "markdown": payload["markdown"],
         "checklist": payload["checklist"],
         "command_cards": payload["command_cards"],
+        "beats": payload["beats"],
         "unsafe_command_cards": len(unsafe),
     }
 
@@ -797,7 +864,8 @@ async def list_scripts(offer_id: uuid.UUID) -> list[dict]:
     pool = db.get()
     rows = await pool.fetch(
         """
-        SELECT id, version, language, markdown, command_cards::text AS command_cards,
+        SELECT id, version, language, format, markdown,
+               command_cards::text AS command_cards,
                metadata::text AS metadata, created_by, created_at
         FROM offer_scripts WHERE offer_id = $1
         ORDER BY language, version DESC
