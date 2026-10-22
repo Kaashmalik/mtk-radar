@@ -74,6 +74,20 @@ async def analytics() -> dict:
              WHERE outcome_detail->>'auto_paused' = 'true') AS auto_paused
         """
     )
+    rendering = await pool.fetchrow(
+        """
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE status = 'rendered' AND qc_status = 'passed')::int
+            AS qc_passed,
+          COUNT(*) FILTER (WHERE status = 'qc_failed')::int AS qc_failed,
+          COUNT(*) FILTER (WHERE status = 'render_failed')::int AS render_failed,
+          COUNT(*) FILTER (WHERE COALESCE(qc_status, 'not_checked') = 'not_checked')::int
+            AS not_checked,
+          MAX(created_at) AS last_render_at
+        FROM renders
+        """
+    )
     source_freshness = await _rows(
         pool,
         """
@@ -233,6 +247,7 @@ async def analytics() -> dict:
         "schedules_by_state": schedules_by_state,
         "schedules_by_platform": schedules_by_platform,
         "publishing": dict(publishing or {}),
+        "rendering": dict(rendering or {}),
         "source_freshness": source_freshness,
         "account_health": account_health,
         "metrics_totals": dict(metrics_totals or {}),

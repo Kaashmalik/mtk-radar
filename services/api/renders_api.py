@@ -4,6 +4,8 @@ Gates enforced here (master plan §3/§4):
 - Renders can only be registered for offers in video-allowed states.
 - If the render references a capture session, that capture MUST have passed
   redaction review — no render enters the pipeline from unreviwed footage.
+- v0.29: registration must carry a measured QC report; failed attempts are
+  persisted as dead-letter records and can never be scheduled/published.
 
 httpx is an indirect dependency (unused here but consistent with siblings).
 """
@@ -11,6 +13,7 @@ httpx is an indirect dependency (unused here but consistent with siblings).
 import hashlib
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +49,12 @@ class RenderIn(BaseModel):
     cover_path: Optional[str] = None
     motion_template: str = "studio"
     metadata: dict = Field(default_factory=dict)
+    # v0.29 measured QC: the worker registers even a rejected attempt so the
+    # dead-letter view can explain it. Only rendered+passed is publishable.
+    status: str = "rendered"
+    qc_status: str = "not_checked"
+    qc_report: dict = Field(default_factory=dict)
+    qc_checked_at: Optional[datetime] = None
 
 
 @router.post("/offers/{offer_id}/renders", status_code=201)
@@ -98,17 +107,54 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
             detail="render script_version_hash does not match the selected script version",
         )
 
-    video_sha256 = render.video_sha256 or _hash_local(render.video_path)
-    captions_sha256 = render.captions_sha256 or _hash_local(render.captions_path)
-    cover_sha256 = render.cover_sha256 or _hash_local(render.cover_path)
+    # v0.29: a render registration without a measured QC report is incomplete.
+    # Fail closed here; legacy rows already in the DB are blocked downstream.
+    if render.status not in ("rendered", "qc_failed", "render_failed"):
+        raise HTTPException(status_code=422, detail="unknown render status")
+    if render.qc_status not in ("passed", "failed"):
+        raise HTTPException(
+            status_code=422,
+            detail="render registration requires a measured QC result (passed or failed)",
+        )
+    if render.status == "rendered" and render.qc_status != "passed":
+        raise HTTPException(
+            status_code=422,
+            detail="a rendered output must carry qc_status=passed",
+        )
+    if render.status != "rendered" and render.qc_status != "failed":
+        raise HTTPException(
+            status_code=422,
+            detail="a failed render attempt must carry qc_status=failed",
+        )
+    if not isinstance(render.qc_report, dict) or not render.qc_report:
+        raise HTTPException(
+            status_code=422,
+            detail="render registration requires a non-empty QC report",
+        )
+    if render.qc_report.get("status") != render.qc_status:
+        raise HTTPException(
+            status_code=422,
+            detail="qc_status does not match the persisted QC report status",
+        )
+
+    # Only a measured, passing render may pin asset bytes. A failed attempt can
+    # leave a stale previous file or a partial encode at the same path.
+    if render.status == "rendered":
+        video_sha256 = render.video_sha256 or _hash_local(render.video_path)
+        captions_sha256 = render.captions_sha256 or _hash_local(render.captions_path)
+        cover_sha256 = render.cover_sha256 or _hash_local(render.cover_path)
+    else:
+        video_sha256 = captions_sha256 = cover_sha256 = None
     row = await pool.fetchrow(
         """
         INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash,
                              preset, width, height, duration_s, video_path, captions_path,
                              disclosure, language, cover_path, motion_template, metadata,
-                             video_sha256, captions_sha256, cover_sha256)
+                             video_sha256, captions_sha256, cover_sha256,
+                             status, qc_status, qc_report, qc_checked_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                $12, $13, $14, $15::jsonb, $16, $17, $18)
+                $12, $13, $14, $15::jsonb, $16, $17, $18,
+                $19, $20, $21::jsonb, COALESCE($22::timestamptz, now()))
         RETURNING id, created_at
         """,
         offer_id, render.capture_id, render.script_version, render.script_version_hash,
@@ -116,23 +162,26 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
         render.captions_path, _json(render.disclosure), render.language,
         render.cover_path, render.motion_template, _json(render.metadata),
         video_sha256, captions_sha256, cover_sha256,
+        render.status, render.qc_status, _json(render.qc_report), render.qc_checked_at,
     )
     return {
         "id": row["id"],
         "created_at": row["created_at"].isoformat(),
-        "status": "rendered",
         "language": render.language,
         "cover_path": render.cover_path,
         "motion_template": render.motion_template,
         "video_sha256": video_sha256,
         "captions_sha256": captions_sha256,
         "cover_sha256": cover_sha256,
+        "status": render.status,
+        "qc_status": render.qc_status,
     }
 
 
 @router.get("/renders")
 async def list_renders(
     offer_id: Optional[uuid.UUID] = Query(default=None),
+    status: Optional[str] = Query(default=None),
     limit: int = Query(default=50, le=200),
 ) -> list[dict]:
     pool = db.get()
@@ -143,15 +192,52 @@ async def list_renders(
                r.script_version_hash, r.video_sha256, r.captions_sha256,
                r.cover_sha256, r.language, r.cover_path, r.motion_template,
                r.metadata::text AS metadata,
-               r.disclosure::text AS disclosure, r.status, r.created_at
+               r.disclosure::text AS disclosure, r.status, r.qc_status,
+               r.qc_report::text AS qc_report, r.qc_checked_at, r.created_at
         FROM renders r JOIN offers o ON o.id = r.offer_id
         WHERE ($1::uuid IS NULL OR r.offer_id = $1)
+          AND ($3::text IS NULL OR r.status = $3)
         ORDER BY r.created_at DESC LIMIT $2
         """,
         offer_id,
         limit,
+        status,
     )
     return [dict(r) for r in rows]
+
+
+@router.get("/render-dead-letter")
+async def render_dead_letter(limit: int = Query(default=50, le=200)) -> dict:
+    """Operator visibility for failed/QC-rejected render attempts.
+
+    A QC failure is not silently retried forever: it remains visible with the
+    measured report until an operator re-renders the offer. Candidate selection
+    ignores failed rows, so the offer stays in the render queue.
+    """
+    pool = db.get()
+    counts = await pool.fetchrow(
+        """
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'rendered' AND qc_status = 'passed')::int AS qc_passed,
+          COUNT(*) FILTER (WHERE status = 'qc_failed')::int AS qc_failed,
+          COUNT(*) FILTER (WHERE status = 'render_failed')::int AS render_failed,
+          COUNT(*) FILTER (WHERE COALESCE(qc_status, 'not_checked') = 'not_checked')::int AS not_checked,
+          COUNT(*)::int AS total
+        FROM renders
+        """
+    )
+    rows = await pool.fetch(
+        """
+        SELECT r.id, r.offer_id, o.title AS offer_title, r.preset, r.language,
+               r.status, r.qc_status, r.qc_report::text AS qc_report,
+               r.video_path, r.duration_s, r.qc_checked_at, r.created_at
+        FROM renders r JOIN offers o ON o.id = r.offer_id
+        WHERE r.status IN ('qc_failed', 'render_failed') OR r.qc_status = 'failed'
+        ORDER BY r.created_at DESC LIMIT $1
+        """,
+        limit,
+    )
+    return {"counts": dict(counts or {}), "items": [dict(r) for r in rows]}
 
 
 @router.get("/render-candidates")
@@ -201,7 +287,8 @@ async def render_candidates(limit: int = Query(default=50, le=200)) -> list[dict
     offer_ids = [c["offer_id"] for c in candidates]
     rendered = await pool.fetch(
         "SELECT offer_id, language, script_version_hash FROM renders "
-        "WHERE offer_id = ANY($1::uuid[])",
+        "WHERE offer_id = ANY($1::uuid[]) "
+        "AND status = 'rendered' AND qc_status = 'passed'",
         offer_ids,
     )
     done = {(r["offer_id"], r["language"], r["script_version_hash"]) for r in rendered

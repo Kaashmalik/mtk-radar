@@ -43,8 +43,47 @@ type PolicySummary = {
   human_stages: string[];
 };
 
+type RenderDeadLetterItem = {
+  id: string;
+  offer_id: string;
+  offer_title: string;
+  preset: string;
+  language: string;
+  status: string;
+  qc_status: string;
+  qc_report: string | { errors?: string[]; warnings?: string[] } | null;
+  video_path: string;
+  duration_s: string | null;
+  qc_checked_at: string | null;
+  created_at: string;
+};
+
+type RenderDeadLetter = {
+  counts: {
+    qc_passed?: number;
+    qc_failed?: number;
+    render_failed?: number;
+    not_checked?: number;
+    total?: number;
+  };
+  items: RenderDeadLetterItem[];
+};
+
+function qcErrors(report: RenderDeadLetterItem["qc_report"]): string[] {
+  if (!report) return [];
+  if (typeof report === "string") {
+    try {
+      const parsed = JSON.parse(report) as { errors?: string[] };
+      return parsed.errors ?? [];
+    } catch {
+      return [];
+    }
+  }
+  return report.errors ?? [];
+}
+
 export default async function QueuePage() {
-  const [candidates, captures, offers, schedules, policy] = await Promise.all([
+  const [candidates, captures, offers, schedules, policy, deadLetter] = await Promise.all([
     getJson<Candidate[]>("/render-candidates", []),
     getJson<Capture[]>("/captures", []),
     getJson<{ id: string; title: string; state: string; official_evidence: number }[]>(
@@ -53,6 +92,7 @@ export default async function QueuePage() {
     ),
     getJson<{ id: string; state: string; platform: string }[]>("/schedules", []),
     getJson<{ summary?: PolicySummary }>("/automation/policy", {}),
+    getJson<RenderDeadLetter>("/render-dead-letter", { counts: {}, items: [] }),
   ]);
 
   const summary = policy.summary ?? {
@@ -67,6 +107,8 @@ export default async function QueuePage() {
   );
   const awaitingRedaction = captures.filter((c) => !c.redaction_reviewed);
   const awaitingApproval = schedules.filter((s) => s.state === "needs_approval");
+  const renderFailures =
+    (deadLetter.counts.qc_failed ?? 0) + (deadLetter.counts.render_failed ?? 0);
 
   return (
     <main className="page">
@@ -107,7 +149,54 @@ export default async function QueuePage() {
             <strong style={{ color: "#d29922" }}>{awaitingApproval.length}</strong>
             <span>awaiting approval</span>
           </div>
+          <div>
+            <strong style={{ color: renderFailures ? "#f85149" : "#3fb950" }}>
+              {renderFailures}
+            </strong>
+            <span>render QC / failures</span>
+          </div>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>Render QC &amp; dead letter ({renderFailures})</h2>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Measured QC blocks publishing. Failed attempts stay visible here until
+          an operator fixes the cause and re-renders.
+        </p>
+        {deadLetter.items.length === 0 ? (
+          <p className="muted small">No failed or rejected renders.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr><th>offer</th><th>output</th><th>status</th><th>reason</th><th>when</th></tr>
+            </thead>
+            <tbody>
+              {deadLetter.items.map((item) => {
+                const errors = qcErrors(item.qc_report);
+                return (
+                  <tr key={item.id}>
+                    <td><a href={`/offers/${item.offer_id}`}>{item.offer_title}</a></td>
+                    <td>{item.preset} · {item.language}</td>
+                    <td>
+                      <span className="pill" style={{ color: "#f85149" }}>
+                        {item.status} / {item.qc_status}
+                      </span>
+                    </td>
+                    <td className="small">
+                      {errors.length ? errors.join(" · ") : "see the QC report"}
+                    </td>
+                    <td className="small">
+                      {new Date(item.created_at).toLocaleString("en-GB", {
+                        timeZone: "Asia/Karachi",
+                      })}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="card">

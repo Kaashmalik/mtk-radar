@@ -26,7 +26,7 @@ the database, never in the browser, never in git. The database only records
 
 | Area | How it is proven |
 | --- | --- |
-| API + DB | integration tests against real Postgres 16, migrations 001→012 applied by the real runner |
+| API + DB | integration tests against real Postgres 16, migrations 001→023 applied by the real runner |
 | State machine (§3) | unit/integration tests — illegal transitions, expiry, hash-binding, redaction and automation gates |
 | Workers | collector, verification, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
 | Dashboard | production build + Playwright smoke against the real API (4 browser tests) |
@@ -52,7 +52,7 @@ cp .env.example .env
 docker compose -f infra/docker/docker-compose.yml up -d \
   --profile workers --profile storage
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
-curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.28.0"}
+curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.29.0"}
 ```
 
 Then open **Settings → Automation control** and confirm the default **Assisted**
@@ -192,7 +192,10 @@ adapter stays disabled (posts are skipped, not failed).
    to `verified` (the gate refuses anything unearned).
 4. **Script + render (automatic)** — the batch worker generates the script;
    after you record a capture (below) and pass redaction review, the render
-   service renders it by itself. Watch it in **Queue**.
+   service renders it by itself and runs measured QC. Watch it in **Queue**;
+   only a `rendered / passed` export can be scheduled. A failure appears in
+   **Render QC & dead letter** until you fix the source and re-render (see
+   [`render-qc.md`](render-qc.md)).
 5. **Record the capture (the only human recording step)** — on a machine
    with a display:
    ```bash

@@ -61,7 +61,21 @@ type RenderRow = {
   script_version: number | null;
   disclosure: string | { synthetic_narration?: boolean };
   status: string;
+  qc_status: string;
+  qc_report: string | { errors?: string[]; warnings?: string[] } | null;
 };
+
+function renderQcErrors(report: RenderRow["qc_report"]): string[] {
+  if (!report) return [];
+  if (typeof report === "string") {
+    try {
+      return (JSON.parse(report) as { errors?: string[] }).errors ?? [];
+    } catch {
+      return [];
+    }
+  }
+  return report.errors ?? [];
+}
 
 type CommandCard = {
   command: string;
@@ -275,6 +289,18 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                 {r.script_version && <> · script v{r.script_version}</>}
                 {r.disclosure && typeof r.disclosure === "object" && r.disclosure.synthetic_narration && (
                   <span style={{ color: "#f0883e" }}> · TTS narration (label required)</span>
+                )}
+                {" · "}
+                <span style={{ color: r.qc_status === "passed" ? "#3fb950" : "#f85149" }}>
+                  QC {r.qc_status}
+                </span>
+                {r.status !== "rendered" && (
+                  <span style={{ color: "#f85149" }}> · {r.status}</span>
+                )}
+                {renderQcErrors(r.qc_report).length > 0 && (
+                  <div className="small" style={{ color: "#f85149" }}>
+                    {renderQcErrors(r.qc_report).join(" · ")}
+                  </div>
                 )}
                 <div className="muted small">{r.video_path}</div>
               </li>

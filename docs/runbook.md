@@ -13,6 +13,8 @@ Companion documents:
   when the laptop is off.
 - [`notifications.md`](notifications.md) — monitor webhook/email setup,
   payload schema, Gmail/SMTP example and free-Supabase boundaries.
+- [`render-qc.md`](render-qc.md) — measured render-quality thresholds,
+  intentional-still exemptions, dead-letter triage and the fail-closed gate.
 - [`master-plan-traceability.md`](master-plan-traceability.md) — every master
   plan item mapped to its code and its proof.
 - [`third-party-notices.md`](third-party-notices.md) / [`upgrade-checklist.md`](upgrade-checklist.md)
@@ -190,6 +192,13 @@ Failed posts auto-retry with exponential backoff (base × 2^attempts, cap
 `MTK_PUBLISH_MAX_RETRIES`, default 3). Posts still failed after the cap — or
 refused because the script changed post-approval (409) — need operator review
 on the calendar (resume/approve or cancel).
+
+Render QC (v0.29): only `rendered / passed` rows can enter a schedule or
+upload. The render sweep probes, fully decodes, and checks black/freeze/silence,
+loudness/true peak and caption safe area, then stores the measured report.
+Failures appear in **Queue → Render QC & dead letter**; fix the source and
+re-render. Legacy renders are `not_checked` and must be re-rendered. Thresholds
+and intentional-still ranges are in [`render-qc.md`](render-qc.md).
 
 Save-link extension (v0.17): configure API URL + worker token via its options
 page (right-click icon → Options). The page gesture sends `POST /items` with

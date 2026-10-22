@@ -26,6 +26,14 @@ type Analytics = {
     paused: number;
     auto_paused: number;
   } | null;
+  rendering: {
+    total: number;
+    qc_passed: number;
+    qc_failed: number;
+    render_failed: number;
+    not_checked: number;
+    last_render_at: string | null;
+  } | null;
   source_freshness: {
     id: string;
     name: string;
@@ -161,6 +169,36 @@ export default async function AnalyticsPage() {
                 </div>
               ))}
             </div>
+          </section>
+
+          <section className="card">
+            <h2>Render QC</h2>
+            <div className="stats">
+              <div><strong>{n(data.rendering?.total)}</strong><span>render attempts</span></div>
+              <div><strong style={{ color: "#3fb950" }}>{n(data.rendering?.qc_passed)}</strong><span>QC passed</span></div>
+              <div>
+                <strong style={{ color: (data.rendering?.qc_failed ?? 0) > 0 ? "#f85149" : undefined }}>
+                  {n(data.rendering?.qc_failed)}
+                </strong>
+                <span>QC rejected</span>
+              </div>
+              <div>
+                <strong style={{ color: (data.rendering?.render_failed ?? 0) > 0 ? "#f85149" : undefined }}>
+                  {n(data.rendering?.render_failed)}
+                </strong>
+                <span>encode failed</span>
+              </div>
+              <div>
+                <strong style={{ color: (data.rendering?.not_checked ?? 0) > 0 ? "#d29922" : undefined }}>
+                  {n(data.rendering?.not_checked)}
+                </strong>
+                <span>legacy / not checked</span>
+              </div>
+            </div>
+            <p className="muted small">
+              Only <code>rendered / passed</code> exports can be scheduled or
+              published. Inspect failures in Queue → Render QC &amp; dead letter.
+            </p>
           </section>
 
           <section className="card">

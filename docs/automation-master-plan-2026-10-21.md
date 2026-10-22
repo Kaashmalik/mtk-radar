@@ -781,10 +781,10 @@ For each package: add targeted failing tests → implement the smallest vertical
 
 **Depends on:** WP08.
 
-- [ ] Measured ffprobe/full-decode/loudness/silence/black/freeze validation and allowed-scene exceptions.
+- [x] Measured ffprobe/full-decode/loudness/silence/black/freeze validation and allowed-scene exceptions (v0.29: `workers/render/qc.py`, migration 023, persisted reports, dead-letter UI).
 - [ ] OCR/transcript leak checks, tracking masks, factual amount/deadline/name checks against fact pack and rights inventory.
-- [ ] Mobile safe-area preview, golden regression clips and QC report UI with blocking reasons and no silent bypass.
-- [ ] Proposed `workers/render/quality.py` plus tests and measured report records; critical privacy uncertainty always human review.
+- [ ] Mobile safe-area preview and golden regression clips (v0.29 already validates caption safe area/overflow and shows blocking reasons in the offer/queue UI; device previews and golden clips remain).
+- [x] `workers/render/qc.py` plus tests and measured report records; critical privacy uncertainty always human review.
 
 **Done when:** deliberately silent, truncated, blurred, wrong-aspect, stale-fact and exposed-secret fixtures fail; intentional stills pass with explicit scene annotation; blind premium rubric meets §8 target.
 

@@ -43,6 +43,7 @@ import covers as covers_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
 import narration as narration_mod  # noqa: E402
 import project as project_mod  # noqa: E402
+import qc as qc_mod  # noqa: E402
 import render as render_mod  # noqa: E402
 from object_storage import (  # noqa: E402
     captions_key,
@@ -76,6 +77,52 @@ def _sha256(path: Path | None) -> str | None:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _render_failure_row(
+    *,
+    preset,
+    language: str,
+    video_path: str,
+    captions_path: str,
+    cover_path: str | None,
+    command: str,
+    reason: str,
+    stderr: str = "",
+    expected_duration: float | None = None,
+) -> dict:
+    """A failed attempt is still a durable record, never a silent log line.
+
+    It is registered with status=render_failed so the dead-letter view and
+    metrics can show why the pipeline is stuck. Publishing and scheduling only
+    accept status=rendered + qc_status=passed.
+    """
+    report = qc_mod.failure_report(
+        stage="ffmpeg",
+        errors=[reason],
+        details={"stderr": (stderr or "")[-2000:]},
+        preset=preset.key,
+        expected_duration=expected_duration,
+    )
+    return {
+        "preset": preset.key,
+        "language": language,
+        "width": preset.width,
+        "height": preset.height,
+        "video_path": video_path,
+        "captions_path": captions_path,
+        "cover_path": cover_path,
+        "duration_s": None,
+        # A failed attempt must never pin bytes that may be a stale previous
+        # export or a partial file left by the encoder.
+        "video_sha256": None,
+        "captions_sha256": None,
+        "cover_sha256": None,
+        "command": command,
+        "status": "render_failed",
+        "qc_status": "failed",
+        "qc_report": report,
+    }
 
 
 class RenderJob:
@@ -331,6 +378,21 @@ class RenderJob:
         # render every requested preset relative to the project dir
         video_rel = os.path.relpath(capture_video, self.project)
         capture_duration = render_mod.probe_duration(capture_video)
+        # with narration the writer uses -shortest, so the intended output
+        # ends at the shorter of the footage and the spoken track.
+        narration_duration = (
+            render_mod.probe_duration(str(self.project / narration_file))
+            if narration_file else None
+        )
+        known_durations = [
+            value for value in (capture_duration, narration_duration)
+            if value is not None and value > 0
+        ]
+        expected_duration = min(known_durations) if known_durations else None
+        qc_config = qc_mod.QCConfig.from_env()
+        qc_exempt_ranges = qc_mod.parse_exempt_ranges(
+            self.script_metadata.get("qc_exempt_ranges")
+        )
         results = []
         for key in preset_keys:
             preset = get_preset(key)
@@ -365,13 +427,46 @@ class RenderJob:
             )
             log.info("rendering %s/%s :: %s", language, preset.key,
                      render_mod.describe(cmd))
-            proc = render_mod.run(cmd, self.project)
+            command = render_mod.describe(cmd)
+            captions_local = self.project / f"assets/captions{caption_suffix}.srt"
+            output_path = self.project / output
+            try:
+                proc = render_mod.run(cmd, self.project)
+            except Exception as exc:  # noqa: BLE001 — persist the failed attempt
+                log.error("ffmpeg invocation failed (%s/%s): %s", language,
+                          preset.key, exc)
+                results.append(_render_failure_row(
+                    preset=preset, language=language,
+                    video_path=f"projects/{self.offer_id}/{output}",
+                    captions_path=f"projects/{self.offer_id}/assets/captions{caption_suffix}.srt",
+                    cover_path=cover_path, command=command,
+                    reason=f"ffmpeg invocation failed: {exc}",
+                    expected_duration=expected_duration,
+                ))
+                continue
             if proc.returncode != 0:
                 log.error("ffmpeg failed (%s/%s):\n%s", language, preset.key,
                           proc.stderr[-2000:])
-                raise SystemExit(f"ffmpeg failed for preset {preset.key} ({language})")
-            duration = render_mod.probe_duration(str(self.project / output))
-            captions_local = self.project / f"assets/captions{caption_suffix}.srt"
+                results.append(_render_failure_row(
+                    preset=preset, language=language,
+                    video_path=f"projects/{self.offer_id}/{output}",
+                    captions_path=f"projects/{self.offer_id}/assets/captions{caption_suffix}.srt",
+                    cover_path=cover_path, command=command,
+                    reason=f"ffmpeg exited {proc.returncode} for preset {preset.key}",
+                    stderr=proc.stderr or "",
+                    expected_duration=expected_duration,
+                ))
+                continue
+
+            duration = render_mod.probe_duration(str(output_path))
+            qc_report = qc_mod.run(
+                output_path,
+                width=preset.width, height=preset.height, fps=preset.fps,
+                preset=preset.key, expected_duration=expected_duration,
+                captions_path=self.project / captions_rel,
+                exempt_ranges=qc_exempt_ranges, config=qc_config,
+            )
+            qc_passed = qc_report.get("status") == "passed"
             results.append({
                 "preset": preset.key,
                 "language": language,
@@ -381,12 +476,19 @@ class RenderJob:
                 "captions_path": f"projects/{self.offer_id}/assets/captions{caption_suffix}.srt",
                 "cover_path": cover_path,
                 "duration_s": duration,
-                "video_sha256": _sha256(self.project / output),
+                "video_sha256": _sha256(output_path),
                 "captions_sha256": _sha256(captions_local),
                 "cover_sha256": _sha256(self.project / cover_rel) if cover_rel else None,
-                "command": render_mod.describe(cmd),
+                "command": command,
+                "status": "rendered" if qc_passed else "qc_failed",
+                "qc_status": "passed" if qc_passed else "failed",
+                "qc_report": qc_report,
             })
-            log.info("rendered %s/%s → %s", language, preset.key, output)
+            if qc_passed:
+                log.info("rendered %s/%s → %s (QC passed)", language, preset.key, output)
+            else:
+                log.error("QC failed %s/%s: %s", language, preset.key,
+                          "; ".join(qc_report.get("errors") or ["unknown QC error"]))
 
         manifest = project_mod.build_edit_manifest(
             offer=offer,
@@ -412,6 +514,8 @@ class RenderJob:
         storage = make_from_env()
         if storage is not None:
             for render_row in results:
+                if render_row.get("status") != "rendered":
+                    continue  # failed/QC-rejected media is never uploaded as an asset
                 preset = render_row["preset"]
                 try:
                     render_row["video_path"] = storage.put(
@@ -422,10 +526,14 @@ class RenderJob:
                         self.project / f"assets/captions{'' if language == 'en' else '.' + language}.srt",
                         captions_key(offer["id"], preset, language),
                     )
-                    if cover_rel:
-                        ext = Path(cover_rel).suffix.lstrip(".") or "svg"
+                    cover_ref = render_row.get("cover_path")
+                    if cover_ref:
+                        local_cover = self.project / str(cover_ref).removeprefix(
+                            f"projects/{offer['id']}/"
+                        )
+                        ext = local_cover.suffix.lstrip(".") or "svg"
                         render_row["cover_path"] = storage.put(
-                            self.project / cover_rel,
+                            local_cover,
                             cover_key(offer["id"], preset, language, ext=ext),
                         )
                 except OSError as exc:
@@ -447,6 +555,9 @@ class RenderJob:
                 "video_sha256": render_row.get("video_sha256"),
                 "captions_sha256": render_row.get("captions_sha256"),
                 "cover_sha256": render_row.get("cover_sha256"),
+                "status": render_row.get("status", "rendered"),
+                "qc_status": render_row.get("qc_status", "failed"),
+                "qc_report": render_row.get("qc_report") or {},
                 "capture_id": self.capture_id,
                 "disclosure": narration_mod.disclosure_record(narration_used,
                                                               language=language),
@@ -466,6 +577,17 @@ class RenderJob:
                          language, render_row["preset"])
             else:
                 log.error("render registration failed: %s %s", resp.status_code, resp.text)
+
+        failed = [row for row in results if row.get("status") != "rendered"]
+        if failed:
+            reasons = ", ".join(
+                f"{row['preset']}:{(row.get('qc_report') or {}).get('stage', row.get('status'))}"
+                for row in failed
+            )
+            raise SystemExit(
+                f"{len(failed)} render attempt(s) failed for {language} ({reasons}) "
+                "— see render dead-letter"
+            )
 
 
 def _load_policy(client: httpx.Client) -> dict | None:
