@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 /** Generates a versioned script — the API hard-gates this on verified state. */
 export default function GenerateScriptButton({ offerId }: { offerId: string }) {
@@ -15,10 +14,7 @@ export default function GenerateScriptButton({ offerId }: { offerId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await clientFetch(
-        `/offers/${offerId}/script?created_by=${encodeURIComponent(getReviewerName())}`,
-        { method: "POST" },
-      );
+      const res = await clientFetch(`/offers/${offerId}/script`, { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setError(body.detail ?? `HTTP ${res.status}`);

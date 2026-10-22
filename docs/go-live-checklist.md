@@ -93,24 +93,37 @@ capture recording (§4), redaction review (§4), publish approval (§17).
 ### 2.1 Deploy secrets
 
 ```bash
-# shared worker/API token — required for anything beyond localhost
+# service credential used by the dashboard server (required beyond localhost)
 openssl rand -hex 32            # → MTK_API_TOKEN
+# optional distinct worker / browser-extension credentials
+openssl rand -hex 32            # → MTK_WORKER_TOKEN
+openssl rand -hex 32            # → MTK_EXTENSION_TOKEN
+# signs the dashboard's HttpOnly session cookie (required; ≥32 chars)
+openssl rand -hex 32            # → MTK_SESSION_SECRET
 # database password
 openssl rand -hex 16            # → POSTGRES_PASSWORD
 # public origin of the dashboard (caption correction permalinks, §11)
 # → MTK_PUBLIC_BASE_URL=https://radar.yourdomain.tld
 ```
 
+`MTK_API_TOKEN`, `MTK_WORKER_TOKEN`, `MTK_EXTENSION_TOKEN` and
+`MTK_SESSION_SECRET` are server-side only. Never prefix them with
+`NEXT_PUBLIC_`.
+
 ### 2.2 Reviewer identity (who the audit log names)
 
 ```bash
 docker compose -f infra/docker/docker-compose.yml exec api \
   python -m scripts.mint_reviewer --name "Kashi"
-# paste the token into the dashboard identity box (top-right)
+# sign in at https://radar.yourdomain.tld/login with the token
 ```
 
-Every approval, correction, connection and setting change is bound to this
-identity in `audit_log` (§15).
+The dashboard validates the token against the API, then sets a signed HttpOnly
+session cookie. Browser JavaScript never sees the token (all interactive calls
+use the same-origin `/api/backend` proxy). Every approval, correction,
+connection and setting change is bound to this identity in `audit_log` (§15).
+Revoke with `python -m scripts.mint_reviewer --revoke Kashi`; the reviewer's
+next API call fails even if their dashboard cookie has not expired.
 
 ### 2.3 Optional extras
 

@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 type Props = { offerId: string; state: string };
 
@@ -22,7 +21,7 @@ export default function OfferActions({ offerId, state }: Props) {
       const res = await clientFetch(`/offers/${offerId}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, reviewer: getReviewerName(), note }),
+        body: JSON.stringify({ to, note }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

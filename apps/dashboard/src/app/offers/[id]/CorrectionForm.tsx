@@ -10,7 +10,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
-import { getReviewerName } from "@/lib/identity";
 
 export default function CorrectionForm({ offerId }: { offerId: string }) {
   const router = useRouter();
@@ -30,7 +29,7 @@ export default function CorrectionForm({ offerId }: { offerId: string }) {
       const res = await clientFetch(`/offers/${offerId}/corrections`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: note.trim(), corrected_by: getReviewerName() }),
+        body: JSON.stringify({ note: note.trim() }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
