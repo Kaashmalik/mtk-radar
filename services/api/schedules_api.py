@@ -899,6 +899,11 @@ async def reconcile_held_upload(schedule_id: uuid.UUID, body: ScheduleReconcileI
             """,
             schedule_id, json.dumps(patch),
         )
+    if body.outcome in ("published", "not_live"):
+        # A definite human outcome ends the resumable capability. `still
+        # processing` keeps it in case the worker/reviewer needs to resume.
+        await pool.execute(
+            "DELETE FROM upload_sessions WHERE schedule_id = $1", schedule_id)
     await _audit(pool, actor=actor, action=f"schedule:reconcile:{body.outcome}",
                  entity="schedules", entity_id=schedule_id,
                  detail={"note": body.note, "remote_post_id": body.remote_post_id,
@@ -1028,6 +1033,10 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
                     """,
                     schedule_id, new_state, json.dumps(outcome),
                 )
+    if body.ok:
+        # Success is terminal for the resumable upload capability.
+        await pool.execute(
+            "DELETE FROM upload_sessions WHERE schedule_id = $1", schedule_id)
     await _audit(pool, actor="publishing-worker", action=f"result:{new_state}",
                  entity="schedules", entity_id=schedule_id,
                  detail={"remote_post_id": body.remote_post_id,

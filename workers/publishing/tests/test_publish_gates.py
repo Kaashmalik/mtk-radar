@@ -75,6 +75,17 @@ class ConfirmingAdapter(FakeAdapter):
                 "remote_url": f"https://youtu.be/{remote_id}"}
 
 
+class IncompletePackageAdapter(ConfirmingAdapter):
+    def finalize_package(self, remote_id, meta, *, thumbnail_path=None,
+                         captions_path=None, playlist_id=None,
+                         pinned_comment=None, captions_language=None):
+        return {
+            "complete": False,
+            "failures": {"thumbnail": "unsupported image"},
+            "thumbnail": {"ok": False, "error": "unsupported image"},
+        }
+
+
 def _iso(offset: timedelta) -> str:
     return (datetime.now(timezone.utc) + offset).isoformat()
 
@@ -169,6 +180,22 @@ def test_happy_path_publishes_when_hash_pins_and_offer_valid():
     result = _result_calls(p.api)[0][2]
     assert result["ok"] is True and result["confirmed"] is True
     assert result["attempt_token"] == "token-1"
+
+
+def test_incomplete_youtube_package_is_held_not_reported_published():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = IncompletePackageAdapter(confirmed=True)
+    post = _post(render)
+
+    assert p._publish(post, {"youtube": adapter}) is False
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False
+    assert result["hold"] is True
+    assert "package incomplete" in result["detail"]
+    assert "thumbnail" in result["detail"]
+    assert result["remote_post_id"] == "remote-1", \
+        "the uploaded video must remain recorded so it is reconciled, not duplicated"
 
 
 def test_existing_remote_upload_is_reconfirmed_not_reuploaded():

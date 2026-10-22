@@ -20,6 +20,28 @@ def _video(tmp_path):
     return p
 
 
+class FakeSessionStore:
+    def __init__(self, record=None):
+        self.record = record
+        self.saved = []
+        self.progress_calls = []
+        self.cleared = 0
+
+    def load(self):
+        return self.record
+
+    def save(self, uri, content_length):
+        self.saved.append((uri, content_length))
+        self.record = {"session_uri": uri, "content_length": content_length}
+
+    def progress(self, offset):
+        self.progress_calls.append(offset)
+
+    def clear(self):
+        self.cleared += 1
+        self.record = None
+
+
 class TestYouTube:
     def test_private_upload_success(self, tmp_path):
         calls = []
@@ -45,6 +67,98 @@ class TestYouTube:
                                 privacy="private", idempotency_key="key1")
         assert remote == "vid_abc123"
         assert calls == ["init", "put"]
+
+    def test_resumable_upload_uses_provider_offset(self, tmp_path):
+        video = _video(tmp_path)
+        total = len(video.read_bytes())
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == "https://upload.example/session"
+            if request.headers.get("content-range") == f"bytes */{total}":
+                return httpx.Response(308, headers={"range": "bytes=0-3"})
+            seen.append({
+                "range": request.headers.get("content-range"),
+                "body": request.read(),
+            })
+            return httpx.Response(200, json={"id": "vid_resumed"})
+
+        store = FakeSessionStore({
+            "session_uri": "https://upload.example/session",
+            "content_length": total,
+        })
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+        adapter.set_upload_session_store(store)
+        remote = adapter.upload(video, {"title": "T"}, privacy="private")
+
+        assert remote == "vid_resumed"
+        assert store.progress_calls == [4]
+        assert store.cleared == 1
+        assert seen[0]["range"] == f"bytes 4-{total - 1}/{total}"
+        assert seen[0]["body"] == video.read_bytes()[4:], \
+            "the resumed request must contain only bytes YouTube has not seen"
+
+    def test_new_session_is_persisted_before_the_first_chunk(self, tmp_path):
+        video = _video(tmp_path)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "uploadType=resumable" in str(request.url):
+                return httpx.Response(
+                    200, headers={"location": "https://upload.example/new"})
+            return httpx.Response(200, json={"id": "vid_new"})
+
+        store = FakeSessionStore()
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+        adapter.set_upload_session_store(store)
+
+        assert adapter.upload(video, {}, privacy="private") == "vid_new"
+        assert store.saved == [("https://upload.example/new", len(video.read_bytes()))]
+        assert store.cleared == 1
+
+    def test_session_size_mismatch_fails_closed(self, tmp_path):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "uploadType=resumable" in str(request.url):
+                raise AssertionError("must not start a new upload for a different file")
+            return httpx.Response(500)
+
+        store = FakeSessionStore({
+            "session_uri": "https://upload.example/other",
+            "content_length": 999,
+        })
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+        adapter.set_upload_session_store(store)
+
+        with pytest.raises(RuntimeError, match="does not match"):
+            adapter.upload(_video(tmp_path), {}, privacy="private")
+        assert store.cleared == 1
+
+    def test_expired_session_is_cleared_and_restarted(self, tmp_path):
+        video = _video(tmp_path)
+        state = {"init": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "uploadType=resumable" in str(request.url):
+                state["init"] += 1
+                return httpx.Response(
+                    200, headers={"location": "https://upload.example/fresh"})
+            if request.headers.get("content-range") == "bytes */16":
+                return httpx.Response(404)
+            return httpx.Response(200, json={"id": "vid_fresh"})
+
+        store = FakeSessionStore({
+            "session_uri": "https://upload.example/dead",
+            "content_length": 16,
+        })
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+        adapter.set_upload_session_store(store)
+
+        assert adapter.upload(video, {}, privacy="private") == "vid_fresh"
+        assert state["init"] == 1
+        assert store.cleared == 2  # expired row, then the new row after success
 
     def test_refreshed_expiry_reported_not_token(self, tmp_path):
         reported = {}
@@ -172,9 +286,33 @@ class TestYouTubePackage:
         assert result["comment"]["id"] == "comment-1"
         assert result["comment"]["pinned"] is False
         assert "operator_action" in result["comment"], \
-            "the API cannot pin comments — say so instead of pretending"
+            "the API cannot pin comments - say so instead of pretending"
+        assert result["complete"] is True
+        assert result["failures"] == {}
+        assert result["mandatory"] == ["captions", "comment", "playlist", "thumbnail"]
         assert any("thumbnails/set" in url for _, url in seen)
         assert any("uploadType=multipart" in url for _, url in seen)
+
+    def test_requested_asset_failure_makes_the_package_incomplete(self, tmp_path):
+        cover = tmp_path / "cover.png"
+        cover.write_bytes(b"\x89PNG\r\n\x1a\n")
+        captions = tmp_path / "captions.en.vtt"
+        captions.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "thumbnails/set" in str(request.url):
+                return httpx.Response(500, text="thumbnail rejected")
+            if "captions" in str(request.url):
+                return httpx.Response(200, json={"id": "cap-1"})
+            return httpx.Response(404)
+
+        result = self._adapter(handler).finalize_package(
+            "vid-1", {}, thumbnail_path=cover, captions_path=captions,
+        )
+        assert result["complete"] is False
+        assert "thumbnail" in result["failures"]
+        assert "thumbnail rejected" in result["failures"]["thumbnail"]
+        assert result["captions"]["ok"] is True
 
     def test_confirm_waits_for_processed_and_matching_privacy(self):
         state = {"polls": 0}
