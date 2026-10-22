@@ -119,9 +119,11 @@ if [ "$RUN_BUILD" = "1" ]; then
 fi
 
 # ------------------------------------------------------------- 5. deploy
-step "Compose configuration"
+step "Compose configuration (production + dev override)"
 docker compose -f infra/docker/docker-compose.yml config -q || fail "compose config"
-ok "compose file valid"
+docker compose -f infra/docker/docker-compose.yml \
+  -f infra/docker/docker-compose.dev.yml config -q || fail "dev compose config"
+ok "compose files valid"
 
 step "CI workflow YAML"
 python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); print('  jobs:', ', '.join(d['jobs']))" \

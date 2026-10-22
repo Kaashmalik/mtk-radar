@@ -1,0 +1,27 @@
+# Build context hygiene. Secrets and generated media must never enter an image.
+.git
+.github
+node_modules
+**/node_modules
+.next
+**/.next
+test-results
+playwright-report
+coverage
+*.log
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+venv
+.env
+.env.*
+!.env.example
+backups
+projects
+storage
+.storage-cache
+dist
+build
+*.tsbuildinfo
