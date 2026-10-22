@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 from object_storage import capture_key, make_from_env  # noqa: E402
 
 from redact_local import scan as scan_secrets  # slim copy of the API's scanner
+from qa import run_checks as run_capture_checks
 
 API_URL_DEFAULT = "http://localhost:8000"
 MTK_API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
@@ -56,6 +57,7 @@ class CaptureSession:
         self.out_dir = out_dir / f"{offer_id}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.step_log: list[dict] = []
+        self.expected_steps = 0
 
     def load_offer(self) -> dict:
         resp = self.api.get(f"/offers/{self.offer_id}")
@@ -86,6 +88,7 @@ class CaptureSession:
 
         offer = self.load_offer()
         steps = self.latest_checklist()
+        self.expected_steps = len(steps)
         redemption = offer.get("redemption_url")
         nav_steps = [s for s in steps if isinstance(s, dict) and (s.get("url") or s.get("kind") == "account_action")]
 
@@ -146,6 +149,16 @@ class CaptureSession:
         )
 
     def _finish(self, video_path: str | None) -> None:
+        qa = run_capture_checks(video_path, self.step_log,
+                                expected_steps=self.expected_steps)
+        print("\nCapture QA:")
+        for check in qa["checks"]:
+            print(f"  {'PASS' if check['ok'] else 'CHECK'}  {check['name']}: {check['detail']}")
+        if qa["blocking"]:
+            print("  ⛔ blocking issues — this capture should be re-recorded before review")
+        elif qa["warnings"]:
+            print("  ⚠️  fixable warnings — reviewer should decide")
+
         findings = scan_secrets(json.dumps(self.step_log, default=str))
         if findings:
             print("\n⚠️  REDACTION NEEDED — potential secrets detected in the step log:")
@@ -177,7 +190,7 @@ class CaptureSession:
         payload = {
             "video_path": stored_path,
             "step_log": self.step_log,
-            "notes": f"capture dir: {self.out_dir}",
+            "notes": f"capture dir: {self.out_dir}; qa={json.dumps(qa, default=str)}",
         }
         resp = self.api.post(f"/offers/{self.offer_id}/captures", json=payload)
         if resp.status_code == 201:

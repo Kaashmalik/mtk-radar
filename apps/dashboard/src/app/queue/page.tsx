@@ -22,6 +22,7 @@ type Candidate = {
   title: string;
   provider: string;
   state: string;
+  language: string;
   script_version: number;
   capture_id: string;
   capture_created_at: string;
@@ -35,8 +36,15 @@ type Capture = {
   created_at: string;
 };
 
+type PolicySummary = {
+  state: string;
+  mode: string;
+  automation_stages: string[];
+  human_stages: string[];
+};
+
 export default async function QueuePage() {
-  const [candidates, captures, offers, schedules] = await Promise.all([
+  const [candidates, captures, offers, schedules, policy] = await Promise.all([
     getJson<Candidate[]>("/render-candidates", []),
     getJson<Capture[]>("/captures", []),
     getJson<{ id: string; title: string; state: string; official_evidence: number }[]>(
@@ -44,7 +52,15 @@ export default async function QueuePage() {
       [],
     ),
     getJson<{ id: string; state: string; platform: string }[]>("/schedules", []),
+    getJson<{ summary?: PolicySummary }>("/automation/policy", {}),
   ]);
+
+  const summary = policy.summary ?? {
+    state: "unknown",
+    mode: "unknown",
+    automation_stages: [],
+    human_stages: [],
+  };
 
   const awaitingVerification = offers.filter(
     (o) => o.state === "evidence_needed" && o.official_evidence > 0,
@@ -59,6 +75,18 @@ export default async function QueuePage() {
       <p className="tagline">
         What the workers handle by themselves, and what still needs a person.
       </p>
+
+      <section className="card">
+        <h2>Automation policy</h2>
+        <p className="small" style={{ marginTop: 0 }}>
+          <span className="pill pill-accent">{summary.state}</span>{" "}
+          mode <strong>{summary.mode}</strong> · automation:{" "}
+          {summary.automation_stages.length ? summary.automation_stages.join(", ") : "none"} ·{" "}
+          human: {summary.human_stages.length ? summary.human_stages.join(", ") : "none"}
+          {" · "}
+          <a href="/settings">change in Settings →</a>
+        </p>
+      </section>
 
       <section className="card">
         <h2>At a glance</h2>
@@ -92,13 +120,14 @@ export default async function QueuePage() {
         ) : (
           <table>
             <thead>
-              <tr><th>offer</th><th>provider</th><th>script</th><th>captured</th></tr>
+              <tr><th>offer</th><th>provider</th><th>voiceover</th><th>script</th><th>captured</th></tr>
             </thead>
             <tbody>
               {candidates.map((c) => (
-                <tr key={c.offer_id}>
+                <tr key={`${c.offer_id}-${c.language}`}>
                   <td><a href={`/offers/${c.offer_id}`}>{c.title}</a></td>
                   <td>{c.provider}</td>
+                  <td>{c.language === "ur" ? "Urdu" : "English"}</td>
                   <td>v{c.script_version}</td>
                   <td className="small">
                     {new Date(c.capture_created_at).toLocaleDateString("en-GB", {

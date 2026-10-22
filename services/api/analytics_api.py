@@ -15,6 +15,7 @@ from fastapi import APIRouter
 
 import db
 from cache import ANALYTICS_KEY, cache_get_json, cache_set_json
+from growth_engine import summarize as growth_summarize
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -97,7 +98,8 @@ async def analytics() -> dict:
         WITH latest AS (
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
-                 pm.avg_watch_s, pm.captured_at
+                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
+                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
           FROM post_metrics pm
           JOIN schedules s ON s.id = pm.schedule_id AND s.state = 'published'
           ORDER BY pm.schedule_id, pm.captured_at DESC
@@ -107,6 +109,10 @@ async def analytics() -> dict:
                COALESCE(SUM(likes), 0)::bigint AS likes,
                COALESCE(SUM(comments), 0)::bigint AS comments,
                COALESCE(SUM(impressions), 0)::bigint AS impressions,
+               COALESCE(SUM(link_clicks), 0)::bigint AS link_clicks,
+               COALESCE(SUM(subscribers_gained), 0)::bigint AS subscribers_gained,
+               AVG(ctr)::double precision AS avg_ctr,
+               AVG(retention_3s)::double precision AS avg_retention_3s,
                MAX(captured_at) AS last_captured_at,
                (SELECT COUNT(*) FROM schedules WHERE state = 'published')::int AS published_total
         FROM latest
@@ -118,13 +124,15 @@ async def analytics() -> dict:
         WITH latest AS (
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
-                 pm.avg_watch_s, pm.captured_at, pm.source
+                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
+                 pm.link_clicks, pm.subscribers_gained, pm.captured_at, pm.source
           FROM post_metrics pm
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
-        SELECT s.id, s.platform, o.title AS offer_title, s.remote_post_id,
+        SELECT s.id, s.platform, s.language, o.title AS offer_title, s.remote_post_id,
                l.views, l.likes, l.comments, l.impressions, l.avg_watch_s,
-               l.captured_at, l.source,
+               l.ctr, l.avg_view_duration_s, l.retention_3s, l.link_clicks,
+               l.subscribers_gained, l.captured_at, l.source,
                s.description_patched_at
         FROM schedules s
         JOIN offers o ON o.id = s.offer_id
@@ -132,6 +140,87 @@ async def analytics() -> dict:
         WHERE s.state = 'published'
         ORDER BY l.views DESC NULLS LAST, l.captured_at DESC
         LIMIT 25
+        """
+    )
+
+    # ---- v0.27 closed-loop growth briefing. Read-only and conservative:
+    # recommendations say "test", never "this caused the result".
+    growth_rows = await _rows(
+        pool,
+        """
+        WITH latest AS (
+          SELECT DISTINCT ON (pm.schedule_id)
+                 pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
+                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
+                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
+          FROM post_metrics pm
+          ORDER BY pm.schedule_id, pm.captured_at DESC
+        )
+        SELECT s.id AS schedule_id, s.platform, s.language, s.metadata_variant,
+               o.title AS offer_title, l.views, l.likes, l.comments, l.impressions,
+               l.avg_watch_s, l.ctr, l.avg_view_duration_s, l.retention_3s,
+               l.link_clicks, l.subscribers_gained, l.captured_at
+        FROM schedules s
+        JOIN offers o ON o.id = s.offer_id
+        JOIN latest l ON l.schedule_id = s.id
+        WHERE s.state = 'published'
+        ORDER BY l.captured_at DESC
+        LIMIT 200
+        """
+    )
+    language_performance = await _rows(
+        pool,
+        """
+        WITH latest AS (
+          SELECT DISTINCT ON (pm.schedule_id)
+                 pm.schedule_id, pm.views, pm.likes, pm.comments
+          FROM post_metrics pm
+          ORDER BY pm.schedule_id, pm.captured_at DESC
+        )
+        SELECT s.language, COUNT(*)::int AS posts,
+               COALESCE(SUM(l.views), 0)::bigint AS views,
+               COALESCE(AVG(l.views), 0)::double precision AS avg_views,
+               COALESCE(SUM(l.likes + l.comments), 0)::bigint AS interactions
+        FROM schedules s
+        JOIN latest l ON l.schedule_id = s.id
+        WHERE s.state = 'published'
+        GROUP BY s.language
+        ORDER BY avg_views DESC
+        """
+    )
+    experiments = await _rows(
+        pool,
+        """
+        SELECT id, offer_id, schedule_id, variant_id, language, platform,
+               hypothesis, metric, status, result::text AS result,
+               created_at, updated_at
+        FROM content_experiments
+        ORDER BY created_at DESC LIMIT 50
+        """
+    )
+    stale_topics_raw = await pool.fetchval(
+        """
+        SELECT COUNT(*) FROM trend_candidates
+        WHERE status = 'radar' AND updated_at < now() - interval '7 days'
+        """
+    )
+    try:
+        stale_topics = int(stale_topics_raw or 0)
+    except (TypeError, ValueError):
+        stale_topics = 0  # fake/legacy pool returned a non-count value
+    growth = growth_summarize(
+        growth_rows,
+        languages=language_performance,
+        experiments=experiments,
+        stale_topics=stale_topics,
+    )
+    trend_summary = await pool.fetchrow(
+        """
+        SELECT COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE score >= 78)::int AS hot,
+               COUNT(*) FILTER (WHERE status = 'shortlisted')::int AS shortlisted,
+               COALESCE(AVG(score), 0)::double precision AS average_score
+        FROM trend_candidates
         """
     )
 
@@ -148,6 +237,10 @@ async def analytics() -> dict:
         "account_health": account_health,
         "metrics_totals": dict(metrics_totals or {}),
         "content_performance": content_performance,
+        "growth": growth,
+        "language_performance": language_performance,
+        "experiments": experiments,
+        "trend_summary": dict(trend_summary or {}),
         "generated_at": generated_at,
         "cached": False,
     }

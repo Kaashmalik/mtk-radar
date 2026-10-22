@@ -251,6 +251,7 @@ import secrets
 import fastapi
 
 import api_hardening
+from automation_api import router as _automation_router
 from captures_api import router as _captures_router
 from offers_api import router as _offers_router
 from renders_api import router as _renders_router
@@ -315,7 +316,8 @@ def auth_client(client):
         await db.close()
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
-              _settings_router, _analytics_router, _health_router, _locks_router):
+              _settings_router, _analytics_router, _health_router, _locks_router,
+              _automation_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -1678,6 +1680,40 @@ def test_settings_roundtrip_and_validation(auth_client):
     assert fetched["value"]["windows"] == ["09:30", "18:00"]
 
 
+def test_language_policy_is_english_first_and_urdu_is_opt_in(auth_client):
+    current = auth_client.get("/settings/language_policy", headers=SVC)
+    assert current.status_code == 200, current.text
+    value = current.json()["value"]
+    assert value["metadata_language"] == "en"
+    assert value["captions_language"] == "en"
+    assert value["narration_languages"] == ["en"]
+    assert value["urdu_voiceover_enabled"] is False
+
+    bad = auth_client.put("/settings/language_policy", headers=SVC, json={
+        "value": {"narration_languages": ["en", "fr"]},
+    })
+    assert bad.status_code == 422, "unknown voiceover languages must be refused"
+
+    enabled = auth_client.put("/settings/language_policy", headers=SVC, json={
+        "value": {
+            "metadata_language": "en",
+            "captions_language": "en",
+            "narration_languages": ["en", "ur"],
+            "default_narration_language": "ur",
+        },
+    })
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["value"]["urdu_voiceover_enabled"] is True
+    assert enabled.json()["value"]["metadata_language"] == "en"
+
+    # Leave the shared test database on the English-first default.
+    reset = auth_client.put("/settings/language_policy", headers=SVC, json={
+        "value": {"narration_languages": ["en"], "default_narration_language": "en"},
+    })
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["value"]["urdu_voiceover_enabled"] is False
+
+
 def test_metrics_ingest_upserts_one_daily_snapshot(auth_client):
     offer = auth_client.post("/offers", headers=SVC, json={
         "provider": "Metrics Co", "category": "domains", "offer_type": "coupon",
@@ -1951,3 +1987,227 @@ def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
     row = _run("SELECT outcome_detail::text AS d FROM schedules WHERE id = $1",
                __import__("uuid").UUID(str(sid)))[0]
     assert json.loads(row["d"])["hold"] is False, "resume must clear the hold"
+
+
+# --------------------------------------- v0.26: automation policy + gates
+
+def _set_policy(auth_client, body):
+    res = auth_client.put("/automation/policy", headers=SVC, json={"policy": body})
+    assert res.status_code == 200, res.text
+    return res.json()["policy"]
+
+
+def _reset_policy(auth_client):
+    try:
+        _set_policy(auth_client, {"mode": "assisted"})
+    except AssertionError:
+        pass
+
+
+def test_automation_policy_roundtrip_validation_and_presets(auth_client):
+    manual = _set_policy(auth_client, {"mode": "manual"})
+    assert manual["mode"] == "manual"
+    assert set(manual["stages"].values()) == {"human"}
+    assert manual["guardrails"]["auto_retry"] is False
+
+    bad = auth_client.put("/automation/policy", headers=SVC, json={
+        "policy": {"mode": "autopilot", "guardrails": {"auto_publish_max_per_day": -1}},
+    })
+    assert bad.status_code == 422, "invalid guardrails must be refused"
+
+    bad_stage = auth_client.put("/automation/policy", headers=SVC, json={
+        "policy": {"stages": {"verify": "sometimes"}},
+    })
+    assert bad_stage.status_code == 422
+
+    preset = auth_client.post("/automation/preset/autopilot", headers=SVC)
+    assert preset.status_code == 200, preset.text
+    assert set(preset.json()["policy"]["stages"].values()) == {"auto"}
+
+    status = auth_client.get("/automation/status", headers=SVC)
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["summary"]["mode"] == "autopilot"
+    assert "budget" in body and "queue" in body
+
+    # the generic keyed settings route accepts (and validates) the same policy
+    via_settings = auth_client.put("/settings/automation_policy", headers=SVC,
+                                   json={"value": {"mode": "assisted"}})
+    assert via_settings.status_code == 200, via_settings.text
+    assert via_settings.json()["value"]["mode"] == "assisted"
+    fetched_setting = auth_client.get("/settings/automation_policy", headers=SVC)
+    assert fetched_setting.json()["value"]["stages"]["approve"] == "human"
+
+    paused = auth_client.post("/automation/pause", headers=SVC, json={"note": "test"})
+    assert paused.json()["policy"]["paused"] is True
+    # choosing a mode must not silently clear the kill switch
+    still_paused = auth_client.post("/automation/preset/assisted", headers=SVC)
+    assert still_paused.json()["policy"]["paused"] is True
+    resumed = auth_client.post("/automation/resume", headers=SVC)
+    assert resumed.json()["policy"]["paused"] is False
+    _reset_policy(auth_client)
+
+
+def test_human_stage_refuses_automation_actor(auth_client):
+    _run(
+        "INSERT INTO sources (provider, canonical_domain, category, adapter, trust_tier) "
+        "VALUES ('Gate Co', 'gate.example', 'domains', 'manual', 'A_provider_owned')"
+    )
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Gate Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = offer["id"]
+
+    auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                     json={"to": "evidence_needed", "reviewer": "pytest"})
+    terms = "Free for new customers until 31 Dec 2026."
+    evidence = auth_client.post(f"/offers/{offer_id}/evidence", headers=SVC, json={
+        "url": "https://gate.example/terms",
+        "official": True,
+        "excerpt": terms,
+        "captured_content": terms,
+        "reviewer": "pytest",
+        "supported_fields": ["value", "eligibility"],
+    })
+    assert evidence.status_code == 201, evidence.text
+    evidence_id = evidence.json()["id"]
+    extraction = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": {
+            "value": {"value": "free", "evidence_id": evidence_id,
+                      "evidence_url": "https://gate.example/terms", "excerpt": terms},
+            "eligibility": {"value": "new customers", "evidence_id": evidence_id,
+                            "evidence_url": "https://gate.example/terms", "excerpt": terms},
+        },
+        "complete": True,
+        "conflicts": [],
+    })
+    assert extraction.status_code == 201, extraction.text
+
+    # manual mode: automation:verify is refused exactly like an anonymous actor
+    _set_policy(auth_client, {"mode": "manual"})
+    denied = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                              json={"to": "verified", "reviewer": "automation:verify"})
+    assert denied.status_code == 403, denied.text
+    assert "human control" in denied.json()["detail"]
+
+    # autopilot: the same call passes the automation policy + quality gates
+    _set_policy(auth_client, {"mode": "autopilot"})
+    verified = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                                json={"to": "verified", "reviewer": "automation:verify"})
+    assert verified.status_code == 200, verified.text
+
+    # unattended approval refuses to run before a rendered, reviewed capture exists
+    early = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                             json={"to": "approved_for_video", "reviewer": "automation:approve"})
+    assert early.status_code == 422, early.text
+    assert "automation approval refused" in early.json()["detail"]
+
+    # human workflow produces the package (script -> capture -> redaction -> render)
+    script = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                              params={"created_by": "pytest"})
+    assert script.status_code == 201, script.text
+    capture = auth_client.post(f"/offers/{offer_id}/captures", headers=SVC, json={
+        "video_path": "projects/x/cap.mp4",
+        "step_log": [{"step": "open official page", "note": "no secrets"}],
+    })
+    assert capture.status_code == 201, capture.text
+    reviewed = auth_client.post(f"/captures/{capture.json()['id']}/redaction-review",
+                                headers=SVC, json={"approved": True, "reviewer": "pytest"})
+    assert reviewed.status_code == 200, reviewed.text
+
+    scripts = auth_client.get(f"/offers/{offer_id}/scripts", headers=SVC).json()
+    render = auth_client.post(f"/offers/{offer_id}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": "projects/x/render.mp4",
+        "script_version": scripts[0]["version"],
+        "script_version_hash": scripts[0]["version_hash"],
+        "capture_id": capture.json()["id"],
+    })
+    assert render.status_code == 201, render.text
+
+    approved = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                                json={"to": "approved_for_video",
+                                      "reviewer": "automation:approve"})
+    assert approved.status_code == 200, approved.text
+
+    # automation-scheduled post walks draft -> needs_approval -> approved -> scheduled
+    slot = auth_client.get("/automation/next-slot", headers=SVC,
+                           params={"platform": "youtube"})
+    assert slot.status_code == 200, slot.text
+    schedule = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube",
+        "local_time": slot.json()["local_time"],
+        "privacy": slot.json()["privacy"],
+    })
+    assert schedule.status_code == 201, schedule.text
+    sid = schedule.json()["id"]
+
+    step = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                            json={"to": "needs_approval"})
+    assert step.status_code == 200, step.text
+    step = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                            json={"to": "approved", "reviewer": "automation:approve"})
+    assert step.status_code == 200, step.text
+    step = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                            json={"to": "scheduled", "reviewer": "automation:schedule"})
+    assert step.status_code == 200, step.text
+
+    # resuming a paused post stays human-only even in autopilot
+    assert auth_client.post(f"/schedules/{sid}/pause", headers=SVC).status_code == 200
+    denied_resume = auth_client.post(f"/schedules/{sid}/resume", headers=SVC,
+                                     params={"reviewer": "automation:schedule"})
+    assert denied_resume.status_code == 403, denied_resume.text
+    assert "named human" in denied_resume.json()["detail"]
+    denied_transition = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
+                                         json={"to": "scheduled",
+                                               "reviewer": "automation:schedule"})
+    assert denied_transition.status_code == 403, denied_transition.text
+    assert auth_client.post(f"/schedules/{sid}/resume", headers=SVC,
+                            params={"reviewer": "pytest"}).status_code == 200
+
+    # automation cannot mark an offer published directly: only a publishing
+    # result may do that, so the stage map deliberately has no 'published'.
+    direct_publish = auth_client.post(f"/offers/{offer_id}/transition", headers=SVC,
+                                      json={"to": "published",
+                                            "reviewer": "automation:approve"})
+    assert direct_publish.status_code == 403, direct_publish.text
+    assert "may not perform" in direct_publish.json()["detail"]
+
+    # the platform allowlist and privacy guardrail are re-checked at scheduling
+    # time, not just when the worker asks for the next slot.
+    _set_policy(auth_client, {"guardrails": {"auto_schedule_platforms": ["youtube"]}})
+    facebook = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "facebook",
+        "local_time": "2027-01-01T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert facebook.status_code == 201, facebook.text
+    fb_id = facebook.json()["id"]
+    auth_client.post(f"/schedules/{fb_id}/transition", headers=SVC,
+                     json={"to": "needs_approval"})
+    allowed = auth_client.post(f"/schedules/{fb_id}/transition", headers=SVC,
+                               json={"to": "approved", "reviewer": "automation:approve"})
+    assert allowed.status_code == 200, allowed.text
+    refused = auth_client.post(f"/schedules/{fb_id}/transition", headers=SVC,
+                               json={"to": "scheduled", "reviewer": "automation:schedule"})
+    assert refused.status_code == 409, refused.text
+    assert "may not schedule" in refused.json()["detail"]
+
+    # the daily budget is enforced server-side (0 = no more unattended approvals)
+    _set_policy(auth_client, {"guardrails": {"auto_publish_max_per_day": 0}})
+    schedule2 = auth_client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube",
+        "local_time": "2027-01-02T13:00:00+00:00",
+        "privacy": "private",
+    })
+    if schedule2.status_code == 201:
+        sid2 = schedule2.json()["id"]
+        auth_client.post(f"/schedules/{sid2}/transition", headers=SVC,
+                         json={"to": "needs_approval"})
+        exhausted = auth_client.post(f"/schedules/{sid2}/transition", headers=SVC,
+                                     json={"to": "approved",
+                                           "reviewer": "automation:approve"})
+        assert exhausted.status_code == 429, exhausted.text
+        assert "budget" in exhausted.json()["detail"]
+
+    _reset_policy(auth_client)

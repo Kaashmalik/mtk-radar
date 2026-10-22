@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import time
+from typing import Optional
 
 import httpx
 
@@ -42,6 +43,33 @@ class Batch:
     def __init__(self, api_url: str = API_URL_DEFAULT):
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"),
                                 headers=_api_auth_headers())
+
+    # ------------------------------------------------------------ policy
+
+    def _load_policy(self) -> Optional[dict]:
+        """Read the operator's automation policy. Missing endpoint = legacy
+        behaviour for script generation and no unattended approval."""
+        try:
+            resp = self.api.get("/automation/policy")
+            if getattr(resp, "status_code", 200) >= 300:
+                return None
+            body = resp.json() or {}
+            return body.get("policy") or None
+        except Exception as exc:  # noqa: BLE001 — an old/unreachable API
+            log.warning("automation policy unavailable, using conservative defaults: %s", exc)
+            return None
+
+    @staticmethod
+    def _stage_auto(policy: Optional[dict], stage: str, *, default: bool = False) -> bool:
+        if policy is None:
+            return default
+        if policy.get("paused") or policy.get("dry_run"):
+            return False
+        return (policy.get("stages") or {}).get(stage) == "auto"
+
+    @staticmethod
+    def _limits(policy: Optional[dict]) -> dict:
+        return (policy or {}).get("guardrails") or {}
 
     # ------------------------------------------------------------- steps
 
@@ -83,6 +111,160 @@ class Batch:
                              offer["id"], resp.status_code)
         return created
 
+    def approve_offers(self, policy: dict) -> int:
+        """Autopilot 'approve' stage: verified offers with a complete package
+        become approved_for_video. The API is the authority and can still say
+        no (render/redaction/hash/unsafe-command gates)."""
+        limits = self._limits(policy)
+        requires_render = limits.get("auto_approve_requires_render", True)
+        approved = 0
+        try:
+            offers = self.api.get("/offers", params={"state": "verified", "limit": 200}).json()
+        except httpx.HTTPError as exc:
+            log.warning("approve stage: offer list unavailable: %s", exc)
+            return 0
+
+        for offer in offers:
+            if (offer.get("correction_note") or "").strip():
+                log.info("offer %s has an open correction note — human review required",
+                         offer["id"])
+                continue
+            if requires_render:
+                try:
+                    renders = self.api.get("/renders", params={"offer_id": offer["id"]}).json()
+                except httpx.HTTPError:
+                    renders = []
+                if not renders:
+                    log.info("offer %s is verified but has no render — waiting on the "
+                             "render stage before unattended approval", offer["id"])
+                    continue
+            try:
+                resp = self.api.post(
+                    f"/offers/{offer['id']}/transition",
+                    json={"to": "approved_for_video",
+                          "reviewer": "automation:approve",
+                          "note": "autopilot: verified offer with a complete render package"},
+                )
+            except httpx.HTTPError as exc:
+                log.warning("auto-approval for %s failed: %s", offer["id"], exc)
+                continue
+            if getattr(resp, "status_code", 500) == 200:
+                approved += 1
+                log.info("offer %s AUTO-APPROVED for video (autopilot)", offer["id"])
+            else:
+                detail = ""
+                try:
+                    detail = (resp.json() or {}).get("detail", "")
+                except Exception:  # noqa: BLE001
+                    detail = getattr(resp, "text", "")
+                log.info("auto-approval refused for %s (%s): %s",
+                         offer["id"], resp.status_code, detail)
+        return approved
+
+    def schedule_approved(self, policy: dict) -> int:
+        """Autopilot 'schedule' stage: approved offers get per-platform queue
+        entries at the next configured publish window, approved with the
+        automation identity. Budget + hash + offer gates are re-checked by the
+        API; a 429 stops the stage for the day."""
+        limits = self._limits(policy)
+        platforms = limits.get("auto_schedule_platforms") or ["youtube"]
+        try:
+            offers = self.api.get("/offers", params={"state": "approved_for_video", "limit": 200}).json()
+            schedules = self.api.get("/schedules", params={"limit": 500}).json()
+        except httpx.HTTPError as exc:
+            log.warning("schedule stage unavailable: %s", exc)
+            return 0
+
+        by_offer: dict[str, set[str]] = {}
+        for schedule in schedules:
+            by_offer.setdefault(str(schedule.get("offer_id")), set()).add(
+                str(schedule.get("platform")))
+
+        created = 0
+        for offer in offers:
+            existing = by_offer.get(str(offer["id"]), set())
+            for platform in platforms:
+                if platform in existing:
+                    continue  # never queue the same offer twice on one platform
+                try:
+                    slot = self.api.get("/automation/next-slot",
+                                        params={"platform": platform}).json()
+                    resp = self.api.post(
+                        f"/offers/{offer['id']}/schedules",
+                        json={
+                            "platform": slot["platform"],
+                            "local_time": slot["local_time"],
+                            "timezone": slot.get("timezone", "Asia/Karachi"),
+                            "privacy": slot.get("privacy", "private"),
+                        },
+                    )
+                except (httpx.HTTPError, KeyError, ValueError) as exc:
+                    log.warning("schedule creation for %s/%s failed: %s",
+                                offer["id"], platform, exc)
+                    continue
+
+                if getattr(resp, "status_code", 500) not in (200, 201):
+                    detail = ""
+                    try:
+                        detail = (resp.json() or {}).get("detail", "")
+                    except Exception:  # noqa: BLE001
+                        detail = getattr(resp, "text", "")
+                    log.info("schedule creation refused for %s/%s (%s): %s",
+                             offer["id"], platform, resp.status_code, detail)
+                    continue
+
+                body = {}
+                try:
+                    body = resp.json() or {}
+                except Exception:  # noqa: BLE001
+                    body = {}
+                schedule_id = body.get("id")
+                state = body.get("state", "draft")
+                if not schedule_id:
+                    continue
+                if not self._advance(schedule_id, state, platform):
+                    return created  # budget exhausted / gate refused
+                if not body.get("created", True):
+                    # idempotent re-submit: it already existed, don't count it
+                    continue
+                created += 1
+                log.info("offer %s AUTO-SCHEDULED on %s (autopilot, %s)",
+                         offer["id"], platform, body.get("state", "scheduled"))
+                existing.add(platform)
+        return created
+
+    def _advance(self, schedule_id: str, state: str, platform: str) -> bool:
+        """Walk a freshly created schedule to 'scheduled' through the API.
+        Returns False when the server says stop (budget/gate refusal)."""
+        steps = []
+        if state == "draft":
+            steps.append(("needs_approval", None))
+        if state in ("draft", "needs_approval"):
+            steps.append(("approved", "automation:approve"))
+        if state in ("draft", "needs_approval", "approved"):
+            steps.append(("scheduled", "automation:schedule"))
+
+        for target, actor in steps:
+            payload = {"to": target, "note": f"autopilot schedule ({platform})"}
+            if actor:
+                payload["reviewer"] = actor
+            try:
+                resp = self.api.post(f"/schedules/{schedule_id}/transition", json=payload)
+            except httpx.HTTPError as exc:
+                log.warning("schedule %s -> %s failed: %s", schedule_id, target, exc)
+                return False
+            if getattr(resp, "status_code", 500) != 200:
+                detail = ""
+                try:
+                    detail = (resp.json() or {}).get("detail", "")
+                except Exception:  # noqa: BLE001
+                    detail = getattr(resp, "text", "")
+                level = log.info if resp.status_code == 429 else log.warning
+                level("schedule %s cannot advance to %s (%s): %s",
+                      schedule_id, target, resp.status_code, detail)
+                return resp.status_code != 429
+        return True
+
     def readiness(self) -> dict:
         """What is waiting on whom — the operator's single status read-out."""
         out: dict = {}
@@ -118,9 +300,26 @@ class Batch:
         return out
 
     def run_once(self) -> dict:
-        created = self.generate_scripts()
+        policy = self._load_policy()
+        if policy is not None and policy.get("paused"):
+            log.info("automation is PAUSED in Settings — batch performs no state changes")
+            return {"paused": True, "scripts_created": 0,
+                    "offers_auto_approved": 0, "posts_auto_scheduled": 0}
+
+        started_auto = self._stage_auto(policy, "script", default=True)
+        created = self.generate_scripts() if started_auto else 0
+        approved = 0
+        scheduled = 0
+        if self._stage_auto(policy, "approve"):
+            approved = self.approve_offers(policy or {})
+        if self._stage_auto(policy, "schedule"):
+            scheduled = self.schedule_approved(policy or {})
+
         report = self.readiness()
         report["scripts_created"] = created
+        report["offers_auto_approved"] = approved
+        report["posts_auto_scheduled"] = scheduled
+        report["automation_mode"] = (policy or {}).get("mode", "legacy")
         log.info("batch complete: %s", report)
         return report
 

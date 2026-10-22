@@ -2,9 +2,12 @@
 
 Master plan §18 week 12 ("deployment, backup/restore, credential and source
 hygiene") and §6 (official platform APIs). This file is the operator's
-runbook for deployment, secrets, account consent and operator checkpoints.
-Code and mocked tests do not establish full end-to-end or production readiness.
-See the [21 October 2026 audit and enhancement plan](automation-master-plan-2026-10-21.md)
+runbook for the things **no policy can automate**: secrets and account
+consent. Everything else is automated or human-controlled by the policy in
+**Settings → Automation control**, and proven by the test suite. It also covers
+deployment, operator checkpoints and language packaging. Code and mocked tests
+do not establish full end-to-end or production readiness. See the
+[21 October 2026 audit and enhancement plan](automation-master-plan-2026-10-21.md)
 for current gaps, actual checks run and release-blocking safety work. The
 historical verification counts below must be re-proven for each release.
 
@@ -18,10 +21,10 @@ the database, never in the browser, never in git. The database only records
 
 | Area | How it is proven |
 | --- | --- |
-| API + DB | 12 integration tests against real Postgres 16, migrations 001→010 applied by the real runner |
-| State machine (§3) | 224 unit/integration tests — illegal transitions, expiry, hash-binding, redaction gates |
-| Workers | collector, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
-| Dashboard | production build + Playwright smoke against the real API (3 browser tests) |
+| API + DB | integration tests against real Postgres 16, migrations 001→012 applied by the real runner |
+| State machine (§3) | unit/integration tests — illegal transitions, expiry, hash-binding, redaction and automation gates |
+| Workers | collector, verification, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
+| Dashboard | production build + Playwright smoke against the real API (4 browser tests) |
 | Object storage | S3-compatible driver tested against a real S3 mock (moto) |
 | Backup/restore | `infra/backup.sh` + `infra/restore.sh` + systemd timers (`infra/systemd/`) |
 | Extension | MV3 manifest + service worker + options page, syntax-checked in CI |
@@ -44,8 +47,20 @@ cp .env.example .env
 docker compose -f infra/docker/docker-compose.yml up -d \
   --profile workers --profile storage
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
-curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.19.0"}
+curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.27.0"}
 ```
+
+Then open **Settings → Automation control** and confirm the default **Assisted**
+mode: collect/verify/script/render may run automatically, while **approve** and
+**schedule** stay human. Keep it there until you have watched several complete
+videos and posts; switch one stage at a time (see
+[`automation-and-human-control.md`](automation-and-human-control.md)).
+
+Open **Settings → Language policy** and leave the English-first defaults on:
+English title/description/hashtags/cover and English on-screen captions. Leave
+**Enable Urdu voiceover** off unless you specifically want an Urdu-spoken
+version; if you enable it, generate/render the Urdu version separately. See
+[`language-policy.md`](language-policy.md).
 
 Services (compose file `infra/docker/docker-compose.yml`):
 
@@ -54,10 +69,10 @@ Services (compose file `infra/docker/docker-compose.yml`):
 | `api` | FastAPI + Postgres + Redis | no |
 | `dashboard` | operator console (Next.js) | no |
 | `collectors` | polls registered sources → inbox | no |
-| `batch` | generates scripts for earned offers, reports readiness | no |
-| `render` | renders the ready queue (ffmpeg) | no |
+| `batch` | generates scripts, reports readiness, and (only when enabled) approves/schedules inside guardrails | per policy |
+| `render` | renders the ready queue (ffmpeg) | per policy |
 | `monitor` | expiry/token sweeps, alerts | no |
-| `publishing` | uploads due posts, retries, correction write-back | approval only |
+| `publishing` | uploads posts that are already approved **and** scheduled; retries per policy | approval only |
 | `metrics` | pulls audience numbers per post | no |
 
 Redis is optional: it caches the dashboard's aggregate read for 30 s. If it

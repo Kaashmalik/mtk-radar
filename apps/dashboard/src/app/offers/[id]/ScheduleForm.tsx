@@ -16,6 +16,10 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
   const router = useRouter();
   const [platform, setPlatform] = useState("youtube");
   const [privacy, setPrivacy] = useState("private");
+  const [language, setLanguage] = useState("en");
+  const [metadataVariant, setMetadataVariant] = useState("default");
+  const [coverPath, setCoverPath] = useState("");
+  const [allowedLanguages, setAllowedLanguages] = useState<string[]>(["en"]);
   const [windows, setWindows] = useState<string[]>([]);
   const [when, setWhen] = useState(() => defaultWhen("18:00"));
   const [busy, setBusy] = useState(false);
@@ -24,13 +28,26 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
 
   useEffect(() => {
     let alive = true;
-    clientFetch("/settings/publish-windows")
+    clientFetch("/settings/publish_windows")
       .then((r) => (r.ok ? r.json() : null))
       .then((b) => {
         const list = b?.value?.windows;
         if (alive && Array.isArray(list) && list.length > 0) setWindows(list);
       })
       .catch(() => {}); // settings are an enhancement — the form works without them
+
+    // English is always available; Urdu only appears after the operator
+    // enables it in Settings → Language policy.
+    clientFetch("/settings/language_policy")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        const list = b?.value?.narration_languages;
+        if (alive && Array.isArray(list) && list.length > 0) {
+          setAllowedLanguages(list);
+          setLanguage((current) => (list.includes(current) ? current : list[0]));
+        }
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -50,6 +67,9 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
           privacy,
           local_time: `${when}:00+05:00`,
           timezone: "Asia/Karachi",
+          language,
+          metadata_variant: metadataVariant,
+          ...(coverPath.trim() ? { cover_path: coverPath.trim() } : {}),
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -57,7 +77,11 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
         setError(body.detail ?? `HTTP ${res.status}`);
         return;
       }
-      setMsg(body.created ? `Scheduled (${body.state})` : `Already scheduled (idempotent)`);
+      setMsg(
+        body.created
+          ? `Queued (${body.state}) — approve it on the calendar before it can publish`
+          : `Already queued (${body.state}) — idempotent re-submit`,
+      );
       router.refresh();
     } finally {
       setBusy(false);
@@ -70,12 +94,41 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
         value={platform}
         onChange={(e) => setPlatform(e.target.value)}
         style={inputStyle}
+        aria-label="Platform"
       >
         <option value="youtube">YouTube</option>
         <option value="facebook">Facebook</option>
         <option value="instagram">Instagram</option>
         <option value="tiktok">TikTok</option>
       </select>
+      <select
+        value={language}
+        onChange={(e) => setLanguage(e.target.value)}
+        style={inputStyle}
+        aria-label="Language"
+      >
+        {allowedLanguages.map((code) => (
+          <option key={code} value={code}>
+            {code === "ur" ? "اردو (Urdu voiceover)" : "English"}
+          </option>
+        ))}
+      </select>
+      <select
+        value={metadataVariant}
+        onChange={(e) => setMetadataVariant(e.target.value)}
+        style={inputStyle}
+        aria-label="Metadata variant"
+      >
+        <option value="default">Packaging A</option>
+        <option value="b">Packaging B</option>
+      </select>
+      <input
+        value={coverPath}
+        onChange={(e) => setCoverPath(e.target.value)}
+        placeholder="cover path (optional)"
+        style={{ ...inputStyle, width: 170 }}
+        aria-label="Cover path"
+      />
       <input
         type="datetime-local"
         value={when}

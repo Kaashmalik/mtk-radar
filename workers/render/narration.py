@@ -24,8 +24,25 @@ FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
 _MARKDOWN_NOISE = ("```", "---", "> ", "# ", "- ", "  -")
 
 
-def tts_configured() -> bool:
-    return bool(os.environ.get("TTS_BASE_URL") and os.environ.get("TTS_API_KEY"))
+def tts_configured(language: str = "en") -> bool:
+    base = (os.environ.get(f"TTS_BASE_URL_{language.upper()}")
+            or os.environ.get("TTS_BASE_URL"))
+    key = (os.environ.get(f"TTS_API_KEY_{language.upper()}")
+           or os.environ.get("TTS_API_KEY"))
+    return bool(base and key)
+
+
+def voice_for(language: str = "en") -> str:
+    if language == "ur":
+        return (os.environ.get("TTS_VOICE_UR")
+                or os.environ.get("TTS_VOICE")
+                or "ur-PK-AsadNeural")
+    return os.environ.get("TTS_VOICE", "onyx")
+
+
+def model_for(language: str = "en") -> str:
+    return (os.environ.get(f"TTS_MODEL_{language.upper()}")
+            or os.environ.get("TTS_MODEL", "tts-1"))
 
 
 def narration_segments(markdown: str) -> list[str]:
@@ -56,18 +73,29 @@ def synthesize(text: str, out_path: Path, *,
                base_url: Optional[str] = None,
                api_key: Optional[str] = None,
                model: Optional[str] = None,
-               voice: Optional[str] = None) -> Optional[Path]:
+               voice: Optional[str] = None,
+               language: str = "en") -> Optional[Path]:
     """One narration line → MP3 via an OpenAI-compatible /audio/speech endpoint.
-    Returns None on any failure (never raises into the pipeline)."""
+    Returns None on any failure (never raises into the pipeline).
+
+    Urdu uses language-specific env overrides first:
+      TTS_BASE_URL_UR / TTS_API_KEY_UR / TTS_MODEL_UR / TTS_VOICE_UR
+    Providers differ in language support; a deployment can point Urdu at a
+    regional voice without changing the English pipeline.
+    """
     import httpx
 
-    base = (base_url or os.environ.get("TTS_BASE_URL", "")).rstrip("/")
-    key = api_key or os.environ.get("TTS_API_KEY", "")
+    base = (base_url
+            or os.environ.get(f"TTS_BASE_URL_{language.upper()}")
+            or os.environ.get("TTS_BASE_URL", "")).rstrip("/")
+    key = (api_key
+           or os.environ.get(f"TTS_API_KEY_{language.upper()}")
+           or os.environ.get("TTS_API_KEY", ""))
     if not base or not key:
         return None
     body = {
-        "model": model or os.environ.get("TTS_MODEL", "tts-1"),
-        "voice": voice or os.environ.get("TTS_VOICE", "onyx"),
+        "model": model or model_for(language),
+        "voice": voice or voice_for(language),
         "input": text,
         "response_format": "mp3",
     }
@@ -86,17 +114,18 @@ def synthesize(text: str, out_path: Path, *,
         return None
 
 
-def synthesize_all(segments: list[str], out_dir: Path) -> dict:
+def synthesize_all(segments: list[str], out_dir: Path,
+                   language: str = "en") -> dict:
     """Render all segments; returns {"paths": [...], "used": bool}.
 
     Partial success is treated as failure (a narration with holes is worse
     than no narration) so the capture audio remains the fallback.
     """
-    if not tts_configured() or not segments:
+    if not tts_configured(language) or not segments:
         return {"paths": [], "used": False}
     paths: list[str] = []
     for i, seg in enumerate(segments):
-        out = synthesize(seg, out_dir / f"narration-{i:03d}.mp3")
+        out = synthesize(seg, out_dir / f"narration-{i:03d}.mp3", language=language)
         if out is None:
             return {"paths": [], "used": False}
         paths.append(str(out))
@@ -182,12 +211,16 @@ def _seg_duration(path: str) -> float:
     return probe_duration_seconds(Path(path)) or 0.0
 
 
-def disclosure_record(used: bool, model: str | None = None) -> dict:
+def disclosure_record(used: bool, model: str | None = None,
+                      language: str = "en") -> dict:
     if not used:
+        # Keep this exact legacy shape: downstream approval/render tests and
+        # adapters treat a missing track as "no synthetic disclosure required".
         return {"synthetic_narration": False}
     return {
         "synthetic_narration": True,
-        "tts_model": model or os.environ.get("TTS_MODEL", "tts-1"),
+        "tts_model": model or model_for(language),
+        "language": language,
         "label_required": True,
         "note": "synthetic voice narration — label per platform policy (master plan §5)",
     }

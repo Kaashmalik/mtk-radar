@@ -89,6 +89,28 @@ class Verifier:
                 "will fail and no evidence will be accepted"
             )
 
+    # ------------------------------------------------------------- policy
+
+    def _load_policy(self) -> dict | None:
+        """The operator's automation policy. None means the endpoint is
+        unavailable — autonomous state changes then fail closed (evidence is
+        still collected, but nothing is promoted without a human)."""
+        try:
+            resp = self.client.get(f"{self.api_url}/automation/policy")
+            if resp.status_code != 200:
+                return None
+            return (resp.json() or {}).get("policy")
+        except (httpx.HTTPError, ValueError):
+            return None
+
+    @staticmethod
+    def _stage_auto(policy: dict | None, stage: str) -> bool:
+        if not policy:
+            return False
+        if policy.get("paused") or policy.get("dry_run"):
+            return False
+        return ((policy.get("stages") or {}).get(stage)) == "auto"
+
     # ------------------------------------------------------------- API I/O
 
     def _get(self, path: str, **kwargs) -> dict | list:
@@ -113,6 +135,16 @@ class Verifier:
                 time.sleep(SWEEP_INTERVAL)
 
     async def sweep(self) -> None:
+        policy = self._load_policy()
+        if policy is not None and not self._stage_auto(policy, "verify"):
+            state = "paused" if policy.get("paused") else (
+                "dry-run" if policy.get("dry_run") else "human-controlled")
+            log.info("verification stage is %s in Settings — collecting nothing, "
+                     "leaving offers for a human", state)
+            # expiry/overdue safety still runs: it can only pause or demote.
+            self._post("/offers/sweep-stale", json={})
+            return
+
         offers = self._get("/offers", params={"limit": 100})
         targets = [o for o in offers if o.get("state") in VERIFY_STATES]
         if targets:
@@ -122,7 +154,7 @@ class Verifier:
 
         for offer in targets:
             try:
-                await asyncio.to_thread(self.verify_offer, offer, allowlist)
+                await asyncio.to_thread(self.verify_offer, offer, allowlist, policy)
             except Exception:  # noqa: BLE001 — one bad offer never stops the sweep
                 log.exception("verification failed for offer %s", offer.get("id"))
 
@@ -133,7 +165,8 @@ class Verifier:
 
     # ------------------------------------------------------------ pipeline
 
-    def verify_offer(self, offer: dict, allowlist: dict) -> None:
+    def verify_offer(self, offer: dict, allowlist: dict,
+                     policy: dict | None = None) -> None:
         offer_id = offer["id"]
         provider = offer.get("provider") or ""
 
@@ -264,8 +297,16 @@ class Verifier:
 
         # 4. attempt promotion to verified — the API re-checks all gates.
         if complete and not conflicts:
+            # Fail closed: if the policy could not be read we still preserve the
+            # evidence, but only a named human may promote the offer.
+            auto = policy is not None and self._stage_auto(policy, "verify")
+            if not auto:
+                log.info("offer %s is ready — waiting for a human reviewer "
+                         "(verify stage is human-controlled or policy unreadable)", offer_id)
+                return
             resp = self._post(f"/offers/{offer_id}/transition", json={
                 "to": "verified",
+                "reviewer": "automation:verify",
                 "note": "official evidence + complete extraction, no conflicts",
             })
             if resp.status_code == 200:

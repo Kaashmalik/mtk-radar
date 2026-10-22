@@ -93,8 +93,9 @@ docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
 MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest \
   packages/object_storage/tests packages/source_adapters/tests \
   services/api/tests workers/verification/tests \
-  workers/render/tests workers/publishing/tests workers/metrics/tests \
-  workers/batch/tests workers/monitor/tests -q || fail "pytest"
+  workers/render/tests workers/capture/tests workers/publishing/tests \
+  workers/metrics/tests workers/batch/tests workers/monitor/tests \
+  scripts/tests -q || fail "pytest"
 ok "test suites green"
 
 # ------------------------------------------------- 3. pinned deps (py3.12)

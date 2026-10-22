@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from jsonb import decode_mapping
+from seo import PLATFORM_LIMITS, PLATFORMS, build_metadata
 
 SCHEDULE_STATES: Final[tuple[str, ...]] = (
     "draft", "needs_approval", "approved", "scheduled",
@@ -31,16 +32,8 @@ TRANSITIONS: Final[dict[str, tuple[str, ...]]] = {
     "failed": ("scheduled", "paused"),   # retry eligible failures only
 }
 
-PLATFORMS: Final[tuple[str, ...]] = ("youtube", "facebook", "instagram", "tiktok")
-
-# Plan §6/§17: official-API constraints to respect; limits drive metadata.
-PLATFORM_LIMITS: Final[dict[str, dict[str, int]]] = {
-    "youtube": {"title": 100, "caption": 5000, "tags": 500},
-    "facebook": {"title": 120, "caption": 5000, "tags": 0},
-    "instagram": {"title": 0, "caption": 2200, "tags": 30},   # professional account API
-    "tiktok": {"title": 0, "caption": 2200, "tags": 0},       # Content Posting API
-}
-
+# Plan §6/§17: official-API constraints live in seo.py (single source of
+# truth shared by the schedule API, the studio and the publishing adapters).
 REVIEW_REQUIRED: Final[frozenset[str]] = frozenset({"approved"})
 
 
@@ -81,59 +74,42 @@ def validate_transition(from_state: str, to_state: str, *, reviewer: str | None,
     return version_hash or ""
 
 
-def platform_metadata(platform: str, offer: dict[str, Any], evidence_urls: list[str],
-                      disclosure: dict[str, Any], correction_url: str | None = None) -> dict[str, str]:
-    """Platform-specific copy template (§6) with hard limits, disclosures, and
-    source links in the description (§11). `correction_url` (v0.17) adds the
-    §11 correction/takedown permalink — set MTK_PUBLIC_BASE_URL in deployments
-    with a reachable dashboard."""
-    if platform not in PLATFORMS:
-        raise ValueError(f"unsupported platform '{platform}' — known: {', '.join(PLATFORMS)}")
+def platform_metadata(
+    platform: str,
+    offer: dict[str, Any],
+    evidence_urls: list[str],
+    disclosure: dict[str, Any],
+    correction_url: str | None = None,
+    *,
+    website_url: str | None = None,
+    language: str = "en",
+    variant: str = "default",
+) -> dict[str, Any]:
+    """Platform-specific copy with hard limits, disclosures, source links,
+    website CTA, hashtags and a pinned comment (§6/§11/§17).
 
-    limits = PLATFORM_LIMITS[platform]
-    provider = offer.get("provider", "")
-    title_base = f"{offer.get('title', 'Offer walkthrough')} — real claim walkthrough"
-    title = title_base[: limits["title"]] if limits["title"] else ""
-
+    `correction_url` adds the §11 correction/takedown permalink. `website_url`
+    is the operator's tracked brand/offer link (UTM parameters are added).
+    """
     eligibility = decode_mapping(offer.get("eligibility"))
-    audience = []
-    if eligibility.get("countries"):
-        audience.append(f"Region: {', '.join(eligibility['countries'])}")
-    if eligibility.get("studentStatus"):
-        audience.append("students (verification required)")
-    if eligibility.get("newCustomerOnly"):
-        audience.append("new customers only")
-
     renewal = decode_mapping(offer.get("renewal"))
     # Never assert a generic "genuine end-to-end claim": an account-specific
     # walkthrough is not a promise that every viewer gets the same result (A13).
-    lines: list[str] = [
-        f"Official offer walkthrough: {offer.get('title', 'this offer')} by {provider}. "
-        "Results depend on your account and eligibility.",
-        " · ".join(audience) if audience else
-        "Eligibility not stated in the inspected terms — check the official terms for the current audience.",
-    ]
-    if renewal.get("regularPrice"):
-        lines.append(
-            f"After the free period this renews at {renewal['regularPrice']}"
-            f"{' (auto-renew)' if renewal.get('autoRenew') else ''}."
-        )
-    else:
-        lines.append("Ongoing cost not stated in the inspected terms — unknown renewal is not free.")
-    if disclosure.get("synthetic_narration"):
-        lines.append("Narration is AI-generated (disclosed per platform policy).")
-    if correction_url:
-        lines.append(f"Corrections & updates: {correction_url}")
-    if evidence_urls:
-        lines.append("Sources & terms (may change):")
-        lines.extend(f"- {u}" for u in evidence_urls[:3])
-
-    caption = "\n".join(lines)
-    if len(caption) > limits["caption"]:
-        caption = caption[: limits["caption"] - 1].rstrip() + "…"
-
-    return {"platform": platform, "title": title, "caption": caption,
-            "privacy_default": "private"}
+    normalized = {
+        **offer,
+        "eligibility": eligibility,
+        "renewal": renewal,
+    }
+    return build_metadata(
+        platform,
+        normalized,
+        evidence_urls=evidence_urls,
+        disclosure=disclosure,
+        correction_url=correction_url,
+        website_url=website_url,
+        language=language,
+        variant=variant,
+    )
 
 
 def parse_publish_windows(value) -> list[str]:

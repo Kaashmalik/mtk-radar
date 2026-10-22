@@ -30,6 +30,14 @@ SOURCE = {
     "tos_reviewed_at": "2026-10-20T09:00:00+00:00",
 }
 OFFER = {"id": "offer-1", "provider": "Acme", "state": "evidence_needed"}
+# The v0.26 automation policy is human-controlled by default. These pipeline
+# tests exercise the autopilot path explicitly; the API still re-checks every
+# gate on the transition.
+AUTOPILOT_POLICY = {
+    "paused": False,
+    "dry_run": False,
+    "stages": {"verify": "auto"},
+}
 
 
 def allow_robots(monkeypatch, *, allowed=True):
@@ -85,7 +93,7 @@ def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, 
     worker.fetcher = object()
     worker.policy = EgressPolicy()
     with httpx.Client(transport=httpx.MockTransport(transport)) as worker.client:
-        worker.verify_offer(OFFER, build_allowlist(sources))
+        worker.verify_offer(OFFER, build_allowlist(sources), AUTOPILOT_POLICY)
     return fetched, posts
 
 

@@ -1,6 +1,6 @@
 """Caption pipeline tests — deterministic cues, valid srt/vtt."""
 
-from captions import build_cues, segments_from_step_log, to_srt, to_vtt
+from captions import build_cues, segments_from_step_log, to_ass, to_srt, to_vtt
 
 SEGMENTS = [
     {"text": "One-year .TECH domain free for verified students."},
@@ -32,6 +32,15 @@ class TestBuildCues:
         assert build_cues([]) == []
         assert build_cues([{"text": ""}]) == []
 
+    def test_long_text_is_split_into_readable_chunks(self):
+        text = " ".join(["verified student offer"] * 30)
+        cues = build_cues([{"text": text}])
+        assert len(cues) > 1, "a long step must not become one unreadable cue"
+        assert all(len(cue["text"]) <= 84 for cue in cues)
+        assert " ".join(cue["text"] for cue in cues) == text
+        for prev, cur in zip(cues, cues[1:]):
+            assert abs(prev["end"] - cur["start"]) < 0.001
+
     def test_step_log_download_ordering(self):
         step_log = [
             {"n": 2, "title": "terms page"},
@@ -41,6 +50,29 @@ class TestBuildCues:
         segments = segments_from_step_log(step_log)
         assert segments[0]["text"] == "offer page"
         assert len(segments) == 3
+
+    def test_real_start_timestamp_is_honoured(self):
+        cues = build_cues([
+            {"text": "opening", "start": 0},
+            {"text": "proof page", "start": 12.5},
+        ])
+        assert cues[1]["start"] >= 12.5
+
+    def test_start_before_previous_cue_never_overlaps(self):
+        cues = build_cues([
+            {"text": "a long enough first line", "start": 5},
+            {"text": "second", "start": 1},
+        ])
+        assert cues[1]["start"] >= cues[0]["end"]
+
+    def test_iso_step_log_becomes_relative_seconds(self):
+        segments = segments_from_step_log([
+            {"n": 0, "title": "opening", "at": "2026-10-22T10:00:00Z"},
+            {"n": 1, "title": "proof", "at": "2026-10-22T10:00:14Z"},
+        ])
+        assert segments[1]["start"] == 14.0
+        cues = build_cues(segments)
+        assert cues[1]["start"] >= 14.0
 
 
 class TestSrt:
@@ -69,3 +101,35 @@ class TestVtt:
 
     def test_empty_is_header_only(self):
         assert to_vtt([]) == "WEBVTT\n"
+
+
+class TestAss:
+    def test_styled_header_and_events(self):
+        ass = to_ass(build_cues(SEGMENTS), language="en")
+        assert ass.startswith("[Script Info]")
+        assert "PlayResX: 1920" in ass
+        assert "Dialogue: 0,0:00:00.00" in ass
+        assert ass.count("Dialogue:") == 3
+
+    def test_urdu_uses_rtl_font_and_escapes_braces(self):
+        ass = to_ass([{"text": "سلام {tag}", "start": 0, "end": 2}], language="ur")
+        assert "Noto Nastaliq Urdu" in ass
+        assert "\\{tag\\}" in ass
+        assert "0:00:00.00,0:00:02.00" in ass
+
+    def test_english_uses_readable_font_and_fits_vertical(self, monkeypatch):
+        monkeypatch.delenv("MTK_CAPTION_FONT", raising=False)
+        ass = to_ass([{"text": "Official terms below", "start": 0, "end": 2}],
+                     language="en", width=1080, height=1920)
+        assert "DejaVu Sans" in ass
+        assert "PlayResX: 1080" in ass
+        assert "PlayResY: 1920" in ass
+        assert "WrapStyle: 0" in ass
+        # Larger type and safe margins for a 9:16 frame.
+        assert "Style: Default,DejaVu Sans,64" in ass
+        assert ",120,120,170,1" in ass
+
+    def test_caption_font_can_be_overridden(self, monkeypatch):
+        monkeypatch.setenv("MTK_CAPTION_FONT", "Inter")
+        ass = to_ass([{"text": "Hello", "start": 0, "end": 2}], language="en")
+        assert "Style: Default,Inter,52" in ass

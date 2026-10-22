@@ -34,12 +34,20 @@ class Storage(Protocol):
 # ---------------------------------------------------------------- keys
 
 
-def render_key(offer_id: str, preset: str) -> str:
-    return f"renders/{offer_id}/{offer_id}-{preset}.mp4"
+def render_key(offer_id: str, preset: str, language: str | None = None) -> str:
+    suffix = f"-{language}" if language and language != "en" else ""
+    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}.mp4"
 
 
-def captions_key(offer_id: str, preset: str) -> str:
-    return f"renders/{offer_id}/{offer_id}-{preset}.srt"
+def captions_key(offer_id: str, preset: str, language: str | None = None) -> str:
+    suffix = f"-{language}" if language and language != "en" else ""
+    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}.srt"
+
+
+def cover_key(offer_id: str, preset: str, language: str | None = None,
+              ext: str = "png") -> str:
+    suffix = f"-{language}" if language and language != "en" else ""
+    return f"renders/{offer_id}/{offer_id}-{preset}{suffix}-cover.{ext}"
 
 
 def capture_key(offer_id: str, session_id: str, filename: str) -> str:

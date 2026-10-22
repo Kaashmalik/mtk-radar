@@ -32,16 +32,21 @@ class FakeResponse:
 
 class FakeAPI:
     def __init__(self, offers=None, scripts=None, script_status=201,
-                 captures=None, candidates=None, schedules=None):
+                 captures=None, candidates=None, schedules=None, policy=None):
         self.offers = offers or []
         self.scripts = scripts or {}
         self.script_status = script_status
         self.captures = captures or []
         self.candidates = candidates or []
         self.schedules = schedules or []
+        self.policy = policy
         self.posts = []
 
     def get(self, path, params=None):
+        if path == "/automation/policy":
+            if self.policy is None:
+                return FakeResponse({"policy": None}, status_code=404)
+            return FakeResponse({"policy": self.policy})
         if path == "/offers":
             state = (params or {}).get("state")
             if state:
@@ -120,6 +125,48 @@ def test_readiness_counts_what_is_waiting_on_whom():
     assert report["captures_awaiting_redaction_review"] == 1
     assert report["render_candidates"] == 1
     assert report["scheduled_posts"] == 1
+
+
+def _policy(mode, paused=False):
+    stages = {
+        "manual": "human",
+        "assisted": None,
+        "autopilot": "auto",
+    }
+    if mode == "assisted":
+        controls = {"collect": "auto", "verify": "auto", "script": "auto",
+                    "render": "auto", "approve": "human", "schedule": "human"}
+    else:
+        controls = {stage: stages[mode] for stage in
+                    ("collect", "verify", "script", "render", "approve", "schedule")}
+    return {"mode": mode, "paused": paused, "dry_run": False, "stages": controls,
+            "guardrails": {}}
+
+
+def test_paused_policy_performs_no_state_changes():
+    api = FakeAPI(offers=[_offer()], policy=_policy("autopilot", paused=True))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["paused"] is True
+    assert api.posts == []
+
+
+def test_manual_policy_does_not_script_or_approve():
+    api = FakeAPI(offers=[_offer()], policy=_policy("manual"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["scripts_created"] == 0
+    assert api.posts == []
+
+
+def test_assisted_policy_scripts_but_leaves_approval_to_a_human():
+    api = FakeAPI(offers=[_offer()], policy=_policy("assisted"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["scripts_created"] == 1
+    assert report["offers_auto_approved"] == 0
+    assert report["posts_auto_scheduled"] == 0
+    assert [p for p, _ in api.posts] == ["/offers/off-1/script"]
 
 
 def test_api_unreachable_does_not_crash_the_batch():
