@@ -36,14 +36,18 @@ class FakeAPI:
         self.uploads = []
 
     def get(self, path, params=None):
+        render = {"id": "r1", "offer_id": "off-1", "video_path": self.video_path,
+                  "script_version_hash": "hash-1",
+                  "cover_path": None, "captions_path": None,
+                  "status": "rendered", "qc_status": "passed"}
         if path == "/renders":
-            return FakeResponse([{"id": "r1", "video_path": self.video_path,
-                                  "script_version_hash": "hash-1",
-                                  "cover_path": None, "captions_path": None,
-                                  "status": "rendered", "qc_status": "passed"}])
+            return FakeResponse([render])
+        if path.startswith("/renders/"):
+            return FakeResponse(render)
         if path.startswith("/offers/"):
             return FakeResponse({"id": "off-1", "state": "approved_for_video",
-                                 "expires_at": None, "recheck_at": None})
+                                 "expires_at": None,
+                                 "recheck_at": "2999-01-01T00:00:00+00:00"})
         if path == "/schedules":
             return FakeResponse([])
         return FakeResponse({})

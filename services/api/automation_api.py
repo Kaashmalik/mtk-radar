@@ -117,7 +117,7 @@ async def put_policy(body: PolicyIn, request: Request) -> dict[str, Any]:
         policy = normalize_policy(body.policy, base=current)
     except PolicyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(policy, actor=actor, action="automation:policy-update")
     return {"policy": policy, "summary": describe(policy)}
 
@@ -135,7 +135,7 @@ async def apply_preset(name: str, request: Request) -> dict[str, Any]:
     current = await load_policy()
     policy["paused"] = bool(current.get("paused", False))
     policy["dry_run"] = bool(current.get("dry_run", False))
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(policy, actor=actor, action=f"automation:preset:{name}")
     return {"policy": policy, "summary": describe(policy)}
 
@@ -146,7 +146,7 @@ async def pause_automation(request: Request, body: Optional[PauseIn] = None) -> 
     they are simply not auto-advanced. A human can still act."""
     policy = await load_policy()
     policy["paused"] = True
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(policy, actor=actor, action="automation:pause",
                       detail={"note": (body.note if body else None)})
     return {"policy": policy, "summary": describe(policy)}
@@ -157,7 +157,7 @@ async def resume_automation(request: Request) -> dict[str, Any]:
     policy = await load_policy()
     policy["paused"] = False
     policy["dry_run"] = False
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(policy, actor=actor, action="automation:resume")
     return {"policy": policy, "summary": describe(policy)}
 
@@ -225,7 +225,7 @@ async def start_automation(body: StartIn, request: Request) -> dict[str, Any]:
     policy["paused"] = False
     policy["dry_run"] = False
     policy = normalize_policy(policy)
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(
         policy, actor=actor, action="automation:start",
         detail={
@@ -250,7 +250,7 @@ async def stop_automation(request: Request, body: Optional[PauseIn] = None) -> d
     stop so the operator's intent is unmistakable in the trail."""
     policy = await load_policy()
     policy["paused"] = True
-    actor = effective_reviewer(request, None, default="operator")
+    actor = effective_reviewer(request, None, default="operator", require=True)
     await save_policy(
         policy, actor=actor, action="automation:stop",
         detail={"note": (body.note if body else None)},

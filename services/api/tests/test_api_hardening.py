@@ -121,12 +121,15 @@ def test_service_credentials_cannot_satisfy_a_human_reviewer(hardened_app):
         assert denied.status_code == 403
         assert "human reviewer credential" in denied.json()["detail"]
 
+        # An automation identity is still a machine credential: it may act on
+        # automation stages (require=False + explicit authorize) but must not
+        # satisfy a human-only attestation.
         automation = client.get(
             "/human", params={"reviewer": "automation:approve"},
             headers={"Authorization": "Bearer svc-secret"},
         )
-        assert automation.status_code == 200
-        assert automation.json()["actor"] == "automation:approve"
+        assert automation.status_code == 403
+        assert "human reviewer credential" in automation.json()["detail"]
 
         assert client.get("/whoami", headers={"Authorization": "Bearer svc-secret"}).json() == {
             "actor": None, "auth": "service",

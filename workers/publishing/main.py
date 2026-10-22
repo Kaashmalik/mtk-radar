@@ -98,6 +98,23 @@ class Publisher:
     def _limits(self) -> dict:
         return (self.policy or {}).get("guardrails") or {}
 
+    def _automation_allowed(self) -> bool:
+        """Re-read the kill switch before each irreversible operation.
+
+        A pause must stop an in-progress sweep, not only the next one. A
+        missing policy (old/unreachable API) keeps the legacy behaviour; the
+        upload itself will fail closed if the API is actually down.
+        """
+        policy = self._load_policy()
+        if policy is None:
+            return True
+        self.policy = policy
+        if policy.get("paused") or policy.get("dry_run"):
+            log.info("automation was paused/dry-run mid-sweep — stopping before the "
+                     "next irreversible operation")
+            return False
+        return True
+
     # ------------------------------------------------------------ adapters
 
     def build_adapters(self) -> dict[str, object]:
@@ -263,6 +280,8 @@ class Publisher:
                 log.info("stop requested — %d scheduled post(s) left for the next run",
                          len(due) - published)
                 break
+            if not self._automation_allowed():
+                break
             try:
                 if self._publish(post, adapters):
                     published += 1
@@ -302,6 +321,8 @@ class Publisher:
 
         patched = 0
         for post in posts:
+            if not self._automation_allowed():
+                break
             if post.get("platform") != "youtube" or not post.get("remote_post_id"):
                 continue
             if post.get("description_patched_at"):
@@ -363,6 +384,8 @@ class Publisher:
 
         requeued = 0
         for post in failed:
+            if not self._automation_allowed():
+                break
             # v0.23: a post on hold needs a human (e.g. an interrupted upload
             # whose outcome is unknown) — auto-retry must not touch it.
             if self._is_held(post):
@@ -451,10 +474,22 @@ class Publisher:
             # window between sweeps. Pausing (not failing) keeps the post
             # recoverable the moment the offer is re-verified.
             now = datetime.now(timezone.utc)
-            for field, label in (("expires_at", "offer expired"),
-                                 ("recheck_at", "offer recheck overdue")):
+            for field, label, required in (
+                ("expires_at", "offer expired", False),
+                ("recheck_at", "offer recheck overdue", True),
+            ):
                 due = offer.get(field)
                 if not due:
+                    if required:
+                        # Fail closed: the API treats a missing recheck deadline
+                        # as overdue, and the worker must agree. An old row with
+                        # no deadline is not evidence that the offer is fresh.
+                        self._block(
+                            post["id"],
+                            "offer has no recheck deadline — publish blocked "
+                            "until a human re-verifies it (§11/§17)",
+                        )
+                        return False
                     continue
                 due_dt = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
                 if due_dt.tzinfo is None:
@@ -762,14 +797,15 @@ class Publisher:
         if not render_id:
             return None
         try:
-            renders = self.api.get("/renders",
-                                   params={"offer_id": post["offer_id"]}).json()
-        except httpx.HTTPError:
+            render = self.api.get(f"/renders/{render_id}").json()
+        except (httpx.HTTPError, ValueError):
             return None
-        for render in renders or []:
-            if str(render.get("id")) == str(render_id):
-                return render
-        return None
+        if str(render.get("id")) != str(render_id):
+            return None
+        if str(render.get("offer_id")) != str(post["offer_id"]):
+            log.error("pinned render %s belongs to a different offer — refusing", render_id)
+            return None
+        return render
 
     def _materialize_checked(self, ref: str | None, expected_sha: str | None,
                              cache: Path, post: dict, label: str):

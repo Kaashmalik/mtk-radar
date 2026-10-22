@@ -45,14 +45,15 @@ type Analytics = {
   account_health: { platform: string; status: string; last_error: string | null }[];
   metrics_totals: {
     posts_measured: number;
-    views: number | string;
-    likes: number | string;
-    comments: number | string;
-    impressions: number | string;
-    link_clicks?: number | string;
-    subscribers_gained?: number | string;
+    views: number | string | null;
+    likes: number | string | null;
+    comments: number | string | null;
+    impressions: number | string | null;
+    link_clicks?: number | string | null;
+    subscribers_gained?: number | string | null;
     avg_ctr?: number | null;
     avg_retention_3s?: number | null;
+    posts_with_estimated_retention?: number;
     last_captured_at: string | null;
     published_total: number;
   } | null;
@@ -68,9 +69,15 @@ type Analytics = {
     avg_watch_s: number | null;
     ctr?: number | null;
     retention_3s?: number | null;
+    retention_3s_estimated?: boolean;
     link_clicks?: number | null;
     captured_at: string;
     source: string;
+    report_start?: string | null;
+    report_end?: string | null;
+    metric_definition?: string | null;
+    degraded?: boolean;
+    degradation_detail?: string | null;
     description_patched_at: string | null;
   }[];
   growth: {
@@ -425,10 +432,25 @@ export default async function AnalyticsPage() {
                           <td>{p.views ?? "–"}</td>
                           <td>{p.likes ?? "–"}</td>
                           <td>{p.comments ?? "–"}</td>
-                          <td>{p.retention_3s != null ? `${(Number(p.retention_3s) * 100).toFixed(0)}%` : "–"}</td>
+                          <td title={p.retention_3s_estimated
+                            ? "Nearest YouTube retention-curve bucket — an estimate, not an exact 3-second measurement"
+                            : "Reported by the platform"}>
+                            {p.retention_3s != null
+                              ? `${p.retention_3s_estimated ? "~" : ""}${(Number(p.retention_3s) * 100).toFixed(0)}%${p.retention_3s_estimated ? "*" : ""}`
+                              : "–"}
+                          </td>
                           <td>{p.link_clicks ?? "–"}</td>
                           <td className="small">
                             {new Date(p.captured_at).toLocaleDateString("en-GB", { timeZone: "Asia/Karachi" })}
+                            {p.report_start && p.report_end && (
+                              <span className="muted"> · report {p.report_start} → {p.report_end}</span>
+                            )}
+                            {p.degraded && (
+                              <span style={{ color: "var(--warn, #d29922)" }}
+                                    title={p.degradation_detail ?? "A metric group was rejected by the provider"}>
+                                {" "}· partial data
+                              </span>
+                            )}
                             {p.description_patched_at && (
                               <span className="muted"> · correction posted</span>
                             )}

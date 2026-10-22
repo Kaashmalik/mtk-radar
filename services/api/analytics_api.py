@@ -113,20 +113,25 @@ async def analytics() -> dict:
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
                  pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
-                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
+                 pm.retention_3s_estimated, pm.link_clicks, pm.subscribers_gained,
+                 pm.captured_at
           FROM post_metrics pm
           JOIN schedules s ON s.id = pm.schedule_id AND s.state = 'published'
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
+        -- SUM without COALESCE: no measured value and a measured zero are
+        -- different facts. The dashboard renders null as unavailable.
         SELECT COUNT(*)::int AS posts_measured,
-               COALESCE(SUM(views), 0)::bigint AS views,
-               COALESCE(SUM(likes), 0)::bigint AS likes,
-               COALESCE(SUM(comments), 0)::bigint AS comments,
-               COALESCE(SUM(impressions), 0)::bigint AS impressions,
-               COALESCE(SUM(link_clicks), 0)::bigint AS link_clicks,
-               COALESCE(SUM(subscribers_gained), 0)::bigint AS subscribers_gained,
+               SUM(views)::bigint AS views,
+               SUM(likes)::bigint AS likes,
+               SUM(comments)::bigint AS comments,
+               SUM(impressions)::bigint AS impressions,
+               SUM(link_clicks)::bigint AS link_clicks,
+               SUM(subscribers_gained)::bigint AS subscribers_gained,
                AVG(ctr)::double precision AS avg_ctr,
                AVG(retention_3s)::double precision AS avg_retention_3s,
+               COUNT(*) FILTER (WHERE retention_3s_estimated)::int
+                 AS posts_with_estimated_retention,
                MAX(captured_at) AS last_captured_at,
                (SELECT COUNT(*) FROM schedules WHERE state = 'published')::int AS published_total
         FROM latest
@@ -139,14 +144,19 @@ async def analytics() -> dict:
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
                  pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
-                 pm.link_clicks, pm.subscribers_gained, pm.captured_at, pm.source
+                 pm.retention_3s_estimated, pm.link_clicks, pm.subscribers_gained,
+                 pm.captured_at, pm.source, pm.report_start, pm.report_end,
+                 pm.metric_definition, pm.degraded, pm.degradation_detail
           FROM post_metrics pm
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
         SELECT s.id, s.platform, s.language, o.title AS offer_title, s.remote_post_id,
                l.views, l.likes, l.comments, l.impressions, l.avg_watch_s,
-               l.ctr, l.avg_view_duration_s, l.retention_3s, l.link_clicks,
+               l.ctr, l.avg_view_duration_s, l.retention_3s,
+               l.retention_3s_estimated, l.link_clicks,
                l.subscribers_gained, l.captured_at, l.source,
+               l.report_start, l.report_end, l.metric_definition,
+               l.degraded, l.degradation_detail,
                s.description_patched_at
         FROM schedules s
         JOIN offers o ON o.id = s.offer_id
@@ -166,13 +176,15 @@ async def analytics() -> dict:
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
                  pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
-                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
+                 pm.retention_3s_estimated, pm.link_clicks, pm.subscribers_gained,
+                 pm.captured_at
           FROM post_metrics pm
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
         SELECT s.id AS schedule_id, s.platform, s.language, s.metadata_variant,
                o.title AS offer_title, l.views, l.likes, l.comments, l.impressions,
                l.avg_watch_s, l.ctr, l.avg_view_duration_s, l.retention_3s,
+               l.retention_3s_estimated,
                l.link_clicks, l.subscribers_gained, l.captured_at
         FROM schedules s
         JOIN offers o ON o.id = s.offer_id
@@ -192,9 +204,9 @@ async def analytics() -> dict:
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
         SELECT s.language, COUNT(*)::int AS posts,
-               COALESCE(SUM(l.views), 0)::bigint AS views,
-               COALESCE(AVG(l.views), 0)::double precision AS avg_views,
-               COALESCE(SUM(l.likes + l.comments), 0)::bigint AS interactions
+               SUM(l.views)::bigint AS views,
+               AVG(l.views)::double precision AS avg_views,
+               SUM(l.likes + l.comments)::bigint AS interactions
         FROM schedules s
         JOIN latest l ON l.schedule_id = s.id
         WHERE s.state = 'published'

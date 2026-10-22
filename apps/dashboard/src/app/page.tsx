@@ -10,6 +10,7 @@ import "./styles.css";
 import Link from "next/link";
 
 import AutomationCard from "./AutomationCard";
+import { InboxActions } from "./InboxActions";
 import RadarScope, { type RadarCandidate } from "./RadarScope";
 import { apiFetch } from "@/lib/api";
 
@@ -240,6 +241,7 @@ export default async function Home() {
                   <th>Source</th>
                   <th>Tier</th>
                   <th>Observed</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -262,6 +264,13 @@ export default async function Home() {
                     </td>
                     <td className="muted small">
                       {new Date(item.observed_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })}
+                    </td>
+                    <td>
+                      <InboxActions
+                        itemId={item.id}
+                        provider={item.source_provider}
+                        category={item.source_category}
+                      />
                     </td>
                   </tr>
                 ))}

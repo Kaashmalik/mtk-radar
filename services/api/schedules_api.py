@@ -16,7 +16,7 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -760,8 +760,20 @@ class AttemptIn(BaseModel):
 
 @router.post("/schedules/{schedule_id}/attempt")
 async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
-    """Atomically claim an upload attempt. Exactly one worker can hold it."""
+    """Atomically claim an upload attempt. Exactly one worker can hold it.
+
+    The kill switch is enforced HERE, not only at sweep start: pausing
+    automation must refuse a fresh upload authorization even if a worker is
+    already mid-sweep.
+    """
     pool = db.get()
+    policy = await load_policy()
+    if policy.get("paused") or policy.get("dry_run"):
+        raise HTTPException(
+            status_code=409,
+            detail="upload authorization refused: automation is "
+                   + ("paused" if policy.get("paused") else "in dry-run mode"),
+        )
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))
@@ -1087,6 +1099,16 @@ class MetricsIn(BaseModel):
     subscribers_gained: Optional[int] = None
     source: str = Field(min_length=3, max_length=64)
     raw: dict = Field(default_factory=dict)
+    # Provenance (plan §7.F.5): which period/definition produced the numbers,
+    # and what the provider refused. Unknown stays null, never guessed.
+    report_start: Optional[date] = None
+    report_end: Optional[date] = None
+    metric_definition: Optional[str] = Field(default=None, max_length=256)
+    degraded: bool = False
+    degradation_detail: Optional[str] = Field(default=None, max_length=2000)
+    # retention_3s is a nearest-bucket estimate unless the provider exposes an
+    # exact measurement; the dashboard must qualify it (plan §7.F.6).
+    retention_3s_estimated: bool = False
 
 
 @router.post("/schedules/{schedule_id}/metrics", status_code=201)
@@ -1108,19 +1130,25 @@ async def ingest_metrics(schedule_id: uuid.UUID, body: MetricsIn) -> dict:
                 INSERT INTO post_metrics
                     (schedule_id, platform, views, likes, comments, shares, impressions,
                      avg_watch_s, avg_view_duration_s, avg_view_percentage, ctr,
-                     retention_3s, link_clicks, subscribers_gained, source, raw)
+                     retention_3s, link_clicks, subscribers_gained, source, raw,
+                     report_start, report_end, metric_definition, degraded,
+                     degradation_detail, retention_3s_estimated)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                        $16::jsonb)
+                        $16::jsonb, $17, $18, $19, $20, $21, $22)
                 """,
                 schedule_id, body.platform, body.views, body.likes, body.comments,
                 body.shares, body.impressions, body.avg_watch_s, body.avg_view_duration_s,
                 body.avg_view_percentage, body.ctr, body.retention_3s, body.link_clicks,
                 body.subscribers_gained, body.source, json.dumps(body.raw),
+                body.report_start, body.report_end, body.metric_definition,
+                body.degraded, body.degradation_detail, body.retention_3s_estimated,
             )
     latest = await pool.fetchrow(
         "SELECT views, likes, comments, shares, impressions, avg_watch_s, "
         "avg_view_duration_s, avg_view_percentage, ctr, retention_3s, link_clicks, "
-        "subscribers_gained, captured_at FROM post_metrics WHERE schedule_id = $1 "
+        "subscribers_gained, source, captured_at, report_start, report_end, "
+        "metric_definition, degraded, degradation_detail, retention_3s_estimated "
+        "FROM post_metrics WHERE schedule_id = $1 "
         "ORDER BY captured_at DESC LIMIT 1",
         schedule_id,
     )
@@ -1134,7 +1162,9 @@ async def list_metrics(schedule_id: uuid.UUID) -> dict:
     rows = await pool.fetch(
         """SELECT views, likes, comments, shares, impressions, avg_watch_s,
                   avg_view_duration_s, avg_view_percentage, ctr, retention_3s,
-                  link_clicks, subscribers_gained, source, captured_at
+                  retention_3s_estimated, link_clicks, subscribers_gained, source,
+                  captured_at, report_start, report_end, metric_definition,
+                  degraded, degradation_detail
            FROM post_metrics WHERE schedule_id = $1
            ORDER BY captured_at DESC LIMIT 90""",
         schedule_id,

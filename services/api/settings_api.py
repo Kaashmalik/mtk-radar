@@ -208,7 +208,13 @@ async def put_setting(key: str, body: SettingIn, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     pool = db.get()
-    updated_by = effective_reviewer(request, None, default="operator")
+    # Automation policy is a human control, not a worker preference. The same
+    # policy can be written through this generic route, so the human gate must
+    # apply here too (not only on /automation/policy).
+    updated_by = effective_reviewer(
+        request, None, default="operator",
+        require=key == "automation_policy",
+    )
     await put_value(pool, key, normalized, updated_by=updated_by)
     await audit(pool, actor=updated_by, action="settings:update", entity="settings",
                 detail={"key": key, "value": normalized})

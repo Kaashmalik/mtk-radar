@@ -1614,6 +1614,94 @@ def test_retyping_an_offer_rechecks_against_the_new_contract(client):
 
 AUTH = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 SVC = {"Authorization": "Bearer svc-token"}
+#: A real human reviewer credential. Human-only gates (policy changes,
+#: redaction/correction attestation, variant approval, experiment decisions)
+#: must reject SVC and require this.
+HUMAN = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+
+def test_inbox_and_radar_cursors_reach_the_tail_and_scan_marks_items_processed(client, source):
+    """Scoring an item is processing it, and a fixed page must not hide the tail.
+
+    The radar scan used to re-read the same newest unprocessed rows forever and
+    never drained the inbox; this walks both cursors and asserts the scan
+    advances past the first page.
+    """
+    import uuid as uuidlib
+
+    source_id = uuidlib.UUID(source)
+    created: list[str] = []
+    marker = uuidlib.uuid4().hex
+    for index in range(5):
+        row = _run(
+            """
+            INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                               observed_at, text_hash)
+            VALUES ($1, $5, $2, $2, $3, now() + ($4 || ' seconds')::interval, $6)
+            RETURNING id
+            """,
+            source_id,
+            f"https://example.com/cursor-{marker}-{index}",
+            f"Cursor item {marker} {index}",
+            str(300 - index),
+            f"cursor-{marker}-{index}",
+            f"hash-{marker}-{index}",
+        )[0]
+        created.append(str(row["id"]))
+
+    # Inbox: walk every unprocessed item; ours must be reachable.
+    seen: list[str] = []
+    cursor = None
+    while True:
+        params = {"processed": "false", "limit": 2}
+        if cursor:
+            params["cursor"] = cursor
+        page = client.get("/items", params=params,
+                          headers={"Origin": "http://localhost:3000"})
+        assert page.status_code == 200, page.text
+        rows = page.json()
+        seen.extend(str(row["id"]) for row in rows)
+        cursor = page.headers.get("X-Next-Cursor")
+        if not cursor:
+            break
+        assert len(seen) < 10_000, "cursor never terminated"
+    assert set(created) <= set(seen), "the inbox tail must be reachable"
+    assert "x-next-cursor" in page.headers.get("access-control-expose-headers", "").lower()
+
+    # Scan in two small pages: the second must see items the first did not.
+    first = client.post("/trends/scan", params={"limit": 2})
+    assert first.status_code == 201, first.text
+    assert first.json()["processed"] == 2, first.json()
+    second = client.post("/trends/scan", params={"limit": 2})
+    assert second.status_code == 201, second.text
+    assert second.json()["processed"] == 2, second.json()
+
+    remaining = client.get("/items", params={"processed": "false"}).json()
+    assert not (set(created[:3]) & {str(row["id"]) for row in remaining}), \
+        "a scanned item must leave the unprocessed inbox"
+
+    # Radar: walk every candidate and make sure our processed items are there.
+    radar_ids: set[str] = set()
+    cursor = None
+    while True:
+        params = {"limit": 2}
+        if cursor:
+            params["cursor"] = cursor
+        page = client.get("/trends", params=params)
+        assert page.status_code == 200, page.text
+        radar_ids.update(str(row["id"]) for row in page.json()["candidates"])
+        cursor = page.headers.get("X-Next-Cursor")
+        if not cursor:
+            break
+        assert len(radar_ids) < 10_000, "cursor never terminated"
+    candidate_ids = {str(row["id"]) for row in _run(
+        "SELECT id FROM trend_candidates WHERE url LIKE $1",
+        f"https://example.com/cursor-{marker}-%")}
+    assert candidate_ids and candidate_ids <= radar_ids, \
+        "every scored candidate must be reachable through the radar cursor"
+
+    bad = client.get("/trends", params={"cursor": "not-a-cursor"})
+    assert bad.status_code == 422
 
 def test_whoami_distinguishes_reviewer_service_and_anonymous(auth_client):
     r = auth_client.get("/whoami")
@@ -1830,12 +1918,23 @@ def test_metrics_ingest_upserts_one_daily_snapshot(auth_client):
     second = auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
         "platform": "youtube", "source": "youtube-analytics",
         "views": 150, "likes": 9, "comments": 4, "avg_watch_s": 95.0, "raw": {"n": 2},
+        "report_start": "2026-10-01", "report_end": "2026-10-22",
+        "metric_definition": "youtube-analytics-v2:core,audience",
+        "degraded": True,
+        "degradation_detail": "impressions: unsupported for this report",
+        "retention_3s": 0.61, "retention_3s_estimated": True,
     })
     assert second.status_code == 201
 
     rows = auth_client.get(f"/schedules/{sid}/metrics", headers=SVC).json()["metrics"]
     assert len(rows) == 1, "same-day re-pull must REPLACE, not duplicate"
     assert rows[0]["views"] == 150 and rows[0]["comments"] == 4
+    assert rows[0]["report_start"] == "2026-10-01"
+    assert rows[0]["report_end"] == "2026-10-22"
+    assert rows[0]["degraded"] is True
+    assert "unsupported" in rows[0]["degradation_detail"]
+    assert rows[0]["retention_3s_estimated"] is True, \
+        "a bucket estimate must never be stored as an exact measurement"
 
 
 def test_analytics_content_performance_and_patch_marker(auth_client):
@@ -1855,13 +1954,19 @@ def test_analytics_content_performance_and_patch_marker(auth_client):
 
     auth_client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
         "platform": "youtube", "source": "youtube-analytics", "views": 77, "likes": 3,
+        "retention_3s": 0.55, "retention_3s_estimated": True,
+        "degraded": True, "degradation_detail": "impressions rejected",
+        "report_start": "2026-10-01", "report_end": "2026-10-22",
     })
 
     data = auth_client.get("/analytics", headers=SVC).json()
     totals = data["metrics_totals"]
     assert totals["posts_measured"] >= 1 and int(totals["views"]) >= 77
+    assert totals["posts_with_estimated_retention"] >= 1
     perf = {str(row["id"]): row for row in data["content_performance"]}
     assert str(sid) in perf and perf[str(sid)]["views"] == 77
+    assert perf[str(sid)]["retention_3s_estimated"] is True
+    assert perf[str(sid)]["degraded"] is True
 
     not_published = _run(
         "INSERT INTO schedules (offer_id, platform, state, local_time, privacy, idempotency_key) "
@@ -1934,6 +2039,24 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     mine = [c for c in candidates if c["offer_id"] == offer["id"]]
     assert len(mine) == 1, "a failed QC attempt must not hide the retryable offer"
+
+    # Retries are bounded: after three failures for this exact revision/preset,
+    # the sweep stops queueing it. The failures remain in the dead letter for a
+    # human, and a new script revision starts a fresh count.
+    for attempt in range(2):
+        more = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+            "preset": "landscape", "width": 1920, "height": 1080,
+            "video_path": f"projects/x/render-failed-{attempt}.mp4", "script_version": 1,
+            "script_version_hash": version_hash, "capture_id": str(capture_id),
+            "status": "qc_failed", "qc_status": "failed",
+            "qc_report": {"version": 1, "status": "failed", "errors": ["still bad"]},
+        })
+        assert more.status_code == 201, more.text
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in candidates if c["offer_id"] == offer["id"]]
+    assert mine and mine[0]["missing_presets"] == ["vertical"], (
+        "three failed attempts must stop automatic retry for that preset"
+    )
 
     # a measured, passed render for this exact script version disqualifies it
     created = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
@@ -2722,7 +2845,7 @@ def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
 # --------------------------------------- v0.26: automation policy + gates
 
 def _set_policy(auth_client, body):
-    res = auth_client.put("/automation/policy", headers=SVC, json={"policy": body})
+    res = auth_client.put("/automation/policy", headers=HUMAN, json={"policy": body})
     assert res.status_code == 200, res.text
     return res.json()["policy"]
 
@@ -2740,17 +2863,30 @@ def test_automation_policy_roundtrip_validation_and_presets(auth_client):
     assert set(manual["stages"].values()) == {"human"}
     assert manual["guardrails"]["auto_retry"] is False
 
-    bad = auth_client.put("/automation/policy", headers=SVC, json={
+    bad = auth_client.put("/automation/policy", headers=HUMAN, json={
         "policy": {"mode": "autopilot", "guardrails": {"auto_publish_max_per_day": -1}},
     })
     assert bad.status_code == 422, "invalid guardrails must be refused"
 
-    bad_stage = auth_client.put("/automation/policy", headers=SVC, json={
+    bad_stage = auth_client.put("/automation/policy", headers=HUMAN, json={
         "policy": {"stages": {"verify": "sometimes"}},
     })
     assert bad_stage.status_code == 422
 
-    preset = auth_client.post("/automation/preset/autopilot", headers=SVC)
+    # A worker/service credential must not arm, pause or tune automation.
+    machine_write = auth_client.put("/automation/policy", headers=SVC, json={
+        "policy": {"mode": "manual"},
+    })
+    assert machine_write.status_code == 403, machine_write.text
+    machine_pause = auth_client.post("/automation/pause", headers=SVC, json={"note": "x"})
+    assert machine_pause.status_code == 403, machine_pause.text
+    machine_settings = auth_client.put(
+        "/settings/automation_policy", headers=SVC,
+        json={"value": {"mode": "manual"}},
+    )
+    assert machine_settings.status_code == 403, machine_settings.text
+
+    preset = auth_client.post("/automation/preset/autopilot", headers=HUMAN)
     assert preset.status_code == 200, preset.text
     assert set(preset.json()["policy"]["stages"].values()) == {"auto"}
 
@@ -2761,19 +2897,19 @@ def test_automation_policy_roundtrip_validation_and_presets(auth_client):
     assert "budget" in body and "queue" in body
 
     # the generic keyed settings route accepts (and validates) the same policy
-    via_settings = auth_client.put("/settings/automation_policy", headers=SVC,
+    via_settings = auth_client.put("/settings/automation_policy", headers=HUMAN,
                                    json={"value": {"mode": "assisted"}})
     assert via_settings.status_code == 200, via_settings.text
     assert via_settings.json()["value"]["mode"] == "assisted"
     fetched_setting = auth_client.get("/settings/automation_policy", headers=SVC)
     assert fetched_setting.json()["value"]["stages"]["approve"] == "human"
 
-    paused = auth_client.post("/automation/pause", headers=SVC, json={"note": "test"})
+    paused = auth_client.post("/automation/pause", headers=HUMAN, json={"note": "test"})
     assert paused.json()["policy"]["paused"] is True
     # choosing a mode must not silently clear the kill switch
-    still_paused = auth_client.post("/automation/preset/assisted", headers=SVC)
+    still_paused = auth_client.post("/automation/preset/assisted", headers=HUMAN)
     assert still_paused.json()["policy"]["paused"] is True
-    resumed = auth_client.post("/automation/resume", headers=SVC)
+    resumed = auth_client.post("/automation/resume", headers=HUMAN)
     assert resumed.json()["policy"]["paused"] is False
     _reset_policy(auth_client)
 
@@ -2979,7 +3115,7 @@ def test_human_stage_refuses_automation_actor(auth_client):
     denied_resume = auth_client.post(f"/schedules/{sid}/resume", headers=SVC,
                                      params={"reviewer": "automation:schedule"})
     assert denied_resume.status_code == 403, denied_resume.text
-    assert "named human" in denied_resume.json()["detail"]
+    assert "human" in denied_resume.json()["detail"]
     denied_transition = auth_client.post(f"/schedules/{sid}/transition", headers=SVC,
                                          json={"to": "scheduled",
                                                "reviewer": "automation:schedule"})
@@ -3055,7 +3191,12 @@ def test_variant_approval_gates_experiments_and_decisions_are_audited(auth_clien
     })
     assert draft.status_code == 409, "a draft variant cannot enter an experiment"
 
-    approved = auth_client.post(f"/studio/variants/{variant_id}/approve", headers=SVC, json={"approved": True})
+    # Machine credentials may not approve copy or declare an experiment result.
+    machine_approve = auth_client.post(
+        f"/studio/variants/{variant_id}/approve", headers=SVC, json={"approved": True})
+    assert machine_approve.status_code == 403, machine_approve.text
+
+    approved = auth_client.post(f"/studio/variants/{variant_id}/approve", headers=HUMAN, json={"approved": True})
     assert approved.status_code == 200, approved.text
     assert approved.json()["status"] == "approved"
 
@@ -3090,7 +3231,13 @@ def test_variant_approval_gates_experiments_and_decisions_are_audited(auth_clien
     assert assigned.status_code == 200, assigned.text
     assert assigned.json()["status"] == "running"
 
-    decided = auth_client.post(f"/studio/experiments/{experiment_id}/decide", headers=SVC, json={
+    machine_decision = auth_client.post(
+        f"/studio/experiments/{experiment_id}/decide", headers=SVC, json={
+            "status": "won", "note": "machine", "result": {},
+        })
+    assert machine_decision.status_code == 403, machine_decision.text
+
+    decided = auth_client.post(f"/studio/experiments/{experiment_id}/decide", headers=HUMAN, json={
         "status": "won", "note": "retention +11%",
         "result": {"retention_3s": 0.62},
     })
@@ -3226,14 +3373,17 @@ def test_heartbeat_registry_attention_and_one_click_start(auth_client):
     assert any(c["id"] == "render_toolchain" and c["status"] == "pass"
                for c in report["checks"])
 
-    started = auth_client.post("/automation/start", headers=SVC, json={"mode": "assisted"})
+    machine_start = auth_client.post("/automation/start", headers=SVC,
+                                     json={"mode": "assisted"})
+    assert machine_start.status_code == 403, machine_start.text
+    started = auth_client.post("/automation/start", headers=HUMAN, json={"mode": "assisted"})
     assert started.status_code == 200, started.text
     body = started.json()
     assert body["started"] is True
     assert body["policy"]["paused"] is False
     assert body["policy"]["stages"]["approve"] == "human"
 
-    stopped = auth_client.post("/automation/stop", headers=SVC, json={"note": "test"})
+    stopped = auth_client.post("/automation/stop", headers=HUMAN, json={"note": "test"})
     assert stopped.status_code == 200, stopped.text
     assert stopped.json()["policy"]["paused"] is True
     _set_policy(auth_client, {"mode": "assisted", "paused": False, "dry_run": False})
@@ -3262,3 +3412,27 @@ def test_autopilot_start_requires_a_notification_channel(auth_client):
         "/automation/start", headers=SVC, json={"mode": "autopilot_public"},
     )
     assert public.status_code == 422, "public autopilot needs explicit acknowledgement"
+
+def test_upload_authorization_refuses_while_automation_is_paused(auth_client):
+    import uuid as uuidlib
+
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Paused Claim Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-paused-attempt', 'hash-paused') RETURNING id
+        """,
+        uuidlib.UUID(offer["id"]),
+    )[0]["id"]
+
+    _set_policy(auth_client, {"paused": True})
+    try:
+        refused = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+        assert refused.status_code == 409, refused.text
+        assert "paused" in refused.json()["detail"]
+    finally:
+        _set_policy(auth_client, {"mode": "assisted", "paused": False, "dry_run": False})
