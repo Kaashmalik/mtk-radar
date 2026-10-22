@@ -8,24 +8,37 @@
 still not a production-readiness certificate, and not a promise of views,
 subscribers or revenue.
 
-**Implementation status (22 October 2026, after the audit):** all P0 findings
-are implemented and tested (`a34bfb2`, `d5473a4`, `c814444`). P1 is partially
-complete: immutable revision/attempt media keys, persisted resumable upload
-sessions with provider-offset recovery and human held-upload reconciliation,
-mandatory YouTube package assets, a speech-authoritative render timeline without
+**Implementation status (22 October 2026, after the audit and the P1
+completion pass):** all P0 findings are implemented and tested (`a34bfb2`,
+`d5473a4`, `c814444`). P1 is now implemented for the code-scoped findings:
+immutable revision/attempt media keys, persisted resumable upload sessions with
+provider-offset recovery and human held-upload reconciliation, mandatory
+YouTube package assets, a speech-authoritative render timeline without
 `-shortest`, and corrected growth-score zero/unavailable and unit handling.
-Verification on the audit machine: **818 backend tests passed** against a
-disposable PostgreSQL database, dashboard **typecheck and production build
-passed**, and the authenticated **Playwright suite passed 8/8**. That is
-code/test evidence only; it is not live-provider or deployment proof.
+This pass also adds opaque **keyset cursors** on every growing list endpoint,
+**per-preset render-queue coverage** (a finished landscape export no longer
+hides a missing vertical one), immutable **API/dashboard/worker images** with
+private database/cache networking and explicit media volumes, authenticated
+**video playback with byte-range seeking** in the review desk, and a
+compliance-gated growth score that is **off by default**.
+
+Verification on the audit machine: **845 backend tests passed** (100 of them
+against a disposable PostgreSQL database with real migrations), Python
+lint/compile, dashboard **typecheck and production build passed**, base and dev
+**compose configurations validated**, and the authenticated **Playwright suite
+passed 8/8**. That is code/test evidence only; it is not live-provider or
+deployment proof.
 
 Still **not demonstrated**: live credentials, accounts, domain/TLS, S3/R2
-storage, real YouTube upload/metrics/restore proof, production image and private
-network hardening, cursor pagination/durable jobs, and full editorial or
-scene-timeline QC with final human playback review. Asymmetric acquisition
-signing and semantic applicable-terms proof remain blocked on dependency and
-product decisions. The system remains a **strong prototype in active
-hardening**, not production-ready or fully autonomous.
+storage, real YouTube upload/metrics/restore proof, an image build and private
+network actually operated on a deployment host, and full editorial or
+scene-timeline QC with final human playback review. The per-preset queue and
+cursors replace the starvation bug, but a durable PostgreSQL-backed job/outbox
+is still the recommended week-3 architecture rather than an implemented
+subsystem. Asymmetric acquisition signing and semantic applicable-terms proof
+remain blocked on dependency and product decisions. The system remains a
+**strong prototype in active hardening**, not production-ready or fully
+autonomous.
 
 **Scope:** dashboard, API, collectors, verification, capture, render, publishing,
 metrics, automation policy, deployment, CI and the existing master plan. The
@@ -357,10 +370,11 @@ irreversible operation, not only once at the start of a long publishing sweep.
 
 Call the system functional only when all of these are demonstrated and recorded.
 Automated tests now cover the security boundary, blocking release checks,
-revision-scoped media keys, resumable-session persistence, package holds and
-growth-score units. Unchecked items below still require live services, operator
-evidence or product decisions; do not replace that evidence with a passing unit
-test.
+revision-scoped media keys, resumable-session persistence, package holds,
+growth-score units and compliance default, keyset cursors, per-preset render
+coverage, and media range parsing. Unchecked items below still require live
+services, operator evidence or product decisions; do not replace that evidence
+with a passing unit test.
 
 - [ ] A complete dashboard-driven production workflow works end to end.
 - [ ] Unauthorised visitors and workers cannot reach human-only capabilities.

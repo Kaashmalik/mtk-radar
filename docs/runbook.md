@@ -29,10 +29,35 @@ Companion documents:
 ```bash
 cp .env.example .env          # then set POSTGRES_PASSWORD for anything real
 ./scripts/mtk-start.sh        # API + dashboard + migrations + worker profile
-# or, manually:
-# docker compose -f infra/docker/docker-compose.yml up -d
+# or, manually (builds immutable images):
+# docker compose -f infra/docker/docker-compose.yml up -d --build
 # docker compose -f infra/docker/docker-compose.yml --profile workers up -d
 ```
+
+### Production images, private networking and dev mode (v0.31)
+
+The base compose file is now deployment-shaped:
+
+- `api`, `dashboard` and the shared worker image are **built once** and start
+  without `pip install`, `npm install` or `apt-get` on every restart.
+- PostgreSQL, Redis and MinIO are **not published to the host**; only the
+  dashboard (`3000`) is exposed and the API binds to `127.0.0.1:8000` for a
+  local reverse proxy. Nothing else on the network can reach the database.
+- Media lives on explicit named volumes (`storage-data`, `render-projects`,
+  `storage-cache`) — `docker compose down` keeps them; `down -v` destroys them.
+- The dashboard has a `/api/health` liveness probe; the API `/health` probe
+  already checks the database and migration readiness.
+
+For host-side development (published Postgres/Redis/MinIO ports, live-reload
+API, Next dev server with a bind mount):
+
+```bash
+docker compose -f infra/docker/docker-compose.yml \
+               -f infra/docker/docker-compose.dev.yml up --build
+```
+
+Never use the dev override on a reachable host: it republishes the database
+and cache ports.
 
 ### Laptop-first start, heartbeats and the Start button (v0.30)
 
@@ -338,8 +363,10 @@ host fails the post with an actionable message ("set MTK_STORAGE_BACKEND or
 run on the render host") instead of a silent file-missing error.
 
 **Compose:** `docker compose --profile workers --profile storage up` starts
-MinIO + bucket creation (`storage-init`). Render remains a host-side run
-(ffmpeg + browser assets) — it uploads over HTTP to MinIO wherever it runs.
+MinIO + bucket creation (`storage-init`). The render worker ships in the shared
+worker image with ffmpeg preinstalled and writes to the `render-projects` and
+`storage-cache` volumes; with `MTK_STORAGE_BACKEND=local` the API reads the same
+`storage-data` volume, and with `s3` it streams ranges straight from MinIO/S3.
 
 **Implementation:** `packages/object_storage/` — zero-dep (httpx only),
 hand-rolled AWS SigV4 validated against AWS's published test vectors *and*
