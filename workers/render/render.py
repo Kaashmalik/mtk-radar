@@ -18,6 +18,40 @@ FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
 
 
+def resolve_timeline(
+    capture_s: Optional[float],
+    narration_s: Optional[float],
+    *,
+    narration_used: bool = False,
+    tolerance_s: float = 0.5,
+) -> tuple[Optional[float], Optional[str]]:
+    """Resolve the render duration from the measured speech timeline.
+
+    `-shortest` silently chose whichever stream ended first: a short capture
+    could cut narration, and a short narration could cut footage. The narration
+    is now authoritative. A capture that cannot cover it fails closed instead
+    of producing a quietly truncated video.
+    """
+    if not narration_used:
+        return (capture_s if capture_s and capture_s > 0 else None), None
+    if narration_s is None or narration_s <= 0:
+        return (capture_s if capture_s and capture_s > 0 else None), (
+            "narration track exists but its duration is unreadable; cannot "
+            "verify speech/action alignment"
+        )
+    if capture_s is None or capture_s <= 0:
+        return narration_s, (
+            "capture duration is unavailable; cannot verify speech/action alignment"
+        )
+    if capture_s + tolerance_s < narration_s:
+        return narration_s, (
+            f"speech track is {narration_s:.2f}s but the capture is only "
+            f"{capture_s:.2f}s; re-record coverage or shorten the script "
+            "(refusing to truncate narration)"
+        )
+    return narration_s, None
+
+
 def build_ffmpeg_cmd(
     video: str,
     output: str,
@@ -25,16 +59,21 @@ def build_ffmpeg_cmd(
     captions: Optional[str] = None,
     narration: Optional[str] = None,
     motion: Optional[str] = None,
+    duration: Optional[float] = None,
 ) -> list[str]:
     """Build the full ffmpeg invocation for one preset.
 
     - video/narration/captions are RELATIVE paths (run with cwd=project dir)
       so subtitles filters never need OS-specific escaping.
     - `motion` is a filter fragment from motion.py (push/crop/lower-third).
+    - `duration` is the measured speech timeline. It is required with
+      narration so no stream can be truncated implicitly by `-shortest`.
     """
     for asset in (video, output, captions, narration):
         if asset and (Path(asset).is_absolute() or PureWindowsPath(asset).is_absolute()):
             raise ValueError("use relative asset paths; run with cwd=project folder")
+    if narration and (duration is None or duration <= 0):
+        raise ValueError("narration renders require a positive measured duration")
 
     cmd = [FFMPEG, "-y", "-i", video]
     audio_map = "0:a?"
@@ -54,7 +93,7 @@ def build_ffmpeg_cmd(
         graph = preset.filter_chain + f";[vbase]{','.join(post) or 'null'}[vout]"
         cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", audio_map]
         if narration:
-            cmd += ["-shortest"]
+            cmd += ["-t", f"{duration:.3f}"]
         cmd += [
             "-c:v", "libx264",
             "-preset", "medium",
@@ -76,7 +115,7 @@ def build_ffmpeg_cmd(
         vf += f",subtitles={captions}"
     cmd += ["-map", "0:v", "-map", audio_map]
     if narration:
-        cmd += ["-shortest"]
+        cmd += ["-t", f"{duration:.3f}"]
 
     cmd += [
         "-vf", vf,

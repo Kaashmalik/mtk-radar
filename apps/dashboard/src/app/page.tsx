@@ -123,7 +123,12 @@ export default async function Home() {
           <div className="metric-row"><span>Hot leads</span><strong>{trends.summary.hot}</strong></div>
           <div className="metric-row"><span>Awaiting a human</span><strong>{needsYou}</strong></div>
           <div className="metric-row"><span>Scheduled / approval</span><strong>{scheduled}</strong></div>
-          <div className="metric-row"><span>Growth score</span><strong>{growth.toFixed(1)}<span className="muted small">/100</span></strong></div>
+          <div className="metric-row">
+            <span title="Internal directional blend of measured fields, not a platform metric">
+              Growth score <span className="muted small">(internal)</span>
+            </span>
+            <strong>{growth.toFixed(1)}<span className="muted small">/100</span></strong>
+          </div>
           {topRecommendation && (
             <p className="small muted" style={{ marginTop: "0.8rem", marginBottom: 0 }}>
               <strong style={{ color: "var(--text)" }}>Next move:</strong> {topRecommendation.title}

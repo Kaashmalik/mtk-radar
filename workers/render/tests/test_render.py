@@ -4,7 +4,7 @@ import pytest
 
 from presets import PRESETS, get_preset
 from project import build_edit_manifest, write_preset_captions
-from render import build_ffmpeg_cmd, describe
+from render import build_ffmpeg_cmd, describe, resolve_timeline
 
 
 class TestPresets:
@@ -69,20 +69,57 @@ class TestFfmpegCommand:
                 "capture.mp4", "out.mp4", get_preset("landscape"), captions="C:/abs/cap.srt"
             )
 
-    def test_narration_maps_second_input(self):
+    def test_narration_maps_second_input_and_measured_duration(self):
         cmd = build_ffmpeg_cmd(
-            "capture.mp4", "out.mp4", get_preset("landscape"), narration="assets/narration.mp3"
+            "capture.mp4", "out.mp4", get_preset("landscape"),
+            narration="assets/narration.mp3", duration=12.0,
         )
         joined = describe(cmd)
         assert "-i assets/narration.mp3" in joined
         assert "-map 1:a" in joined
-        assert "-shortest" in joined
+        assert "-t 12.000" in joined
+        assert "-shortest" not in cmd, "the shorter stream must not decide the timeline"
+
+    def test_narration_requires_a_measured_duration(self):
+        with pytest.raises(ValueError, match="measured duration"):
+            build_ffmpeg_cmd(
+                "capture.mp4", "out.mp4", get_preset("landscape"),
+                narration="assets/narration.mp3",
+            )
 
     def test_without_narration_uses_capture_audio_if_present(self):
         cmd = build_ffmpeg_cmd("capture.mp4", "out.mp4", get_preset("landscape"))
         assert cmd[cmd.index("-map") + 1] == "0:v"
         assert cmd[cmd.index("-map", cmd.index("-map") + 1) + 1] == "0:a?"
         assert "-shortest" not in cmd
+        assert "-t" not in cmd
+
+
+class TestTimeline:
+    def test_speech_is_authoritative_and_capture_overshoot_is_trimmed(self):
+        expected, error = resolve_timeline(15.0, 12.0, narration_used=True)
+        assert expected == 12.0
+        assert error is None
+
+    def test_capture_that_cannot_cover_speech_fails_closed(self):
+        expected, error = resolve_timeline(8.0, 12.0, narration_used=True)
+        assert expected == 12.0
+        assert error and "refusing to truncate narration" in error
+
+    def test_missing_capture_probe_fails_closed(self):
+        expected, error = resolve_timeline(None, 12.0, narration_used=True)
+        assert expected == 12.0
+        assert error and "unavailable" in error
+
+    def test_unreadable_narration_probe_fails_closed(self):
+        expected, error = resolve_timeline(12.0, None, narration_used=True)
+        assert expected == 12.0
+        assert error and "unreadable" in error
+
+    def test_without_narration_the_capture_is_the_timeline(self):
+        expected, error = resolve_timeline(9.5, None)
+        assert expected == 9.5
+        assert error is None
 
 
 class TestEditManifest:
