@@ -254,6 +254,7 @@ import api_hardening
 from attention_api import router as _attention_router
 from automation_api import router as _automation_router
 from captures_api import router as _captures_router
+from media_api import router as _media_router
 from offers_api import router as _offers_router
 from renders_api import router as _renders_router
 from schedules_api import router as _schedules_router
@@ -321,9 +322,9 @@ def auth_client(client):
         await db.close()
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
-              _settings_router, _analytics_router, _health_router, _locks_router,
-              _automation_router, _studio_router, _attention_router, _workers_router,
-              _upload_sessions_router):
+              _media_router, _settings_router, _analytics_router, _health_router,
+              _locks_router, _automation_router, _studio_router, _attention_router,
+              _workers_router, _upload_sessions_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -1910,6 +1911,14 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     assert len(mine) == 1, "verified + script + reviewed capture = ready to render"
     assert mine[0]["script_version"] == 1
     assert mine[0]["capture_id"]
+    assert mine[0]["missing_presets"] == ["landscape", "vertical"]
+
+    # asking for only one preset narrows the work, not the backlog
+    only_landscape = auth_client.get(
+        "/render-candidates", params={"presets": "landscape"}, headers=SVC
+    ).json()
+    mine = [c for c in only_landscape if c["offer_id"] == offer["id"]]
+    assert mine and mine[0]["missing_presets"] == ["landscape"]
 
     # a QC-rejected attempt stays in the dead letter but does NOT disqualify
     # the offer from being retried by the render sweep.
@@ -1938,6 +1947,21 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
 
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     mine = [c for c in candidates if c["offer_id"] == offer["id"]]
+    assert mine and mine[0]["missing_presets"] == ["vertical"], (
+        "a landscape export must not suppress the still-missing vertical variant"
+    )
+
+    # the missing preset is independent: finishing it empties the queue
+    vertical = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "vertical", "width": 1080, "height": 1920,
+        "video_path": "projects/x/render-vertical.mp4", "script_version": 1,
+        "script_version_hash": version_hash, "capture_id": str(capture_id),
+        "status": "rendered", "qc_status": "passed",
+        "qc_report": {"version": 1, "status": "passed", "errors": []},
+    })
+    assert vertical.status_code == 201, vertical.text
+    candidates = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in candidates if c["offer_id"] == offer["id"]]
     assert mine == [], "a QC-passed script version must not queue again"
 
     # an unreviewed capture never queues
@@ -1953,6 +1977,78 @@ def test_render_candidates_gate_script_capture_and_render(auth_client):
     candidates = auth_client.get("/render-candidates", headers=SVC).json()
     assert not [c for c in candidates if c["offer_id"] == other["id"]], \
         "footage that failed redaction review must never reach the renderer"
+
+
+def test_media_playback_is_authenticated_and_seekable(auth_client, tmp_path):
+    """Review needs to watch the footage; the route must stream byte ranges and
+    still reject an unauthenticated caller."""
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Playback Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    video = tmp_path / "capture.mp4"
+    video.write_bytes(b"VIDEO-BYTES-0123456789")
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log) "
+        "VALUES ($1, $2, '[]'::jsonb) RETURNING id",
+        offer_id, str(video),
+    )[0]["id"]
+
+    partial = auth_client.get(
+        f"/captures/{capture_id}/video",
+        headers={**SVC, "Range": "bytes=0-4"},
+    )
+    assert partial.status_code == 206, partial.text
+    assert partial.content == b"VIDEO"
+    assert partial.headers["accept-ranges"] == "bytes"
+    assert partial.headers["content-range"].startswith("bytes 0-4/")
+
+    whole = auth_client.get(f"/captures/{capture_id}/video", headers=SVC)
+    assert whole.status_code == 200
+    assert whole.content == b"VIDEO-BYTES-0123456789"
+
+    anonymous = auth_client.get(f"/captures/{capture_id}/video")
+    assert anonymous.status_code == 401, "media is behind the same auth gate"
+
+
+def test_list_cursor_walks_the_whole_backlog(auth_client):
+    """A fixed limit must never hide the tail of a collection.
+
+    Five candidate offers with a page size of two means at least three pages;
+    following X-Next-Cursor must reach every one of them exactly once.
+    """
+    created = []
+    for index in range(5):
+        offer = auth_client.post("/offers", headers=SVC, json={
+            "provider": f"Cursor Co {index}", "category": "domains",
+            "offer_type": "coupon", "title": f"cursor backlog {index}",
+        }).json()
+        created.append(offer["id"])
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        params = {"state": "candidate", "limit": 2}
+        if cursor:
+            params["cursor"] = cursor
+        page = auth_client.get("/offers", params=params, headers=SVC)
+        assert page.status_code == 200, page.text
+        rows = page.json()
+        assert len(rows) <= 2
+        seen.extend(row["id"] for row in rows)
+        pages += 1
+        cursor = page.headers.get("X-Next-Cursor")
+        if not cursor:
+            break
+        assert pages < 50, "cursor never terminated"
+
+    assert pages >= 3, "the test data must span more than one page"
+    assert len(seen) == len(set(seen)), "keyset pages must not repeat a row"
+    assert set(created) <= set(seen), "every backlog row must be reachable"
+
+    bad = auth_client.get("/offers", params={"cursor": "not-a-cursor"}, headers=SVC)
+    assert bad.status_code == 422, "a malformed cursor must be a client error"
 
 
 def test_schedule_refuses_a_render_from_a_different_script_version(auth_client):

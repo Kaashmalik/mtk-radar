@@ -12,11 +12,18 @@ import json
 import uuid
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
 from api_hardening import effective_reviewer
+from pagination import (
+    decode_cursor,
+    decode_datetime,
+    decode_uuid,
+    encode_cursor,
+    set_next_cursor,
+)
 from offer_freshness import freshness_problem
 from redact import scan as scan_secrets
 from state import can_generate_video
@@ -92,10 +99,15 @@ async def record_capture(offer_id: uuid.UUID, capture: CaptureIn) -> dict:
 
 @router.get("/captures")
 async def list_captures(
+    response: Response,
     offer_id: Optional[uuid.UUID] = Query(default=None),
     limit: int = Query(default=50, le=200),
+    cursor: Optional[str] = Query(default=None),
 ) -> list[dict]:
     pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    before_created = decode_datetime(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
     rows = await pool.fetch(
         """
         SELECT c.id, c.offer_id, o.title AS offer_title, c.video_path,
@@ -105,12 +117,21 @@ async def list_captures(
                c.created_at
         FROM capture_sessions c JOIN offers o ON o.id = c.offer_id
         WHERE ($1::uuid IS NULL OR c.offer_id = $1)
-        ORDER BY c.created_at DESC LIMIT $2
+          AND ($3::timestamptz IS NULL
+               OR (c.created_at, c.id) < ($3::timestamptz, $4::uuid))
+        ORDER BY c.created_at DESC, c.id DESC LIMIT $2
         """,
         offer_id,
         limit,
+        before_created,
+        before_id,
     )
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    set_next_cursor(
+        response, out, limit,
+        lambda row: encode_cursor(row["created_at"], row["id"]),
+    )
+    return out
 
 
 @router.post("/captures/{capture_id}/redaction-review")

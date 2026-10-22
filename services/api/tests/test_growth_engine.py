@@ -39,7 +39,8 @@ def test_growth_score_counts_a_measured_zero_engagement():
     assert engaged > silent
 
 
-def test_summary_compares_platforms_and_languages():
+def test_summary_compares_platforms_and_languages(monkeypatch):
+    monkeypatch.delenv("MTK_ENABLE_GROWTH_SCORE", raising=False)
     summary = summarize(
         ROWS,
         languages=[
@@ -51,6 +52,17 @@ def test_summary_compares_platforms_and_languages():
     assert summary["by_platform"][0]["platform"] == "youtube"
     assert summary["by_platform"][0]["posts"] == 2
     assert any("youtube" in rec["title"] for rec in summary["recommendations"])
+    # Compliance default: measured data stays, the composite blend is absent.
+    assert summary["score_enabled"] is False
+    assert summary["score"] is None
+    assert "compliance review" in summary["score_label"]
+
+
+def test_composite_score_is_opt_in_after_compliance_review(monkeypatch):
+    monkeypatch.setenv("MTK_ENABLE_GROWTH_SCORE", "1")
+    summary = summarize(ROWS)
+    assert summary["score_enabled"] is True
+    assert isinstance(summary["score"], float) and 0 < summary["score"] <= 100
 
 
 def test_language_recommendation_uses_avg_views_not_missing_views():

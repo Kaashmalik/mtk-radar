@@ -665,7 +665,10 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
         log.info("render stage is %s in Settings — sweep skipped", state)
         return 0
     try:
-        candidates = client.get("/render-candidates", params={"limit": limit}).json()
+        candidates = client.get(
+            "/render-candidates",
+            params={"limit": limit, "presets": ",".join(preset_keys)},
+        ).json()
     except httpx.HTTPError as exc:
         log.error("render sweep skipped (API unreachable): %s", exc)
         return 0
@@ -673,8 +676,14 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
     rendered = 0
     for candidate in candidates:
         offer_id = candidate["offer_id"]
-        log.info("render sweep: rendering offer %s (script v%s)", offer_id,
-                 candidate.get("script_version"))
+        # The API reports which variants are genuinely missing. Never re-render
+        # a landscape export just because the vertical one is still absent.
+        missing = [key for key in preset_keys
+                   if key in (candidate.get("missing_presets") or preset_keys)]
+        if not missing:
+            continue
+        log.info("render sweep: rendering offer %s (script v%s, %s)", offer_id,
+                 candidate.get("script_version"), ", ".join(missing))
         language = candidate.get("language") or "en"
         # Keep the v0.19 three-argument constructor shape for the default
         # English/studio case (fake jobs and older callers rely on it).
@@ -687,7 +696,7 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
         try:
             kwargs = {
                 "capture_video": None,
-                "preset_keys": preset_keys,
+                "preset_keys": missing,
                 "skip_narration": skip_narration,
                 "capture_id": candidate.get("capture_id"),
             }

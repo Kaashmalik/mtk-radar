@@ -48,8 +48,10 @@ async function proxy(
   headers.set("Authorization", `Bearer ${session.token}`);
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("Content-Type", contentType);
-  const accept = request.headers.get("accept");
-  if (accept) headers.set("Accept", accept);
+  for (const name of ["accept", "range", "if-range"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
 
   const method = request.method.toUpperCase();
   const init: RequestInit = { method, headers, cache: "no-store" };
@@ -65,8 +67,20 @@ async function proxy(
   }
 
   const outHeaders = new Headers();
-  const responseType = response.headers.get("content-type");
-  if (responseType) outHeaders.set("Content-Type", responseType);
+  // Media playback needs the byte-range contract end to end: without these
+  // headers the browser receives a 206 it cannot interpret and seeking fails.
+  for (const name of [
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "etag",
+    "last-modified",
+    "content-disposition",
+  ]) {
+    const value = response.headers.get(name);
+    if (value) outHeaders.set(name, value);
+  }
   outHeaders.set("Cache-Control", "no-store");
   return new Response(response.body, {
     status: response.status,

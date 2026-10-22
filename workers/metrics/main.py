@@ -37,6 +37,7 @@ from platforms.facebook import FacebookAdapter, TokenExpiredError  # noqa: E402
 from platforms.instagram import InstagramAdapter  # noqa: E402
 from platforms.youtube import OAuthConfig, YouTubeAdapter  # noqa: E402
 
+from api_paging import fetch_all  # noqa: E402
 from platform_metrics import parse_graph_insights, parse_youtube_analytics  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
@@ -176,8 +177,8 @@ class MetricsWorker:
 
     def _sweep(self) -> int:
         try:
-            posts = self.api.get("/schedules", params={"state": "published", "limit": 200}).json()
-        except httpx.HTTPError as exc:
+            posts = fetch_all(self.api, "/schedules", {"state": "published"}, limit=200)
+        except (httpx.HTTPError, ValueError) as exc:
             log.warning("metrics sweep skipped (API unreachable): %s", exc)
             return 0
         if not isinstance(posts, list):

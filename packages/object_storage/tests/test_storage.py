@@ -154,6 +154,35 @@ def test_s3_get_downloads_bytes_and_reports_missing(tmp_path: Path):
 # ---------------------------------------------------------------- facade
 
 
+def test_s3_size_and_range_stream_for_media_playback():
+    """The authenticated media route streams one byte range, not the export."""
+    seen: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if req.method == "HEAD":
+            return httpx.Response(200, headers={"content-length": "1000"})
+        assert req.method == "GET"
+        assert req.headers["range"] == "bytes=100-199"
+        return httpx.Response(
+            206,
+            headers={"content-range": "bytes 100-199/1000",
+                     "content-length": "100"},
+            content=b"R" * 100,
+        )
+
+    st, _ = _s3_with(handler)
+    assert st.size("s3://mtk-bucket/video.mp4") == 1000
+
+    resp = st.open_stream("s3://mtk-bucket/video.mp4", 100, 199)
+    try:
+        assert resp.status_code == 206
+        assert resp.headers["content-range"] == "bytes 100-199/1000"
+        assert b"".join(resp.iter_bytes()) == b"R" * 100
+    finally:
+        resp.close()
+
+
 def test_make_from_env_disabled_by_default(monkeypatch):
     monkeypatch.delenv("MTK_STORAGE_BACKEND", raising=False)
     assert make_from_env() is None  # legacy relative-path flow preserved

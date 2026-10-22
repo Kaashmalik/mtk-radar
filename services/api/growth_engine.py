@@ -15,8 +15,21 @@ never claims causality from a tiny sample; recommendations say "test", not
 
 from __future__ import annotations
 
+import os
 from statistics import mean
 from typing import Any, Iterable
+
+#: The composite score blends YouTube-derived fields into one internal number.
+#: YouTube's Developer Policies restrict replacing API data with independently
+#: calculated metrics without an approved compliance review, so the score is
+#: OFF by default. The raw measured fields and the conservative per-signal
+#: recommendations remain available; only the composite blend is gated.
+GROWTH_SCORE_ENV = "MTK_ENABLE_GROWTH_SCORE"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def growth_score_enabled() -> bool:
+    return os.environ.get(GROWTH_SCORE_ENV, "").strip().lower() in _TRUTHY
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -242,12 +255,20 @@ def summarize(
         if bucket["posts"]:
             bucket["engagement"] = round(bucket["engagement"] / bucket["posts"], 2)
 
+    enabled = growth_score_enabled()
     return {
-        "score": growth_score(rows),
+        # `None` is a deliberate "unavailable", not a measured zero. The
+        # dashboard must not paint a 0/100 bar when the blend is disabled.
+        "score": growth_score(rows) if enabled else None,
+        "score_enabled": enabled,
         # This is an internal directional blend of the fields the platform
         # happened to expose. It is not a platform metric or a compliance
         # signal; label it that way wherever it is displayed.
-        "score_label": "internal directional health signal, not a platform metric",
+        "score_label": (
+            "internal directional health signal, not a platform metric"
+            if enabled else
+            "composite score disabled pending YouTube API compliance review"
+        ),
         "measured_posts": len(rows),
         "by_platform": [
             {"platform": platform, **values}
