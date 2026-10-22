@@ -54,6 +54,30 @@ log = logging.getLogger("metrics")
 _API_TOKEN = os.environ.get("MTK_API_TOKEN", "").strip()
 
 
+def _adapter_for_account(account: dict):
+    """Resolve an env credential reference into a read-only metrics adapter."""
+    source = str(account.get("credential_source") or "")
+    platform = account.get("platform")
+    if not source.startswith("env:"):
+        log.warning("%s account %s uses unsupported credential source %s",
+                    platform, account.get("account_handle"), source)
+        return None
+    raw = source.split(":", 1)[1]
+    prefix = raw.rstrip("_*") + "_"
+    if platform == "youtube":
+        oauth = OAuthConfig.from_env(prefix)
+        return YouTubeAdapter(oauth=oauth) if oauth else None
+    if platform == "facebook":
+        page_id = os.environ.get(f"{prefix}PAGE_ID", "")
+        token = os.environ.get(f"{prefix}PAGE_ACCESS_TOKEN", "")
+        return FacebookAdapter(page_id=page_id, page_access_token=token) if page_id and token else None
+    if platform == "instagram":
+        user_id = os.environ.get(f"{prefix}USER_ID", "")
+        token = os.environ.get(f"{prefix}ACCESS_TOKEN", "")
+        return InstagramAdapter(user_id=user_id, access_token=token) if user_id and token else None
+    return None
+
+
 def _api_auth_headers() -> dict:
     return {"Authorization": f"Bearer {_API_TOKEN}"} if _API_TOKEN else {}
 
@@ -72,43 +96,63 @@ class MetricsWorker:
         return self._adapters
 
     def build_adapters(self) -> dict:
-        """Same credential references as publishing (§6): env only, token
-        material never leaves the process."""
+        """Per-account adapters from `platform_accounts` credential references.
+
+        The schedule pins a platform_account_id, so metrics for two YouTube
+        channels (or two Facebook pages) never share the first configured
+        credential. A platform-level default remains for legacy schedules.
+        """
         adapters: dict = {}
+        try:
+            accounts = self.api.get("/platform-accounts").json()
+        except Exception as exc:  # noqa: BLE001 — env fallback still works
+            log.warning("platform account lookup failed (%s) — env fallback only", exc)
+            accounts = []
+        if not isinstance(accounts, list):
+            log.warning("platform account lookup returned an unexpected payload — env fallback only")
+            accounts = []
+        for account in accounts:
+            if account.get("status") not in (None, "active"):
+                continue
+            adapter = _adapter_for_account(account)
+            if adapter is None:
+                continue
+            platform = account.get("platform")
+            account_id = str(account.get("id"))
+            adapters[f"{platform}:{account_id}"] = adapter
+            adapters.setdefault(platform, adapter)
+
+        # Legacy/env-only fallback for platforms without registered accounts.
         oauth = OAuthConfig.from_env()
-        if oauth:
+        if oauth and "youtube" not in adapters:
             adapters["youtube"] = YouTubeAdapter(oauth=oauth)
-        else:
+        elif not oauth and "youtube" not in adapters:
             log.warning("YOUTUBE_* env missing — youtube metrics disabled")
         page_id = os.environ.get("FACEBOOK_PAGE_ID", "")
         token = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "")
-        if page_id and token:
+        if page_id and token and "facebook" not in adapters:
             adapters["facebook"] = FacebookAdapter(page_id=page_id, page_access_token=token)
-        else:
-            log.warning("FACEBOOK_* env missing — facebook metrics disabled")
         ig_user = os.environ.get("INSTAGRAM_USER_ID", "")
         ig_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
-        if ig_user and ig_token:
+        if ig_user and ig_token and "instagram" not in adapters:
             adapters["instagram"] = InstagramAdapter(user_id=ig_user, access_token=ig_token)
-        else:
-            log.warning("INSTAGRAM_* env missing — instagram metrics disabled")
         return adapters
 
     def _acquire_sweep_lock(self, name: str, ttl_s: int = 300) -> bool:
         """One metrics sweep at a time (v0.22) — two instances would pull the
-        same platform numbers twice. Fails OPEN when the lock endpoint is
-        unavailable."""
+        same platform numbers twice. Fails CLOSED: if the lock service is
+        unreachable we cannot prove exclusivity, so this sweep is skipped and
+        retried on the next interval."""
         try:
             res = self.api.post("/locks/acquire",
                                  json={"name": name, "holder": f"{name}-worker", "ttl_s": ttl_s})
-        except Exception as exc:  # noqa: BLE001 — a lock must never stop the sweep
-            log.warning("sweep lock unavailable (%s) — continuing without it", exc)
-            return True
+        except Exception as exc:  # noqa: BLE001 — no proof of exclusivity
+            log.warning("sweep lock unavailable (%s) — skipping this sweep", exc)
+            return False
         if res.status_code >= 300:
-            log.warning("sweep lock refused (%s) — continuing without it", res.status_code)
-            return True
-        # a response without the flag is treated as "proceed" (fail-open)
-        acquired = bool(res.json().get("acquired", True))
+            log.warning("sweep lock refused (%s) — skipping this sweep", res.status_code)
+            return False
+        acquired = bool(res.json().get("acquired", False))
         if not acquired:
             log.info("another worker holds the %s lock — this sweep is skipped", name)
         return acquired
@@ -133,6 +177,9 @@ class MetricsWorker:
         except httpx.HTTPError as exc:
             log.warning("metrics sweep skipped (API unreachable): %s", exc)
             return 0
+        if not isinstance(posts, list):
+            log.error("published-post lookup returned an unexpected payload — metrics skipped")
+            return 0
         measured = 0
         for post in posts:
             if not post.get("remote_post_id"):
@@ -140,9 +187,15 @@ class MetricsWorker:
             platform = post.get("platform")
             if platform == "tiktok":
                 continue  # documented gap — no insights access without an app
-            adapter = self.adapters.get(platform)
+            account_id = post.get("platform_account_id")
+            # A pinned account never falls back to another configured account;
+            # metrics from the wrong channel are worse than no metrics.
+            adapter = (self.adapters.get(f"{platform}:{account_id}")
+                       if account_id else self.adapters.get(platform))
             if adapter is None:
-                continue  # credentials not configured for this platform
+                log.warning("schedule %s: no adapter for pinned %s account %s — skipped",
+                            post["id"], platform, account_id or "(legacy default)")
+                continue
             try:
                 snapshot = self._measure(platform, adapter, post["remote_post_id"])
             except PermissionError as exc:
@@ -197,8 +250,14 @@ class MetricsWorker:
                 "views": _int(payload.get("plays")),
                 "likes": _int(payload.get("likes")),
                 "comments": _int(payload.get("comments")),
+                "shares": _int(payload.get("shares")),
                 "impressions": _int(payload.get("reach")),
                 "avg_watch_s": None,
+                "avg_view_duration_s": None,
+                "avg_view_percentage": None,
+                "ctr": None,
+                "retention_3s": None,
+                "subscribers_gained": None,
             }
         return None
 

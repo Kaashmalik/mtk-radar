@@ -197,6 +197,14 @@ def _try_png(svg_path: Path, png_path: Path, spec: dict[str, Any]) -> Path | Non
         return None
 
 
+def cover_for_preset(bundle: dict[str, Any], preset_key: str) -> dict[str, Any]:
+    """Pick the cover drawn for one delivery frame, falling back to primary."""
+    for cover in bundle.get("covers", []) or []:
+        if isinstance(cover, dict) and cover.get("preset") == preset_key:
+            return cover
+    return bundle.get("primary") or {}
+
+
 def generate_covers(
     project: Path,
     offer: dict[str, Any],

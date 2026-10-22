@@ -1,8 +1,9 @@
-"""Publish-time approval integrity + expiry gates (v0.16, master plan §11/§17).
+"""Publish-time approval integrity + expiry gates (v0.16/v0.28, §11/§17).
 
 The worker must refuse to upload unless:
-- the offer is in a publishable state AND not expired / recheck-overdue, and
-- the render's script_version_hash equals the schedule's approved version_hash.
+- the offer is in a publishable state AND not expired / recheck-overdue,
+- the render's script_version_hash equals the schedule's approved version_hash,
+- the exact pinned render/metadata/package hashes are unchanged.
 
 Fakes replace HTTP + platform adapters; the video file is real on disk so the
 storage materialize step runs for plain legacy paths.
@@ -19,8 +20,10 @@ import main as pub
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
+        self.text = ""
 
     def json(self):
         return self._payload
@@ -42,6 +45,8 @@ class FakeAPI:
 
     def post(self, path, json=None):
         self.calls.append(("POST", path, json))
+        if path.endswith("/attempt"):
+            return FakeResponse({"acquired": True, "attempt_token": "token-1"})
         return FakeResponse({"ok": True})
 
 
@@ -50,8 +55,24 @@ class FakeAdapter:
         self.uploads = []
 
     def upload(self, path, meta, privacy=None, idempotency_key=None):
-        self.uploads.append((str(path), privacy, idempotency_key))
+        self.uploads.append((str(path), privacy, idempotency_key, meta))
         return "remote-1"
+
+
+class ConfirmingAdapter(FakeAdapter):
+    def __init__(self, confirmed=True):
+        super().__init__()
+        self.confirmed = confirmed
+        self.confirmations = []
+
+    def confirm_publication(self, remote_id, *, expected_privacy,
+                            timeout_s, interval_s):
+        self.confirmations.append((remote_id, expected_privacy))
+        if not self.confirmed:
+            return {"confirmed": False, "error": "still processing"}
+        return {"confirmed": True, "processing_state": "succeeded",
+                "privacy": expected_privacy,
+                "remote_url": f"https://youtu.be/{remote_id}"}
 
 
 def _iso(offset: timedelta) -> str:
@@ -64,21 +85,58 @@ def _publisher(offer, renders):
     return p
 
 
-def _post(version_hash="APPROVED"):
-    return {
+def _post(render, version_hash="APPROVED", metadata=None):
+    metadata = metadata if metadata is not None else {
+        "title": "Approved title",
+        "caption": "Approved caption with the reviewed CTA.",
+        "captions_language": "en",
+    }
+    metadata_hash = pub._canonical_hash(metadata)
+    post = {
         "id": "sch-1",
         "offer_id": "off-1",
         "platform": "youtube",
         "privacy": "private",
         "version_hash": version_hash,
-        "metadata": None,
+        "metadata": metadata,
+        "language": "en",
+        "caption_variant": "default",
+        "metadata_variant": "default",
+        "render_id": "r1",
+        "render_sha256": pub._sha256_file(Path(render["video_path"])),
+        "metadata_hash": metadata_hash,
+        "cover_sha256": None,
+        "captions_sha256": None,
+        "pinned_comment": None,
+        "youtube_playlist_id": None,
+        "platform_account_id": None,
+        "cover_path": None,
     }
+    post["package_hash"] = pub._canonical_hash({
+        "offer_id": "off-1",
+        "platform": "youtube",
+        "account_id": None,
+        "render_id": "r1",
+        "render_sha256": post["render_sha256"],
+        "metadata_hash": metadata_hash,
+        "cover_sha256": None,
+        "captions_sha256": None,
+        "script_version_hash": version_hash,
+        "language": "en",
+        "privacy": "private",
+        "caption_variant": "default",
+        "metadata_variant": "default",
+        "pinned_comment": None,
+        "youtube_playlist_id": None,
+    })
+    return post
 
 
 def _render(hash_value):
     path = Path(tempfile.mkdtemp()) / "r.mp4"
     path.write_bytes(b"VIDEO")
-    return {"video_path": str(path), "script_version_hash": hash_value}
+    return {"id": "r1", "video_path": str(path), "script_version_hash": hash_value,
+            "cover_path": None, "captions_path": None}
 
 
 def _healthy_offer():
@@ -98,29 +156,108 @@ def _pause_calls(api):
 
 
 def test_happy_path_publishes_when_hash_pins_and_offer_valid():
-    p = _publisher(_healthy_offer(), [_render("APPROVED")])
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
     adapter = FakeAdapter()
-    p._publish(_post(), {"youtube": adapter})
+    post = _post(render)
+    assert p._publish(post, {"youtube": adapter}) is True
 
     assert len(adapter.uploads) == 1, "upload must happen when every gate passes"
-    assert _result_calls(p.api)[0][2]["ok"] is True
+    assert adapter.uploads[0][3] == post["metadata"], \
+        "the adapter must receive the approved metadata verbatim (no injected copy)"
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is True and result["confirmed"] is True
+    assert result["attempt_token"] == "token-1"
+
+
+def test_existing_remote_upload_is_reconfirmed_not_reuploaded():
+    """An upload that succeeded but timed out before confirmation may already
+    be live. Resuming must confirm that video, never create a duplicate."""
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = ConfirmingAdapter(confirmed=True)
+    post = _post(render)
+    post["remote_post_id"] = "remote-1"
+    post["remote_metadata"] = {"thumbnail": {"ok": True}}
+
+    assert p._publish(post, {"youtube": adapter}) is True
+    assert adapter.uploads == [], "a known remote id must never be uploaded again"
+    assert adapter.confirmations == [("remote-1", "private")]
+
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is True and result["confirmed"] is True
+    assert result["remote_metadata"]["reconfirmed"] is True
+    assert result["remote_metadata"]["thumbnail"] == {"ok": True}
+
+
+def test_existing_remote_upload_that_is_still_unconfirmed_stays_held():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = ConfirmingAdapter(confirmed=False)
+    post = _post(render)
+    post["remote_post_id"] = "remote-1"
+
+    assert p._publish(post, {"youtube": adapter}) is False
+    assert adapter.uploads == []
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False and result["hold"] is True
+    assert "still unconfirmed" in result["detail"]
+
+
+def test_remote_post_without_a_confirmation_api_is_never_reuploaded():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    post = _post(render)
+    post["remote_post_id"] = "remote-1"
+
+    assert p._publish(post, {"youtube": adapter}) is False
+    assert adapter.uploads == []
+    assert "will not upload again" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_empty_approved_caption_blocks_upload():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(_post(render, metadata={"title": "Approved title"}), {"youtube": adapter})
+
+    assert adapter.uploads == [], "the worker must never invent a caption"
+    assert "no caption" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_youtube_package_must_have_a_title():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(_post(render, metadata={"caption": "Approved caption"}), {"youtube": adapter})
+
+    assert adapter.uploads == []
+    assert "no title" in _result_calls(p.api)[0][2]["detail"]
 
 
 def test_hash_mismatch_blocks_and_pauses():
-    p = _publisher(_healthy_offer(), [_render("DIFFERENT-SCRIPT")])
+    render = _render("DIFFERENT-SCRIPT")
+    p = _publisher(_healthy_offer(), [render])
     adapter = FakeAdapter()
-    p._publish(_post(), {"youtube": adapter})
+    p._publish(_post(render), {"youtube": adapter})
 
     assert adapter.uploads == [], "must never upload a render from another script version"
     assert _pause_calls(p.api), "schedule must be paused for re-approval"
     detail = _result_calls(p.api)[0][2]
-    assert detail["ok"] is False and "approval integrity" in detail["detail"]
+    assert detail["ok"] is False and detail["hold"] is True
+    assert "approval integrity" in detail["detail"]
+    # The reason must be recorded while the post is still reportable; pausing
+    # first would make the result endpoint refuse the detail.
+    calls = [c for c in p.api.calls if c[0] == "POST" and ("/result" in c[1] or "/pause" in c[1])]
+    assert calls[0][1].endswith("/result"), "report the held reason before pausing"
 
 
 def test_render_without_bound_hash_fails_closed():
-    p = _publisher(_healthy_offer(), [_render(None)])
+    render = _render(None)
+    p = _publisher(_healthy_offer(), [render])
     adapter = FakeAdapter()
-    p._publish(_post(), {"youtube": adapter})
+    p._publish(_post(render), {"youtube": adapter})
 
     assert adapter.uploads == []
     assert "approval integrity" in _result_calls(p.api)[0][2]["detail"]
@@ -129,9 +266,10 @@ def test_render_without_bound_hash_fails_closed():
 def test_offer_expiry_blocks_upload_even_when_state_is_publishable():
     offer = {"state": "verified", "expires_at": _iso(timedelta(hours=-1)),
              "recheck_at": _iso(timedelta(days=1))}
-    p = _publisher(offer, [_render("APPROVED")])
+    render = _render("APPROVED")
+    p = _publisher(offer, [render])
     adapter = FakeAdapter()
-    p._publish(_post(), {"youtube": adapter})
+    p._publish(_post(render), {"youtube": adapter})
 
     assert adapter.uploads == []
     assert _pause_calls(p.api), "§11: expired deals pause queued posts automatically"
@@ -141,9 +279,49 @@ def test_offer_expiry_blocks_upload_even_when_state_is_publishable():
 def test_overdue_recheck_blocks_upload():
     offer = {"state": "verified", "expires_at": _iso(timedelta(days=1)),
              "recheck_at": _iso(timedelta(hours=-2))}
-    p = _publisher(offer, [_render("APPROVED")])
+    render = _render("APPROVED")
+    p = _publisher(offer, [render])
     adapter = FakeAdapter()
-    p._publish(_post(), {"youtube": adapter})
+    p._publish(_post(render), {"youtube": adapter})
 
     assert adapter.uploads == []
     assert "recheck overdue" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_changed_render_bytes_block_upload():
+    render = _render("APPROVED")
+    post = _post(render)
+    Path(render["video_path"]).write_bytes(b"TAMPERED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(post, {"youtube": adapter})
+
+    assert adapter.uploads == []
+    assert "pinned sha256" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_metadata_edit_after_scheduling_blocks_upload():
+    render = _render("APPROVED")
+    post = _post(render)
+    post["metadata"] = {"title": "changed after review"}
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    p._publish(post, {"youtube": adapter})
+
+    assert adapter.uploads == []
+    assert "metadata changed" in _result_calls(p.api)[0][2]["detail"]
+
+
+def test_pinned_account_never_falls_back_to_another_account():
+    worker = pub.Publisher(api_url="http://fake-api")
+    account_a = object()
+    account_b = object()
+    adapters = {"youtube": account_b, "youtube:acct-a": account_a}
+
+    assert worker._adapter_for(
+        {"platform": "youtube", "platform_account_id": "acct-a"}, adapters) is account_a
+    assert worker._adapter_for(
+        {"platform": "youtube", "platform_account_id": "acct-missing"}, adapters) is None, \
+        "a pinned account must never silently upload to the default channel"
+    assert worker._adapter_for({"platform": "youtube"}, adapters) is account_b, \
+        "legacy schedules without a pin may use the platform default"

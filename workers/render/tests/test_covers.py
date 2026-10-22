@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from covers import build_cover_spec, generate_covers, render_svg
+from covers import build_cover_spec, cover_for_preset, generate_covers, render_svg
 
 OFFER = {
     "title": "One-year .tech domain for students",
@@ -51,3 +51,10 @@ def test_generate_writes_language_specific_assets(tmp_path: Path):
         assert path.is_file()
         assert path.read_text(encoding="utf-8").startswith("<svg")
     assert "ur-a-landscape.svg" in bundle["primary"]["svg"]
+
+
+def test_cover_selection_matches_the_delivery_frame(tmp_path: Path):
+    bundle = generate_covers(tmp_path, OFFER)
+    vertical = cover_for_preset(bundle, "vertical")
+    assert "vertical" in vertical["svg"], "a 9:16 render needs the 9:16 cover"
+    assert cover_for_preset(bundle, "missing") == bundle["primary"]

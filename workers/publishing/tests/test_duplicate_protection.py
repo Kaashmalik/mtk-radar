@@ -1,5 +1,5 @@
-"""Duplicate-publish protection (v0.23): a platform upload that succeeds but
-is never reported (worker died mid-flight) leaves an OPEN attempt marker.
+"""Duplicate-publish protection (v0.23/v0.28): a platform upload that succeeds
+but is never reported (worker died mid-flight) leaves an OPEN attempt marker.
 The next sweep must NOT upload again — a duplicate public post is worse than
 a delayed one — it must hold the post for a human to verify.
 """
@@ -22,21 +22,24 @@ class FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
+        self.text = ""
 
     def json(self):
         return self._payload
 
 
 class FakeAPI:
-    def __init__(self, outcome_detail=None):
+    def __init__(self, outcome_detail=None, video_path=None):
         self.outcome_detail = outcome_detail
+        self.video_path = video_path
         self.posts = []
         self.uploads = []
 
     def get(self, path, params=None):
         if path == "/renders":
-            return FakeResponse([{"id": "r1", "video_path": "projects/x/r.mp4",
-                                  "script_version_hash": "hash-1"}])
+            return FakeResponse([{"id": "r1", "video_path": self.video_path,
+                                  "script_version_hash": "hash-1",
+                                  "cover_path": None, "captions_path": None}])
         if path.startswith("/offers/"):
             return FakeResponse({"id": "off-1", "state": "approved_for_video",
                                  "expires_at": None, "recheck_at": None})
@@ -47,7 +50,7 @@ class FakeAPI:
     def post(self, path, json=None):
         self.posts.append((path, json))
         if path == "/schedules/sch-1/attempt":
-            return FakeResponse({"ok": True})
+            return FakeResponse({"acquired": True, "attempt_token": "token-1"})
         if path.endswith("/result"):
             return FakeResponse({"ok": True})
         return FakeResponse({"ok": True})
@@ -62,40 +65,54 @@ class FakeAdapter:
         return "remote-1"
 
 
-def _post(outcome_detail=None):
-    return {
+def _post(video_path=None, outcome_detail=None):
+    metadata = {
+        "title": "Approved title",
+        "caption": "Approved caption with the reviewed CTA.",
+        "captions_language": "en",
+    }
+    metadata_hash = pub._canonical_hash(metadata)
+    sha = pub._sha256_file(Path(video_path)) if video_path else "sha"
+    post = {
         "id": "sch-1", "platform": "youtube", "offer_id": "off-1",
         "local_time": "2020-01-01T00:00:00+00:00", "privacy": "private",
-        "version_hash": "hash-1", "metadata": {}, "idempotency_key": "k-1",
-        "outcome_detail": outcome_detail,
+        "version_hash": "hash-1", "metadata": metadata, "idempotency_key": "k-1",
+        "outcome_detail": outcome_detail, "language": "en",
+        "caption_variant": "default", "metadata_variant": "default",
+        "render_id": "r1", "render_sha256": sha, "metadata_hash": metadata_hash,
+        "cover_sha256": None, "captions_sha256": None, "pinned_comment": None,
+        "youtube_playlist_id": None, "platform_account_id": None, "cover_path": None,
     }
+    post["package_hash"] = pub._canonical_hash({
+        "offer_id": "off-1", "platform": "youtube", "account_id": None,
+        "render_id": "r1", "render_sha256": sha, "metadata_hash": metadata_hash,
+        "cover_sha256": None, "captions_sha256": None,
+        "script_version_hash": "hash-1", "language": "en", "privacy": "private",
+        "caption_variant": "default", "metadata_variant": "default",
+        "pinned_comment": None, "youtube_playlist_id": None,
+    })
+    return post
 
 
 def test_open_attempt_marker_is_detected():
     marker = {"attempt": {"started_at": "2026-10-21T10:00:00+00:00", "worker": "publishing-worker"}}
-    assert pub.Publisher._open_attempt(_post(marker)) is not None
-    assert pub.Publisher._open_attempt(_post(json.dumps(marker))) is not None
+    assert pub.Publisher._open_attempt(_post(outcome_detail=marker)) is not None
+    assert pub.Publisher._open_attempt(_post(outcome_detail=json.dumps(marker))) is not None
 
 
 def test_a_closed_attempt_is_not_a_blocker():
-    # a definite result clears the marker (attempt: null)
-    assert pub.Publisher._open_attempt(_post({"attempt": None, "detail": "ok"})) is None
-    assert pub.Publisher._open_attempt(_post({})) is None
-    assert pub.Publisher._open_attempt(_post(None)) is None
+    assert pub.Publisher._open_attempt(_post(outcome_detail={"attempt": None, "detail": "ok"})) is None
+    assert pub.Publisher._open_attempt(_post(outcome_detail={})) is None
+    assert pub.Publisher._open_attempt(_post(outcome_detail=None)) is None
 
 
-def test_an_interrupted_upload_is_not_retried(tmp_path):
-    api = FakeAPI({"attempt": {"started_at": "2026-10-21T10:00:00+00:00"}})
+def test_an_interrupted_upload_is_not_retried():
+    api = FakeAPI()
     adapter = FakeAdapter()
     worker = pub.Publisher(api_url="http://fake")
     worker.api = api
-    video = tmp_path / "render.mp4"
-    video.write_bytes(b"video")
-    worker._latest_render = lambda offer_id: {"id": "r1", "video_path": str(video),
-                                              "script_version_hash": "hash-1"}
-
-    worker._publish(_post({"attempt": {"started_at": "2026-10-21T10:00:00+00:00"}}),
-                    {"youtube": adapter})
+    marker = {"attempt": {"started_at": "2026-10-21T10:00:00+00:00"}}
+    worker._publish(_post(outcome_detail=marker), {"youtube": adapter})
 
     assert adapter.uploads == 0, "the post may already be live — never upload twice"
     results = [c for c in api.posts if c[0].endswith("/result")]
@@ -104,16 +121,13 @@ def test_an_interrupted_upload_is_not_retried(tmp_path):
 
 
 def test_the_attempt_is_announced_before_the_upload(tmp_path):
-    api = FakeAPI()
+    video = tmp_path / "render.mp4"
+    video.write_bytes(b"video")
+    api = FakeAPI(video_path=str(video))
     adapter = FakeAdapter()
     worker = pub.Publisher(api_url="http://fake")
     worker.api = api
-    video = tmp_path / "render.mp4"
-    video.write_bytes(b"video")
-    worker._latest_render = lambda offer_id: {"id": "r1", "video_path": str(video),
-                                              "script_version_hash": "hash-1"}
-
-    worker._publish(_post(), {"youtube": adapter})
+    worker._publish(_post(str(video)), {"youtube": adapter})
 
     paths = [c[0] for c in api.posts]
     assert "/schedules/sch-1/attempt" in paths, "the attempt must be announced"
@@ -121,9 +135,26 @@ def test_the_attempt_is_announced_before_the_upload(tmp_path):
         [p for p in paths if p.endswith("/result")][0]), "and before the outcome is reported"
 
 
+def test_upload_does_not_start_when_attempt_claim_fails(tmp_path):
+    video = tmp_path / "render.mp4"
+    video.write_bytes(b"video")
+
+    class NoClaimAPI(FakeAPI):
+        def post(self, path, json=None):
+            self.posts.append((path, json))
+            if path.endswith("/attempt"):
+                return FakeResponse({"detail": "open attempt"}, status_code=409)
+            return FakeResponse({"ok": True})
+
+    api = NoClaimAPI(video_path=str(video))
+    adapter = FakeAdapter()
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = api
+    assert worker._publish(_post(str(video)), {"youtube": adapter}) is False
+    assert adapter.uploads == 0
+
+
 def test_a_held_post_is_not_auto_retried():
-    """The hold must survive the auto-retry sweep: a post waiting for a human
-    (unknown upload outcome) must not be requeued automatically."""
     held = {
         "id": "sch-hold", "platform": "youtube", "retry_count": 1,
         "updated_at": "2020-01-01T00:00:00+00:00",
@@ -133,7 +164,7 @@ def test_a_held_post_is_not_auto_retried():
     api.posts = []
     worker = pub.Publisher(api_url="http://fake")
     worker.api = api
-    worker.RETRY_BASE_S = 0  # backoff elapsed — only the hold may stop it
+    worker.RETRY_BASE_S = 0
 
     assert worker.retry_failed() == 0
     assert not [c for c in api.posts if c[0].endswith("/transition")], \
@@ -152,9 +183,7 @@ def test_the_hold_is_reported_with_the_hold_flag():
     adapter = FakeAdapter()
     worker = pub.Publisher(api_url="http://fake")
     worker.api = api
-    worker._latest_render = lambda offer_id: {"id": "r1", "video_path": "projects/x/r.mp4",
-                                              "script_version_hash": "hash-1"}
-    worker._publish(_post({"attempt": {"started_at": "2026-10-21T10:00:00+00:00"}}),
-                    {"youtube": adapter})
+    marker = {"attempt": {"started_at": "2026-10-21T10:00:00+00:00"}}
+    worker._publish(_post(outcome_detail=marker), {"youtube": adapter})
     results = [c for c in api.posts if c[0].endswith("/result")]
     assert results[0][1]["hold"] is True, "the API must know this post needs a human"

@@ -3,8 +3,8 @@
 The API side: a lock is taken if it is free or expired, refused while a live
 holder has it, and released explicitly. The worker side: a refused lock
 skips the sweep (the other instance is doing the work), while an
-UNREACHABLE lock endpoint must fail OPEN — losing the lock must never stop
-publishing.
+UNREACHABLE lock endpoint must fail CLOSED — without proof of exclusivity a
+second uploader could publish the same post twice.
 """
 
 import importlib.util
@@ -92,7 +92,7 @@ def test_a_refused_lock_skips_the_sweep():
     assert swept == [], "the other instance is doing the work — do not duplicate it"
 
 
-def test_an_unreachable_lock_endpoint_fails_open():
+def test_an_unreachable_lock_endpoint_fails_closed():
     class DeadAPI:
         def post(self, path, json=None):
             raise RuntimeError("api down")
@@ -103,4 +103,21 @@ def test_an_unreachable_lock_endpoint_fails_open():
     worker._sweep = lambda now: swept.append(1) or 0
 
     assert worker.run_once() == 0
-    assert swept == [1], "losing the lock must never stop publishing"
+    assert swept == [], "no proof of exclusivity — never risk a duplicate upload"
+
+
+def test_a_lock_response_without_acquired_flag_is_refused():
+    class IncompleteAPI(LockingAPI):
+        def post(self, path, json=None):
+            self.calls.append((path, json))
+            if path == "/locks/acquire":
+                return FakeResponse({"name": json["name"]})
+            return FakeResponse({"released": True})
+
+    worker = pub.Publisher(api_url="http://fake")
+    worker.api = IncompleteAPI()
+    swept = []
+    worker._sweep = lambda now: swept.append(1) or 0
+
+    assert worker.run_once() == 0
+    assert swept == []

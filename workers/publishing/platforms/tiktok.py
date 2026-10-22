@@ -44,13 +44,14 @@ class TikTokConfig:
     refresh_token: str
 
     @classmethod
-    def from_env(cls) -> Optional["TikTokConfig"]:
+    def from_env(cls, prefix: str = "TIKTOK_") -> Optional["TikTokConfig"]:
         import os
 
+        prefix = (prefix or "TIKTOK_").rstrip("_*") + "_"
         cfg = cls(
-            client_key=os.environ.get("TIKTOK_CLIENT_KEY", ""),
-            client_secret=os.environ.get("TIKTOK_CLIENT_SECRET", ""),
-            refresh_token=os.environ.get("TIKTOK_REFRESH_TOKEN", ""),
+            client_key=os.environ.get(f"{prefix}CLIENT_KEY", ""),
+            client_secret=os.environ.get(f"{prefix}CLIENT_SECRET", ""),
+            refresh_token=os.environ.get(f"{prefix}REFRESH_TOKEN", ""),
         )
         return cfg if all([cfg.client_key, cfg.client_secret, cfg.refresh_token]) else None
 

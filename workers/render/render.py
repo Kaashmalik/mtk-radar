@@ -42,6 +42,33 @@ def build_ffmpeg_cmd(
         cmd += ["-i", narration]
         audio_map = "1:a"  # narration replaces capture audio
 
+    if preset.complex_filter:
+        # A multi-chain composition (e.g. vertical blurred background + full
+        # frame). Motion/captions become the final chain after the labelled
+        # composite output, so the graph still produces exactly one video.
+        post = []
+        if motion:
+            post.append(motion)
+        if captions:
+            post.append(f"subtitles={captions}")
+        graph = preset.filter_chain + f";[vbase]{','.join(post) or 'null'}[vout]"
+        cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", audio_map]
+        if narration:
+            cmd += ["-shortest"]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", str(preset.crf),
+            "-maxrate", preset.video_bitrate,
+            "-bufsize", preset.bufsize,
+            "-r", str(preset.fps),
+            "-c:a", "aac",
+            "-b:a", preset.audio_bitrate,
+            "-movflags", "+faststart",
+            output,
+        ]
+        return cmd
+
     vf = preset.filter_chain
     if motion:
         vf += f",{motion}"

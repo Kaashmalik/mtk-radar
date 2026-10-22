@@ -8,8 +8,10 @@ Gates enforced here (master plan §3/§4):
 httpx is an indirect dependency (unused here but consistent with siblings).
 """
 
+import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -32,8 +34,12 @@ class RenderIn(BaseModel):
     captions_path: Optional[str] = None
     script_version: Optional[int] = None
     # §17 approval pin: hash of the exact script markdown the render used
-    script_version_hash: Optional[str] = None
-    capture_id: Optional[uuid.UUID] = None
+    script_version_hash: str = Field(min_length=64, max_length=64)
+    # v0.28 package pins: digests of the exact bytes the render worker wrote.
+    video_sha256: Optional[str] = None
+    captions_sha256: Optional[str] = None
+    cover_sha256: Optional[str] = None
+    capture_id: uuid.UUID
     disclosure: dict = Field(default_factory=dict)
     # v0.27 content packaging carried through to schedules.
     language: str = "en"
@@ -65,32 +71,51 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
             detail=f"render blocked: offer state is '{offer['state']}' (§3)",
         )
 
-    if render.capture_id:
-        capture = await pool.fetchrow(
-            "SELECT redaction_reviewed FROM capture_sessions WHERE id = $1 AND offer_id = $2",
-            render.capture_id, offer_id,
+    capture = await pool.fetchrow(
+        "SELECT redaction_reviewed FROM capture_sessions WHERE id = $1 AND offer_id = $2",
+        render.capture_id, offer_id,
+    )
+    if not capture:
+        raise HTTPException(status_code=404, detail="capture not found for this offer")
+    if not capture["redaction_reviewed"]:
+        raise HTTPException(
+            status_code=409,
+            detail="capture redaction review has not passed — review the footage first (§4)",
         )
-        if not capture:
-            raise HTTPException(status_code=404, detail="capture not found for this offer")
-        if not capture["redaction_reviewed"]:
-            raise HTTPException(
-                status_code=409,
-                detail="capture redaction review has not passed — review the footage first (§4)",
-            )
 
+    # The render must be bound to the exact script bytes it was produced from.
+    script = await pool.fetchrow(
+        "SELECT markdown FROM offer_scripts WHERE offer_id = $1 AND language = $2 "
+        "AND ($3::int IS NULL OR version = $3) ORDER BY version DESC LIMIT 1",
+        offer_id, render.language, render.script_version,
+    )
+    if not script:
+        raise HTTPException(status_code=409, detail="script version not found for this render")
+    expected_hash = script_version_hash(script["markdown"])
+    if render.script_version_hash != expected_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="render script_version_hash does not match the selected script version",
+        )
+
+    video_sha256 = render.video_sha256 or _hash_local(render.video_path)
+    captions_sha256 = render.captions_sha256 or _hash_local(render.captions_path)
+    cover_sha256 = render.cover_sha256 or _hash_local(render.cover_path)
     row = await pool.fetchrow(
         """
         INSERT INTO renders (offer_id, capture_id, script_version, script_version_hash,
                              preset, width, height, duration_s, video_path, captions_path,
-                             disclosure, language, cover_path, motion_template, metadata)
+                             disclosure, language, cover_path, motion_template, metadata,
+                             video_sha256, captions_sha256, cover_sha256)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                $12, $13, $14, $15::jsonb)
+                $12, $13, $14, $15::jsonb, $16, $17, $18)
         RETURNING id, created_at
         """,
         offer_id, render.capture_id, render.script_version, render.script_version_hash,
         render.preset, render.width, render.height, render.duration_s, render.video_path,
         render.captions_path, _json(render.disclosure), render.language,
         render.cover_path, render.motion_template, _json(render.metadata),
+        video_sha256, captions_sha256, cover_sha256,
     )
     return {
         "id": row["id"],
@@ -99,6 +124,9 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
         "language": render.language,
         "cover_path": render.cover_path,
         "motion_template": render.motion_template,
+        "video_sha256": video_sha256,
+        "captions_sha256": captions_sha256,
+        "cover_sha256": cover_sha256,
     }
 
 
@@ -112,7 +140,8 @@ async def list_renders(
         """
         SELECT r.id, r.offer_id, o.title AS offer_title, r.preset, r.width, r.height,
                r.duration_s, r.video_path, r.captions_path, r.script_version,
-               r.script_version_hash, r.language, r.cover_path, r.motion_template,
+               r.script_version_hash, r.video_sha256, r.captions_sha256,
+               r.cover_sha256, r.language, r.cover_path, r.motion_template,
                r.metadata::text AS metadata,
                r.disclosure::text AS disclosure, r.status, r.created_at
         FROM renders r JOIN offers o ON o.id = r.offer_id
@@ -191,3 +220,16 @@ async def render_candidates(limit: int = Query(default=50, le=200)) -> list[dict
 
 def _json(value) -> str:
     return json.dumps(value, default=str)
+
+
+def _hash_local(ref: Optional[str]) -> Optional[str]:
+    if not ref or "://" in str(ref):
+        return None
+    path = Path(str(ref))
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

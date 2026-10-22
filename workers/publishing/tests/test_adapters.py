@@ -132,3 +132,159 @@ class TestFacebook:
         adapter = FacebookAdapter("", "", http=httpx.Client())
         with pytest.raises(TokenExpiredError):
             adapter.upload(_video(tmp_path), {}, privacy="private")
+
+
+class TestYouTubePackage:
+    def _adapter(self, handler):
+        # Static token: avoids a token-refresh call in these package tests.
+        http = httpx.Client(transport=httpx.MockTransport(handler))
+        return YouTubeAdapter(oauth=None,
+                              access_token="tok", account_id="acc1", http=http)
+
+    def test_finalize_attaches_thumbnail_captions_playlist_and_comment(self, tmp_path):
+        seen = []
+        cover = tmp_path / "cover.png"
+        cover.write_bytes(b"\x89PNG\r\n\x1a\n")
+        captions = tmp_path / "captions.en.vtt"
+        captions.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            seen.append((request.method, url))
+            if "thumbnails/set" in url:
+                return httpx.Response(200, json={"items": []})
+            if "captions" in url:
+                return httpx.Response(200, json={"id": "cap-1"})
+            if "playlistItems" in url:
+                return httpx.Response(200, json={"id": "pl-item-1"})
+            if "commentThreads" in url:
+                return httpx.Response(200, json={"id": "comment-1"})
+            return httpx.Response(404)
+
+        result = self._adapter(handler).finalize_package(
+            "vid-1", {"captions_language": "en"},
+            thumbnail_path=cover, captions_path=captions,
+            playlist_id="PL-1", pinned_comment="Official sources below",
+        )
+        assert result["thumbnail"]["ok"] is True
+        assert result["captions"]["id"] == "cap-1"
+        assert result["playlist"]["id"] == "pl-item-1"
+        assert result["comment"]["id"] == "comment-1"
+        assert result["comment"]["pinned"] is False
+        assert "operator_action" in result["comment"], \
+            "the API cannot pin comments — say so instead of pretending"
+        assert any("thumbnails/set" in url for _, url in seen)
+        assert any("uploadType=multipart" in url for _, url in seen)
+
+    def test_confirm_waits_for_processed_and_matching_privacy(self):
+        state = {"polls": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            state["polls"] += 1
+            if state["polls"] == 1:
+                return httpx.Response(200, json={"items": [{
+                    "status": {"uploadStatus": "processing", "privacyStatus": "private"},
+                    "processingDetails": {"processingStatus": "processing"},
+                }]})
+            return httpx.Response(200, json={"items": [{
+                "status": {"uploadStatus": "processed", "privacyStatus": "private"},
+                "processingDetails": {"processingStatus": "succeeded"},
+            }]})
+
+        result = self._adapter(handler).confirm_publication(
+            "vid-1", expected_privacy="private", timeout_s=2, interval_s=0.01)
+        assert result["confirmed"] is True
+        assert result["privacy"] == "private"
+        assert result["remote_url"].endswith("vid-1")
+        assert state["polls"] == 2
+
+    def test_confirm_refuses_a_privacy_mismatch(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"items": [{
+                "status": {"uploadStatus": "processed", "privacyStatus": "public"},
+                "processingDetails": {"processingStatus": "succeeded"},
+            }]})
+
+        result = self._adapter(handler).confirm_publication(
+            "vid-1", expected_privacy="private", timeout_s=0, interval_s=0.01)
+        assert result["confirmed"] is False
+
+    def test_retention_uses_elapsed_ratio_and_video_duration(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/videos"):
+                return httpx.Response(200, json={"items": [{
+                    "contentDetails": {"duration": "PT1M40S"},
+                }]})
+            return httpx.Response(200, json={"rows": [
+                [0.0, 1.0], [0.03, 0.61], [0.10, 0.42],
+            ]})
+
+        value = self._adapter(handler).fetch_retention_3s("vid-1")
+        assert value == pytest.approx(0.61)
+
+
+def test_upload_sends_the_approved_description_verbatim(tmp_path):
+    """Chapters are finalized in the scheduler and covered by the metadata
+    hash. The adapter must not edit the description after that hash check."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "uploadType=resumable" in url:
+            captured["body"] = request.read().decode()
+            return httpx.Response(200, headers={"location": "https://upload.example/s"})
+        if url == "https://upload.example/s":
+            return httpx.Response(200, json={"id": "vid-1"})
+        return httpx.Response(404)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+    meta = {
+        "title": "Approved title",
+        "caption": "Approved description only.",
+        "chapters": [{"start_s": 0, "title": "The offer"},
+                     {"start_s": 15, "title": "Proof"}],
+    }
+    assert adapter.upload(_video(tmp_path), meta, privacy="private") == "vid-1"
+    assert "Approved description only." in captured["body"]
+    assert "Chapters:" not in captured["body"], \
+        "the adapter must not add text that is outside the approved metadata hash"
+
+
+def test_correction_preserves_tags_and_does_not_duplicate_notice():
+    """videos.update replaces the whole snippet. A correction must append the
+    notice without wiping tags or appending it twice on retry."""
+    current = "Original approved description."
+    updated = []
+    state = {"description": current}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"items": [{"snippet": {
+                "title": "Approved title",
+                "description": state["description"],
+                "tags": ["deals", "verified"],
+                "categoryId": "28",
+                "defaultLanguage": "en",
+            }}]})
+        if request.method == "PUT":
+            payload = request.read().decode()
+            updated.append(payload)
+            state["description"] = __import__("json").loads(payload)["snippet"]["description"]
+            return httpx.Response(200, json={"id": "vid-1"})
+        return httpx.Response(404)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = YouTubeAdapter(oauth=None, access_token="tok", http=http)
+    notice = "Correction: the deadline is 31 Dec 2026."
+
+    adapter.apply_correction_notice("vid-1", notice)
+    adapter.apply_correction_notice("vid-1", notice)
+
+    import json as _json
+    body = _json.loads(updated[-1])
+    snippet = body["snippet"]
+    assert snippet["tags"] == ["deals", "verified"], "tags must survive a correction"
+    assert snippet["defaultLanguage"] == "en"
+    assert snippet["description"].count(notice) == 1, "a retry must not duplicate the notice"
+    assert "Original approved description." in snippet["description"]

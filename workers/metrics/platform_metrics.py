@@ -25,8 +25,14 @@ def parse_youtube_analytics(payload: dict[str, Any]) -> dict[str, Optional[float
         "views": _int(report.get("views")),
         "likes": _int(report.get("likes")),
         "comments": _int(report.get("comments")),
-        "impressions": None,  # needs the reporting API dimension; not in this pull
-        "avg_watch_s": float(avg_watch) if avg_watch is not None else None,
+        "shares": _int(report.get("shares")),
+        "impressions": _int(report.get("impressions")),
+        "avg_watch_s": _float(avg_watch),
+        "avg_view_duration_s": _float(avg_watch),
+        "avg_view_percentage": _float(report.get("averageViewPercentage")),
+        "ctr": _float(report.get("impressionClickThroughRate")),
+        "retention_3s": _float(report.get("retention_3s")),
+        "subscribers_gained": _int(report.get("subscribersGained")),
     }
 
 
@@ -43,9 +49,24 @@ def parse_graph_insights(payload: dict[str, Any]) -> dict[str, Optional[float]]:
         "views": _int(named.get("total_video_views")),
         "likes": _int(named.get("total_video_reactions")),
         "comments": _int(named.get("total_comments")),
-        "impressions": None,
+        "shares": None,
+        "impressions": _int(named.get("total_impressions")),
         "avg_watch_s": None,
+        "avg_view_duration_s": None,
+        "avg_view_percentage": None,
+        "ctr": None,
+        "retention_3s": None,
+        "subscribers_gained": None,
     }
+
+
+def _float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _int(value: Any) -> Optional[int]:

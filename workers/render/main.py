@@ -62,6 +62,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("render")
 
 
+def _sha256(path: Path | None) -> str | None:
+    """Digest of the exact asset bytes recorded in the render package pin."""
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.is_file():
+        return None
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class RenderJob:
     def __init__(self, offer_id: str, api_url: str, out_root: Path,
                  language: str = "en", motion_template: str = "studio"):
@@ -242,13 +258,54 @@ class RenderJob:
                 "configure MTK_STORAGE_* or pass --video with a local file"
             )
 
-        # captions from the step log (source-derived, deterministic) and the
-        # real step timestamps, not a synthetic words-per-minute timeline.
-        step_log = json.loads(capture["step_log"]) if capture and isinstance(capture.get("step_log"), str) \
-            else (capture or {}).get("step_log") or []
-        segments = captions_mod.segments_from_step_log(step_log) or [
-            {"text": offer.get("title", "offer walkthrough")}
-        ]
+        # optional TTS narration — synthetic narration must be disclosed (§5).
+        # Synthesize BEFORE captions so we can align cues to the actual spoken
+        # segment durations instead of a words-per-minute estimate.
+        narration_file, narration_used = None, False
+        narration_texts: list[str] = []
+        aligned_captions: list[dict] | None = None
+        if not skip_narration:
+            narration_dir = self.project / "assets" / "narration" / language
+            narration_texts = narration_mod.narration_segments(
+                sources["script"]["markdown"])
+            narration = narration_mod.synthesize_all(
+                narration_texts, narration_dir, language=language,
+            )
+            if narration["used"]:
+                # v0.14: mix per-segment files into ONE track and USE it in the
+                # renders. A failed mix downgrades to capture audio — disclosure
+                # metadata must never claim narration that is not in the video.
+                track = narration_mod.mix_segments(narration["paths"], narration_dir)
+                if track is not None:
+                    narration_file = os.path.relpath(track, self.project)
+                narration_used = narration_file is not None
+                # Speech-aligned captions only when the spoken language is the
+                # on-screen caption language. A missing probe falls back safely
+                # to the deterministic step-log timeline.
+                if narration_used and language == self.caption_language:
+                    cursor = 0.0
+                    aligned: list[dict] = []
+                    for text, audio_path in zip(narration_texts, narration["paths"]):
+                        duration = render_mod.probe_duration(str(audio_path))
+                        if not duration or duration <= 0:
+                            aligned = []
+                            break
+                        aligned.append({"text": text, "start": cursor,
+                                        "duration": duration})
+                        cursor += duration
+                    aligned_captions = aligned or None
+
+        # Captions from narration timing when available; otherwise from the
+        # step log (source-derived, deterministic) with the real step
+        # timestamps, not a synthetic words-per-minute timeline.
+        if aligned_captions:
+            segments = aligned_captions
+        else:
+            step_log = json.loads(capture["step_log"]) if capture and isinstance(capture.get("step_log"), str) \
+                else (capture or {}).get("step_log") or []
+            segments = captions_mod.segments_from_step_log(step_log) or [
+                {"text": offer.get("title", "offer walkthrough")}
+            ]
         cues = captions_mod.build_cues(segments)
         srt_path, vtt_path = project_mod.write_captions(
             self.project,
@@ -259,25 +316,6 @@ class RenderJob:
             ass=captions_mod.to_ass(cues, language=self.caption_language),
         )
         caption_suffix = "" if language == "en" else f".{language}"
-        captions_rel = f"assets/captions{caption_suffix}.ass"
-
-        # optional TTS narration — synthetic narration must be disclosed (§5)
-        narration_file, narration_used = None, False
-        if not skip_narration:
-            narration_dir = self.project / "assets" / "narration" / language
-            narration = narration_mod.synthesize_all(
-                narration_mod.narration_segments(sources["script"]["markdown"]),
-                narration_dir,
-                language=language,
-            )
-            if narration["used"]:
-                # v0.14: mix per-segment files into ONE track and USE it in the
-                # renders. A failed mix downgrades to capture audio — disclosure
-                # metadata must never claim narration that is not in the video.
-                track = narration_mod.mix_segments(narration["paths"], narration_dir)
-                if track is not None:
-                    narration_file = os.path.relpath(track, self.project)
-            narration_used = narration_file is not None
 
         # deterministic cover source (SVG always; optional PNG when Pillow exists)
         website = self._website_url(offer)
@@ -289,8 +327,6 @@ class RenderJob:
             website_url=website,
         )
         primary_cover = cover_bundle.get("primary") or {}
-        cover_rel = primary_cover.get("png") or primary_cover.get("svg") or ""
-        cover_path = f"projects/{self.offer_id}/{cover_rel}" if cover_rel else None
 
         # render every requested preset relative to the project dir
         video_rel = os.path.relpath(capture_video, self.project)
@@ -298,8 +334,19 @@ class RenderJob:
         results = []
         for key in preset_keys:
             preset = get_preset(key)
+            # Pair each delivery frame with the cover designed for it. A 16:9
+            # thumbnail on a 9:16 Reel/TikTok is the wrong asset.
+            selected_cover = covers_mod.cover_for_preset(cover_bundle, preset.key)
+            cover_rel = selected_cover.get("png") or selected_cover.get("svg") or ""
+            cover_path = f"projects/{self.offer_id}/{cover_rel}" if cover_rel else None
             language_suffix = "" if language == "en" else f"-{language}"
             output = f"renders/{offer['id']}-{preset.key}{language_suffix}.mp4"
+            # Burn-in captions are frame-specific: the 9:16 preset must use a
+            # 1080x1920 PlayRes and vertical margins, not a scaled 16:9 script.
+            captions_rel = project_mod.write_preset_captions(
+                self.project, cues, preset.key, preset.width, preset.height,
+                language=language, caption_language=self.caption_language,
+            )
             motion_filter = motion_mod.build_motion_filter(
                 preset,
                 title=offer.get("title", ""),
@@ -324,6 +371,7 @@ class RenderJob:
                           proc.stderr[-2000:])
                 raise SystemExit(f"ffmpeg failed for preset {preset.key} ({language})")
             duration = render_mod.probe_duration(str(self.project / output))
+            captions_local = self.project / f"assets/captions{caption_suffix}.srt"
             results.append({
                 "preset": preset.key,
                 "language": language,
@@ -333,6 +381,9 @@ class RenderJob:
                 "captions_path": f"projects/{self.offer_id}/assets/captions{caption_suffix}.srt",
                 "cover_path": cover_path,
                 "duration_s": duration,
+                "video_sha256": _sha256(self.project / output),
+                "captions_sha256": _sha256(captions_local),
+                "cover_sha256": _sha256(self.project / cover_rel) if cover_rel else None,
                 "command": render_mod.describe(cmd),
             })
             log.info("rendered %s/%s → %s", language, preset.key, output)
@@ -393,6 +444,9 @@ class RenderJob:
                 "motion_template": self.motion_template,
                 "script_version": self.script_version,
                 "script_version_hash": self.script_version_hash,
+                "video_sha256": render_row.get("video_sha256"),
+                "captions_sha256": render_row.get("captions_sha256"),
+                "cover_sha256": render_row.get("cover_sha256"),
                 "capture_id": self.capture_id,
                 "disclosure": narration_mod.disclosure_record(narration_used,
                                                               language=language),

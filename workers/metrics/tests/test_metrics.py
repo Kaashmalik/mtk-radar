@@ -51,8 +51,8 @@ def test_graph_insights_entries_flatten():
         {"name": "total_comments", "values": [{"value": 4}]},
     ]}
     snap = parse_graph_insights(payload)
-    assert snap == {"views": 402, "likes": 31, "comments": 4,
-                    "impressions": None, "avg_watch_s": None}
+    assert snap["views"] == 402 and snap["likes"] == 31 and snap["comments"] == 4
+    assert snap["impressions"] is None and snap["avg_watch_s"] is None
 
 
 # ------------------------------------------------------------- orchestration
@@ -77,6 +77,10 @@ class FakeAPI:
         return FakeResponse(self.posts)
 
     def post(self, path, json=None):
+        if path == "/locks/acquire":
+            return FakeResponse({"acquired": True}, status_code=200)
+        if path == "/locks/release":
+            return FakeResponse({"released": True}, status_code=200)
         self.written.append((path, json))
         return FakeResponse({"ok": True}, status_code=201)
 
@@ -165,3 +169,35 @@ def test_instagram_insights_map_to_the_snapshot():
     body = [b for path, b in api.written if path.endswith("/metrics")][0]
     assert body["platform"] == "instagram"
     assert body["views"] == 640 and body["impressions"] == 900 and body["likes"] == 21
+
+
+def test_youtube_full_report_maps_impressions_ctr_and_retention():
+    payload = {
+        "columnHeaders": [
+            {"name": "views"}, {"name": "likes"}, {"name": "comments"},
+            {"name": "shares"}, {"name": "averageViewDuration"},
+            {"name": "averageViewPercentage"}, {"name": "subscribersGained"},
+            {"name": "subscribersLost"}, {"name": "impressions"},
+            {"name": "impressionClickThroughRate"}, {"name": "estimatedMinutesWatched"},
+            {"name": "retention_3s"},
+        ],
+        "rows": [[1500, 88, 12, 17, 143.5, 48.25, 9, 2, 22000, 5.4, 3100, 0.61]],
+    }
+    snap = parse_youtube_analytics(payload)
+    assert snap["shares"] == 17
+    assert snap["impressions"] == 22000
+    assert snap["avg_view_duration_s"] == 143.5
+    assert snap["avg_view_percentage"] == 48.25
+    assert snap["ctr"] == 5.4
+    assert snap["retention_3s"] == 0.61
+    assert snap["subscribers_gained"] == 9
+
+
+def test_pinned_account_never_uses_another_accounts_metrics():
+    posts = [{"id": "sch-yt", "platform": "youtube", "remote_post_id": "vid1",
+              "platform_account_id": "acct-a"}]
+    api = FakeAPI(posts)
+    w = _worker(posts, {"youtube": FakeYouTube()})  # default belongs to another account
+    w.api = api
+    assert w.run_once() == 0, "wrong-channel metrics must be skipped, not attributed"
+    assert api.written == []

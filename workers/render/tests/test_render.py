@@ -3,7 +3,7 @@
 import pytest
 
 from presets import PRESETS, get_preset
-from project import build_edit_manifest
+from project import build_edit_manifest, write_preset_captions
 from render import build_ffmpeg_cmd, describe
 
 
@@ -27,10 +27,15 @@ class TestFfmpegCommand:
         assert "libx264" in joined and "+faststart" in joined
         assert "subtitles" not in joined
 
-    def test_vertical_crop_chain(self):
+    def test_vertical_full_frame_composition(self):
         cmd = build_ffmpeg_cmd("capture.mp4", "out.mp4", get_preset("vertical"))
         joined = describe(cmd)
-        assert "scale=-2:1920:flags=lanczos,crop=1080:1920" in joined
+        assert "-filter_complex" in joined
+        assert "force_original_aspect_ratio=decrease" in joined, \
+            "the full 16:9 frame must be preserved"
+        assert "overlay=(W-w)/2:(H-h)/2" in joined
+        assert "boxblur=" in joined, "the 9:16 background must be a blurred fill"
+        assert "-map '[vout]'" in joined
 
     def test_captions_burned_with_relative_path(self):
         cmd = build_ffmpeg_cmd(
@@ -38,6 +43,25 @@ class TestFfmpegCommand:
         )
         joined = describe(cmd)
         assert "subtitles=assets/captions.srt" in joined
+
+    def test_each_preset_gets_frame_specific_captions(self, tmp_path):
+        cues = [{"text": "Readable on every frame", "start": 0, "end": 2}]
+        landscape = write_preset_captions(
+            tmp_path, cues, "landscape", 1920, 1080,
+            language="en", caption_language="en",
+        )
+        vertical = write_preset_captions(
+            tmp_path, cues, "vertical", 1080, 1920,
+            language="en", caption_language="en",
+        )
+        assert landscape == "assets/captions-landscape.ass"
+        assert vertical == "assets/captions-vertical.ass"
+        landscape_text = (tmp_path / landscape).read_text()
+        vertical_text = (tmp_path / vertical).read_text()
+        assert "PlayResX: 1920" in landscape_text and "PlayResY: 1080" in landscape_text
+        assert "PlayResX: 1080" in vertical_text and "PlayResY: 1920" in vertical_text
+        assert "Style: Default,DejaVu Sans,64" in vertical_text, \
+            "vertical captions need larger type and vertical margins"
 
     def test_absolute_path_rejected(self):
         with pytest.raises(ValueError):

@@ -12,13 +12,36 @@ import { clientFetch } from "@/lib/api-client";
  * v0.18: operator-configured publish windows (settings.publish_windows,
  * §17) render as quick-picks; the default stays 18:00 PKT when unset.
  */
-export default function ScheduleForm({ offerId }: { offerId: string }) {
+type RenderOption = {
+  id: string;
+  preset: string;
+  language: string;
+  width: number;
+  height: number;
+  duration_s: string | null;
+};
+
+export default function ScheduleForm({
+  offerId,
+  renders = [],
+}: {
+  offerId: string;
+  renders?: RenderOption[];
+}) {
   const router = useRouter();
   const [platform, setPlatform] = useState("youtube");
   const [privacy, setPrivacy] = useState("private");
   const [language, setLanguage] = useState("en");
+  const [renderId, setRenderId] = useState("");
   const [metadataVariant, setMetadataVariant] = useState("default");
   const [coverPath, setCoverPath] = useState("");
+  const [accounts, setAccounts] = useState<{
+    id: string;
+    platform: string;
+    account_handle: string;
+    status?: string;
+  }[]>([]);
+  const [accountId, setAccountId] = useState("");
   const [allowedLanguages, setAllowedLanguages] = useState<string[]>(["en"]);
   const [windows, setWindows] = useState<string[]>([]);
   const [when, setWhen] = useState(() => defaultWhen("18:00"));
@@ -35,6 +58,16 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
         if (alive && Array.isArray(list) && list.length > 0) setWindows(list);
       })
       .catch(() => {}); // settings are an enhancement — the form works without them
+
+    // Pin the exact upload account. The API also pins the first active
+    // account when omitted, but an explicit choice prevents uploading a
+    // YouTube package to the wrong channel.
+    clientFetch("/platform-accounts")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        if (alive && Array.isArray(list)) setAccounts(list);
+      })
+      .catch(() => {});
 
     // English is always available; Urdu only appears after the operator
     // enables it in Settings → Language policy.
@@ -53,6 +86,11 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
     };
   }, []);
 
+  const platformAccounts = accounts.filter(
+    (account) => account.platform === platform && (account.status ?? "active") === "active",
+  );
+  const renderOptions = renders.filter((render) => render.language === language);
+
   async function schedule() {
     setBusy(true);
     setError(null);
@@ -69,6 +107,8 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
           timezone: "Asia/Karachi",
           language,
           metadata_variant: metadataVariant,
+          ...(accountId ? { platform_account_id: accountId } : {}),
+          ...(renderId ? { render_id: renderId } : {}),
           ...(coverPath.trim() ? { cover_path: coverPath.trim() } : {}),
         }),
       });
@@ -92,7 +132,10 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: "0.6rem" }}>
       <select
         value={platform}
-        onChange={(e) => setPlatform(e.target.value)}
+        onChange={(e) => {
+          setPlatform(e.target.value);
+          setAccountId("");
+        }}
         style={inputStyle}
         aria-label="Platform"
       >
@@ -101,15 +144,52 @@ export default function ScheduleForm({ offerId }: { offerId: string }) {
         <option value="instagram">Instagram</option>
         <option value="tiktok">TikTok</option>
       </select>
+      {platformAccounts.length > 0 && (
+        <select
+          value={accountId}
+          onChange={(e) => setAccountId(e.target.value)}
+          style={inputStyle}
+          aria-label="Platform account"
+        >
+          <option value="">Auto: first active account</option>
+          {platformAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.account_handle}
+            </option>
+          ))}
+        </select>
+      )}
       <select
         value={language}
-        onChange={(e) => setLanguage(e.target.value)}
+        onChange={(e) => {
+          setLanguage(e.target.value);
+          setRenderId("");
+        }}
         style={inputStyle}
         aria-label="Language"
       >
         {allowedLanguages.map((code) => (
           <option key={code} value={code}>
             {code === "ur" ? "اردو (Urdu voiceover)" : "English"}
+          </option>
+        ))}
+      </select>
+      <select
+        value={renderId}
+        onChange={(e) => setRenderId(e.target.value)}
+        style={inputStyle}
+        aria-label="Render"
+        title="Pin the exact rendered file. Auto uses the platform's native aspect."
+      >
+        <option value="">
+          Auto: {platform === "instagram" || platform === "tiktok"
+            ? "9:16 vertical"
+            : "16:9 landscape"}
+        </option>
+        {renderOptions.map((render) => (
+          <option key={render.id} value={render.id}>
+            {render.preset} · {render.width}×{render.height}
+            {render.duration_s ? ` · ${Number(render.duration_s).toFixed(0)}s` : ""}
           </option>
         ))}
       </select>
