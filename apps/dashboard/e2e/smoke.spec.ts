@@ -78,3 +78,14 @@ test("sources page lists registered sources and the add form", async ({ page }) 
   await expect(page.locator("#src-provider")).toBeVisible();
   await expect(page.locator("#src-adapter")).toBeVisible();
 });
+
+test("start automation and Needs You render the v0.30 operator gates", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".automation-card h2")).toContainText("Start automation");
+  await expect(page.locator(".automation-card")).toContainText("workers online");
+
+  await page.goto("/attention");
+  await expect(page.locator("h1")).toContainText("Needs You");
+  await expect(page.locator("main")).not.toContainText("did not return the attention inbox");
+  await expect(page.locator(".attention-kpis")).toBeVisible();
+});

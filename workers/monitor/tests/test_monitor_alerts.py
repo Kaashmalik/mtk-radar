@@ -82,3 +82,59 @@ def test_fresh_metrics_stay_quiet(caplog):
     with caplog.at_level("WARNING"):
         monitor.check_metrics_freshness(client)
     assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+class AttentionClient:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def get(self, path, params=None):
+        if path == "/attention":
+            return FakeResponse(self.payload)
+        return FakeResponse([])
+
+
+def test_attention_counts_become_grouped_immediate_and_digest_alerts(caplog):
+    payload = {
+        "counts": {
+            "redaction": 2,
+            "offer_approval": 1,
+            "worker": 1,
+            "render_failed": 1,
+            "token": 1,  # credential alerts are owned by check_platform_accounts
+        },
+        "by_kind": {
+            "redaction": {"label": "Redaction reviews", "href": "/attention"},
+            "offer_approval": {"label": "Offers ready to approve", "href": "/attention"},
+            "worker": {"label": "Worker health", "href": "/settings"},
+            "render_failed": {"label": "Render / QC failures", "href": "/queue"},
+            "token": {"label": "Platform connections", "href": "/connections"},
+        },
+        "items": [
+            {"kind": "redaction", "title": "Review redaction: A"},
+            {"kind": "redaction", "title": "Review redaction: B"},
+            {"kind": "offer_approval", "title": "Approve offer: C"},
+            {"kind": "worker", "title": "Metrics worker heartbeat is stale"},
+            {"kind": "render_failed", "title": "Render failed: D"},
+        ],
+    }
+    with caplog.at_level("WARNING"):
+        alerts = monitor.check_attention(AttentionClient(payload))
+
+    by_event = {a["event"]: a for a in alerts}
+    assert "attention.token" not in by_event
+    assert by_event["attention.redaction"]["delivery"] == "digest"
+    assert by_event["attention.offer_approval"]["delivery"] == "digest"
+    assert by_event["attention.worker"]["delivery"] == "immediate"
+    assert by_event["attention.worker"]["severity"] == "error"
+    assert by_event["attention.render_failed"]["severity"] == "error"
+    assert by_event["attention.redaction"]["details"]["count"] == 2
+    assert "Review redaction: A" in by_event["attention.redaction"]["message"]
+
+
+def test_legacy_api_without_attention_is_quiet():
+    class Legacy:
+        def get(self, path, params=None):
+            return FakeResponse([])
+
+    assert monitor.check_attention(Legacy()) == []

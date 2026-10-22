@@ -31,12 +31,14 @@ import httpx
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from platforms.facebook import FacebookAdapter, TokenExpiredError  # noqa: E402
 from platforms.instagram import InstagramAdapter  # noqa: E402
 from platforms.youtube import OAuthConfig, YouTubeAdapter  # noqa: E402
 
 from platform_metrics import parse_graph_insights, parse_youtube_analytics  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 
 def _int(value) -> int | None:
@@ -304,10 +306,19 @@ def main() -> None:
 
     _install_stop_handlers()
     worker = MetricsWorker(args.api)
+    hb = WorkerHeartbeat(args.api, "metrics")
     if args.once:
-        worker.run_once()
+        hb.beat("ok", detail="one-shot metrics sweep")
+        try:
+            worker.run_once()
+        finally:
+            hb.beat("stopped", detail="one-shot metrics complete")
         return
-    worker.run_forever(args.interval)
+    hb.start()
+    try:
+        worker.run_forever(args.interval)
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":

@@ -92,6 +92,7 @@ docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
 
 MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest \
   packages/object_storage/tests packages/source_adapters/tests \
+  packages/worker_heartbeat/tests \
   services/api/tests workers/verification/tests \
   workers/render/tests workers/capture/tests workers/publishing/tests \
   workers/metrics/tests workers/batch/tests workers/monitor/tests \

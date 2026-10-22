@@ -16,6 +16,7 @@ const LINKS: [string, string][] = [
   ["/radar", "Radar"],
   ["/review", "Review"],
   ["/queue", "Queue"],
+  ["/attention", "Needs You"],
   ["/studio", "Studio"],
   ["/calendar", "Calendar"],
   ["/analytics", "Growth"],

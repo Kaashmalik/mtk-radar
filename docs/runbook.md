@@ -28,10 +28,36 @@ Companion documents:
 
 ```bash
 cp .env.example .env          # then set POSTGRES_PASSWORD for anything real
-docker compose -f infra/docker/docker-compose.yml up -d   # postgres+redis+api+dashboard
-docker compose -f infra/docker/docker-compose.yml \
-               --profile workers up -d                    # + publishing & monitor
+./scripts/mtk-start.sh        # API + dashboard + migrations + worker profile
+# or, manually:
+# docker compose -f infra/docker/docker-compose.yml up -d
+# docker compose -f infra/docker/docker-compose.yml --profile workers up -d
 ```
+
+### Laptop-first start, heartbeats and the Start button (v0.30)
+
+`scripts/mtk-start.sh` is the host-side launcher. It starts Postgres/Redis,
+builds and starts the API/dashboard, applies pending migrations, then starts
+the long-running workers. The dashboard’s **Start automation** button never
+talks to Docker: `POST /automation/start` runs a fresh preflight, refuses to
+arm if any expected worker is missing/stale, and then writes a safe policy
+preset (assisted or private autopilot; public autopilot needs an explicit
+acknowledgement).
+
+- **Needs You** (`/attention`) aggregates redaction reviews, offer/post
+  approvals, render/QC failures, publishing holds, expiries, corrections,
+  reconnect prompts, budget exhaustion and worker health.
+- **Worker health** (`GET /workers`) comes from `worker_heartbeats`; a worker
+  posts every 60s. A stale/missing beat is an alert. Capture is intentionally
+  absent because it is a human-operated browser, not a daemon.
+- **Autopilot requires an alert channel.** `GET /automation/preflight?mode=
+  autopilot_private` fails when neither webhook nor email is configured, so an
+  unattended laptop cannot fail silently. Assisted mode only warns.
+- A sleeping/off laptop cannot alert you. Keep an external uptime check on the
+  API/dashboard once the pilot becomes relied upon.
+- systemd user unit and desktop shortcut: `infra/systemd/mtk-radar.service`,
+  `infra/desktop/mtk-radar.desktop`; install notes in
+  `infra/systemd/README.md`. Stop with `./scripts/mtk-stop.sh` (volumes kept).
 
 - API: `http://localhost:8000` (FastAPI; `/health` wired to CI + compose healthcheck)
 - Dashboard: `http://localhost:3000`
@@ -42,7 +68,7 @@ docker compose -f infra/docker/docker-compose.yml \
 ### Migrations
 
 ```bash
-python services/api/db_migrate.py            # apply pending (001…007…), recorded in schema_migrations
+python services/api/db_migrate.py            # apply pending (001…024…), recorded in schema_migrations
 ```
 
 Policy: numbered SQL files under `services/api/db/migrations`, strictly ordered,
@@ -145,6 +171,8 @@ python services/api/scripts/seed_sources.py   # idempotent canonical-URL sources
 | Alert | Meaning | Runbook step |
 | --- | --- | --- |
 | `ALERT token expiry …` (monitor) | dead platform session | §3 recovery |
+| `attention.worker` | a worker heartbeat is stale/missing | run `scripts/mtk-start.sh`; check worker log |
+| `attention.render_failed` / `publish_failed` | dead-letter or held post | Queue / Calendar; never retry blindly |
 | Account `token_expired` on calendar | same, operator view | §3 recovery |
 | Post `auto-paused: offer state -> expired` | offer died mid-schedule | verify the offer; corrections workflow if facts were wrong |
 | Recheck due > 0 (analytics) | verified offers overdue recheck | human recheck → `/sweep-stale` demotes if skipped |

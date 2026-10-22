@@ -251,6 +251,7 @@ import secrets
 import fastapi
 
 import api_hardening
+from attention_api import router as _attention_router
 from automation_api import router as _automation_router
 from captures_api import router as _captures_router
 from offers_api import router as _offers_router
@@ -261,6 +262,8 @@ from locks_api import router as _locks_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
 from content_studio_api import router as _studio_router
+from worker_health import EXPECTED_WORKERS
+from worker_health import router as _workers_router
 from schedules_state import script_version_hash
 
 
@@ -318,7 +321,7 @@ def auth_client(client):
 
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
               _settings_router, _analytics_router, _health_router, _locks_router,
-              _automation_router, _studio_router):
+              _automation_router, _studio_router, _attention_router, _workers_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -2711,3 +2714,132 @@ def test_youtube_chapters_are_finalized_before_the_metadata_hash():
     }, beats, 60)
     assert "0:12 Proof" in supplied["caption"], \
         "reviewed chapters must be written into the hashed description"
+
+
+# --------------------------------------- v0.30: heartbeats + Needs You
+
+def _post_all_heartbeats(auth_client, *, monitor_webhook=True):
+    for name, spec in EXPECTED_WORKERS.items():
+        metadata = {}
+        if name == "render":
+            metadata = {"toolchain": {"ffmpeg": "/usr/bin/ffmpeg"}}
+        if name == "monitor":
+            metadata = {"notification_channels": {
+                "webhook": bool(monitor_webhook), "email": False,
+            }}
+        res = auth_client.post("/workers/heartbeat", headers=SVC, json={
+            "worker": name, "status": "ok", "metadata": metadata,
+            "interval_s": spec["interval_s"],
+        })
+        assert res.status_code == 200, res.text
+
+
+def test_heartbeat_registry_attention_and_one_click_start(auth_client):
+    _post_all_heartbeats(auth_client)
+    workers = auth_client.get("/workers", headers=SVC).json()
+    assert workers["all_online"] is True, workers
+    assert workers["missing"] == [], workers
+    assert {w["name"] for w in workers["workers"]} >= set(EXPECTED_WORKERS)
+
+    _run(
+        "INSERT INTO platform_accounts "
+        "(platform, account_handle, credential_source, status) "
+        "VALUES ('youtube', '@v030-test', 'env:YOUTUBE_', 'active') "
+        "ON CONFLICT (platform, account_handle) DO UPDATE SET status = 'active'"
+    )
+
+    offer_id = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state, recheck_at) "
+        "VALUES ('Attention fixture', 'Attention Provider', 'domains', 'credits', "
+        "'verified', now() + interval '2 days') RETURNING id"
+    )[0]["id"]
+    _run(
+        "INSERT INTO offer_scripts (offer_id, version, markdown) "
+        "VALUES ($1, 1, '# Attention fixture script')", offer_id,
+    )
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path) "
+        "VALUES ($1, 'captures/attention.mp4') RETURNING id", offer_id,
+    )[0]["id"]
+    _run(
+        "INSERT INTO renders (offer_id, capture_id, preset, width, height, video_path, "
+        "status, qc_status, qc_report) VALUES "
+        "($1, $2, 'landscape', 1920, 1080, 'projects/attention.mp4', "
+        "'rendered', 'passed', '{\"status\": \"passed\"}'::jsonb)",
+        offer_id, capture_id,
+    )
+    _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, timezone, "
+        "privacy, idempotency_key, version_hash) VALUES "
+        "($1, 'youtube', 'needs_approval', now() + interval '1 day', "
+        "'Asia/Karachi', 'private', 'v030-approval', 'hash')", offer_id,
+    )
+    _run(
+        "INSERT INTO schedules (offer_id, platform, state, local_time, timezone, "
+        "privacy, idempotency_key, version_hash, outcome_detail) VALUES "
+        "($1, 'youtube', 'failed', now(), 'Asia/Karachi', 'private', "
+        "'v030-failed', 'hash', '{\"error\": \"test publish failure\"}'::jsonb)",
+        offer_id,
+    )
+
+    attention = auth_client.get("/attention", headers=SVC).json()
+    assert attention["counts"]["redaction"] >= 1, attention["counts"]
+    assert attention["counts"]["offer_approval"] >= 1, attention["counts"]
+    assert attention["counts"]["schedule_approval"] >= 1, attention["counts"]
+    assert attention["counts"]["publish_failed"] >= 1, attention["counts"]
+    assert attention["counts"]["worker"] == 0, attention["counts"]
+    assert any(i["kind"] == "offer_approval" for i in attention["items"])
+
+    # A stale heartbeat is an alert, never a quiet success.
+    _run(
+        "UPDATE worker_heartbeats SET last_seen_at = now() - interval '1 hour', "
+        "interval_s = 60 WHERE worker = 'metrics'"
+    )
+    stale = auth_client.get("/attention", headers=SVC).json()
+    assert stale["counts"]["worker"] >= 1, stale["counts"]
+    _post_all_heartbeats(auth_client)
+
+    _set_policy(auth_client, {"mode": "assisted"})
+    pre = auth_client.get("/automation/preflight?mode=assisted", headers=SVC)
+    assert pre.status_code == 200, pre.text
+    report = pre.json()
+    assert report["ready"] is True, report
+    assert any(c["id"] == "render_toolchain" and c["status"] == "pass"
+               for c in report["checks"])
+
+    started = auth_client.post("/automation/start", headers=SVC, json={"mode": "assisted"})
+    assert started.status_code == 200, started.text
+    body = started.json()
+    assert body["started"] is True
+    assert body["policy"]["paused"] is False
+    assert body["policy"]["stages"]["approve"] == "human"
+
+    stopped = auth_client.post("/automation/stop", headers=SVC, json={"note": "test"})
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["policy"]["paused"] is True
+    _set_policy(auth_client, {"mode": "assisted", "paused": False, "dry_run": False})
+
+
+def test_autopilot_start_requires_a_notification_channel(auth_client):
+    _post_all_heartbeats(auth_client, monitor_webhook=False)
+    _run(
+        "INSERT INTO platform_accounts "
+        "(platform, account_handle, credential_source, status) "
+        "VALUES ('youtube', '@v030-autopilot', 'env:YOUTUBE_', 'active') "
+        "ON CONFLICT (platform, account_handle) DO UPDATE SET status = 'active'"
+    )
+    report = auth_client.get(
+        "/automation/preflight?mode=autopilot_private", headers=SVC,
+    ).json()
+    assert report["ready"] is False
+    assert any(c["id"] == "notifications" and c["blocking"] for c in report["blocking"])
+
+    blocked = auth_client.post(
+        "/automation/start", headers=SVC, json={"mode": "autopilot_private"},
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    public = auth_client.post(
+        "/automation/start", headers=SVC, json={"mode": "autopilot_public"},
+    )
+    assert public.status_code == 422, "public autopilot needs explicit acknowledgement"

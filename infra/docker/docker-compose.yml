@@ -104,6 +104,15 @@ services:
       # dashboard's client islands are subject to CORS — a wrong allowlist
       # breaks every interactive action in the browser.
       MTK_CORS_ORIGINS: ${MTK_CORS_ORIGINS:-}
+      # v0.30 preflight reads the same storage config as the workers. The API
+      # never touches media bytes; this only proves the configured backend is
+      # complete before automation is armed.
+      MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+      MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
     ports:
       - "8000:8000"
     depends_on:

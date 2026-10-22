@@ -36,6 +36,7 @@ from source_adapters import (  # noqa: E402
     fetch_page_snapshot,
     fetch_rss,
 )
+from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # optional; raises rate limits
@@ -223,10 +224,19 @@ def main() -> None:
 
     _install_stop_handlers()
     collector = Collector(args.api)
+    hb = WorkerHeartbeat(args.api, "collectors")
     if args.once:
-        asyncio.run(collector.sweep())
+        hb.beat("ok", detail="one-shot sweep")
+        try:
+            asyncio.run(collector.sweep())
+        finally:
+            hb.beat("stopped", detail="one-shot sweep complete")
         return
-    collector.run_forever()
+    hb.start()
+    try:
+        collector.run_forever()
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":
