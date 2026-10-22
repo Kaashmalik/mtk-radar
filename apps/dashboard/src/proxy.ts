@@ -53,9 +53,10 @@ function redirectToLogin(request: NextRequest, reason: string): NextResponse {
 }
 
 export const config = {
-  // Public: the login page, session endpoints, Next internals, and static
-  // assets. Everything else (pages and /api/backend) is authenticated.
+  // Public: the login page, session endpoints, the container liveness probe,
+  // Next internals, and static assets. Everything else (pages and
+  // /api/backend) is authenticated.
   matcher: [
-    "/((?!api/session|login|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!api/session|api/health|login|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };

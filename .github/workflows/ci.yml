@@ -54,6 +54,11 @@ jobs:
         env:
           MTK_TEST_DATABASE_URL: postgresql://mtk:mtk@localhost:5432/mtk_radar_ci
         run: pytest services/api/tests/test_integration.py -v
+      - name: Compose configuration (production + dev override)
+        run: |
+          docker compose -f infra/docker/docker-compose.yml config -q
+          docker compose -f infra/docker/docker-compose.yml \
+            -f infra/docker/docker-compose.dev.yml config -q
 
   node:
     name: Node (offer-schema + dashboard types + production build)

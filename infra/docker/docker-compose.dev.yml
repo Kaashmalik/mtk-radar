@@ -1,0 +1,39 @@
+# Local development override — NOT for deployment.
+#
+#   docker compose -f infra/docker/docker-compose.yml \
+#                  -f infra/docker/docker-compose.dev.yml up
+#
+# Restores the conveniences deliberately removed from the production file:
+# database/cache ports published to the host, live-reloading API and dashboard
+# source mounts. The base file still defines the same services and volumes.
+name: mtk-radar
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  api:
+    working_dir: /repo/services/api
+    volumes:
+      - ../../services/api:/repo/services/api
+      - ../../packages:/repo/packages
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  dashboard:
+    user: root
+    working_dir: /repo/apps/dashboard
+    volumes:
+      - ../..:/repo
+    command: >
+      sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev"

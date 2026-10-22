@@ -12,8 +12,10 @@ services:
       # default is dev-only; set POSTGRES_PASSWORD in .env for anything real
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mtk}
       POSTGRES_DB: mtk_radar
-    ports:
-      - "5432:5432"
+    # Private by default: only the compose network may reach the database.
+    # Publish 5432 only through docker-compose.dev.yml for host tooling.
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # NOTE: no /docker-entrypoint-initdb.d mount — schema is owned by the
@@ -31,8 +33,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -53,9 +55,9 @@ services:
       MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
     volumes:
       - minio-data:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+    expose:
+      - "9000"
+      - "9001"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
@@ -78,7 +80,9 @@ services:
 
   api:
     build:
-      context: ../../services/api
+      context: ../..
+      dockerfile: services/api/Dockerfile
+    image: mtk-radar-api:local
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
@@ -110,13 +114,23 @@ services:
       # never touches media bytes; this only proves the configured backend is
       # complete before automation is armed.
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      # Shared named volume; workers mount the SAME volume at /data so
+      # local:// refs resolve identically on every container.
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
       MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
       MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
       MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
       MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
       MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+      # §7.F.2: the YouTube-derived composite growth score stays disabled
+      # until a compliance review approves it. Set to 1 only after that review.
+      MTK_ENABLE_GROWTH_SCORE: ${MTK_ENABLE_GROWTH_SCORE:-0}
+    volumes:
+      - storage-data:/data
     ports:
-      - "8000:8000"
+      # Loopback only: the dashboard proxies every browser request. Squid, a
+      # reverse proxy, or a private network may still reach the API directly.
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -129,10 +143,15 @@ services:
       retries: 5
 
   dashboard:
-    image: node:22-alpine
+    # Immutable production build (no `npm install`/dev server at runtime).
+    # Use docker-compose.dev.yml for the live-reloading development setup.
+    build:
+      context: ../..
+      dockerfile: apps/dashboard/Dockerfile
+    image: mtk-radar-dashboard:local
     restart: unless-stopped
-    working_dir: /app
     environment:
+      NODE_ENV: production
       API_URL: http://api:8000
       # server-side (Node) reads only - never inlined into the browser bundle.
       # Interactive actions use the signed HttpOnly reviewer session; the
@@ -141,11 +160,14 @@ services:
       # Required: without a valid secret the dashboard fails closed and only
       # /login renders (with a configuration error).
       MTK_SESSION_SECRET: ${MTK_SESSION_SECRET:-}
-    volumes:
-      - ../../apps/dashboard:/app
-    command: sh -c "npm install && npm run dev"
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
       api:
         condition: service_healthy
@@ -153,18 +175,23 @@ services:
   # ---- optional workers (docker compose --profile workers up) -------------
   publishing:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     volumes:
-      - ../..:/repo:ro
+      - storage-data:/data
+      - storage-cache:/repo/.storage-cache
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
-      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
-      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
+      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-/repo/.storage-cache}
       MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
       MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
       MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
@@ -181,19 +208,20 @@ services:
       TIKTOK_CLIENT_SECRET: ${TIKTOK_CLIENT_SECRET:-}
       TIKTOK_REFRESH_TOKEN: ${TIKTOK_REFRESH_TOKEN:-}
     command: >
-      sh -c "pip install -q -r workers/publishing/requirements.txt httpx &&
-             python workers/publishing/main.py --api http://api:8000"
+      python workers/publishing/main.py --api http://api:8000
     depends_on:
       api:
         condition: service_healthy
 
   verification:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
-    volumes:
-      - ../..:/repo:ro
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
@@ -203,62 +231,70 @@ services:
       MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
       MTK_REQUIRE_TOS_ATTESTATION: ${MTK_REQUIRE_TOS_ATTESTATION:-1}
     command: >
-      sh -c "pip install -q httpx feedparser &&
-             python workers/verification/main.py"
+      python workers/verification/main.py
     depends_on:
       api:
         condition: service_healthy
 
   collectors:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
-    volumes:
-      - ../..:/repo:ro
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     command: >
-      sh -c "pip install -q httpx feedparser &&
-             python workers/collectors/main.py --api http://api:8000"
+      python workers/collectors/main.py --api http://api:8000
     depends_on:
       api:
         condition: service_healthy
 
   batch:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
-    volumes:
-      - ../..:/repo:ro
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_BATCH_INTERVAL: ${MTK_BATCH_INTERVAL:-900}
     command: >
-      sh -c "pip install -q httpx &&
-             python workers/batch/main.py --api http://api:8000 --interval ${MTK_BATCH_INTERVAL:-900}"
+      sh -c "python workers/batch/main.py --api http://api:8000 --interval ${MTK_BATCH_INTERVAL:-900}"
     depends_on:
       api:
         condition: service_healthy
 
   render:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
+    # Render writes projects (intermediate media) and materializes remote
+    # assets into a cache; both are explicit writable named volumes.
     volumes:
-      - ../..:/repo
+      - storage-data:/data
+      - storage-cache:/repo/.storage-cache
+      - render-projects:/repo/projects
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
-      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-./storage}
-      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-./.storage-cache}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
+      MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-/repo/.storage-cache}
       MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
       MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
       MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
@@ -284,22 +320,22 @@ services:
       MTK_RENDER_QC_CAPTION_SAFE_FRACTION: ${MTK_RENDER_QC_CAPTION_SAFE_FRACTION:-}
       MTK_RENDER_QC_CAPTION_MAX_LINES: ${MTK_RENDER_QC_CAPTION_MAX_LINES:-}
       MTK_RENDER_QC_EXEMPT_RANGES: ${MTK_RENDER_QC_EXEMPT_RANGES:-}
-    # ffmpeg is installed on first start; the render queue then serves itself
+    # ffmpeg is baked into the image; the render queue serves itself.
     command: >
-      sh -c "apt-get update -qq && apt-get install -y -qq ffmpeg > /dev/null &&
-             pip install -q httpx &&
-             python workers/render/main.py --sweep --watch --api http://api:8000 --out ./projects"
+      python workers/render/main.py --sweep --watch --api http://api:8000 --out ./projects
     depends_on:
       api:
         condition: service_healthy
 
   monitor:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
-    volumes:
-      - ../..:/repo:ro
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
@@ -321,19 +357,20 @@ services:
       MTK_NOTIFY_COOLDOWN_S: ${MTK_NOTIFY_COOLDOWN_S:-3600}
       MTK_NOTIFY_SUBJECT_PREFIX: "${MTK_NOTIFY_SUBJECT_PREFIX:-[MTK RADAR]}"
     command: >
-      sh -c "pip install -q httpx &&
-             python workers/monitor/main.py --api http://api:8000 --interval 300"
+      python workers/monitor/main.py --api http://api:8000 --interval 300
     depends_on:
       api:
         condition: service_healthy
 
   metrics:
     profiles: ["workers"]
-    image: python:3.12-slim
+    image: mtk-radar-workers:local
+    build:
+      context: ../..
+      dockerfile: workers/Dockerfile
     restart: unless-stopped
     working_dir: /repo
-    volumes:
-      - ../..:/repo:ro
+    # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
@@ -346,8 +383,7 @@ services:
       FACEBOOK_PAGE_ID: ${FACEBOOK_PAGE_ID:-}
       FACEBOOK_PAGE_ACCESS_TOKEN: ${FACEBOOK_PAGE_ACCESS_TOKEN:-}
     command: >
-      sh -c "pip install -q httpx &&
-             python workers/metrics/main.py --api http://api:8000 --interval ${MTK_METRICS_INTERVAL:-3600}"
+      sh -c "python workers/metrics/main.py --api http://api:8000 --interval ${MTK_METRICS_INTERVAL:-3600}"
     depends_on:
       api:
         condition: service_healthy
@@ -355,4 +391,6 @@ services:
 volumes:
   pgdata:
   minio-data:
+  storage-data:
   storage-cache:
+  render-projects:
