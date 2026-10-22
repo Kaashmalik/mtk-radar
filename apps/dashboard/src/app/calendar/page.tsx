@@ -1,4 +1,5 @@
 import "./styles.css";
+import HeldReconcile from "./HeldReconcile";
 import ScheduleActions from "./ScheduleActions";
 import { apiFetch } from "@/lib/api";
 
@@ -162,6 +163,7 @@ export default async function CalendarPage() {
               {items.map((s) => {
                 let outcome: string | null = null;
                 let held = false;
+                let openAttempt = false;
                 if (s.outcome_detail) {
                   try {
                     const parsed = JSON.parse(s.outcome_detail);
@@ -169,6 +171,10 @@ export default async function CalendarPage() {
                     // v0.23: a held post waits for a human (unknown upload
                     // outcome) — it must be obvious on the calendar.
                     held = Boolean(parsed?.hold);
+                    // v0.31: an attempt marker without a result means the worker
+                    // may have uploaded before dying. It is equally unsafe to
+                    // retry until a human reconciles it.
+                    openAttempt = Boolean(parsed?.attempt);
                   } catch {}
                 }
                 return (
@@ -184,10 +190,11 @@ export default async function CalendarPage() {
                           {s.remote_post_id && <> · post {s.remote_post_id}</>}
                           {outcome && <> · {outcome}</>}
                         </div>
-                        {held && (
+                        {(held || openAttempt) && (
                           <div className="small" style={{ color: "#f0883e" }}>
-                            ⚠ HELD — needs operator review: check the platform before
-                            re-queueing (a previous upload may already be live).
+                            ⚠ {held ? "HELD" : "UNKNOWN UPLOAD"} — needs operator review:
+                            check the platform before re-queueing (a previous upload may
+                            already be live).
                           </div>
                         )}
                       </div>
@@ -198,6 +205,9 @@ export default async function CalendarPage() {
                         {s.state}
                       </span>
                     </div>
+                    {(held || openAttempt) && (
+                      <HeldReconcile scheduleId={s.id} remotePostId={s.remote_post_id} />
+                    )}
                     <ScheduleActions scheduleId={s.id} state={s.state} />
                   </article>
                 );

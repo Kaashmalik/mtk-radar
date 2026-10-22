@@ -2336,6 +2336,180 @@ def test_attempt_marker_is_refused_for_non_scheduled_posts(auth_client):
     assert res.status_code == 409, "only scheduled posts get upload attempts"
 
 
+def _verified_offer_for_auth(auth_client):
+    """Verified offer created through the authenticated app (not the open client)."""
+    import uuid
+    provider = f"AuthFormat {uuid.uuid4()}"
+    _run(
+        "INSERT INTO sources (provider, canonical_domain, category, adapter, trust_tier) "
+        "VALUES ($1, 'example.com', 'student_programs', 'manual', 'A_provider_owned')",
+        provider,
+    )
+    source_id = _run("SELECT id FROM sources WHERE provider = $1", provider)[0]["id"]
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": provider, "category": "student_programs", "offer_type": "coupon",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    transition = auth_client.post(f"/offers/{offer_id}/transition", headers=AUTH,
+                                  json={"to": "evidence_needed"})
+    assert transition.status_code == 200, transition.text
+    url = "https://example.com/auth-format-terms"
+    evidence = auth_client.post(f"/offers/{offer_id}/evidence", headers=AUTH, json={
+        "url": url, "source_id": str(source_id), "official": True,
+        "captured_content": SNAPSHOT_TEXT, "excerpt": SNAPSHOT_TEXT,
+        "supported_fields": ["promo_code", "eligibility"],
+    })
+    assert evidence.status_code == 201, evidence.text
+    fields = {name: {
+        "value": value, "excerpt": SNAPSHOT_TEXT, "evidence_url": url,
+        "evidence_id": evidence.json()["id"], "confidence": 0.8,
+    } for name, value in (("promo_code", "SAVE2026"), ("eligibility", "students"))}
+    extraction = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": fields, "coverage": _coverage(evidence.json()["id"]),
+    })
+    assert extraction.status_code == 201, extraction.text
+    verified = auth_client.post(f"/offers/{offer_id}/transition", headers=AUTH,
+                                json={"to": "verified"})
+    assert verified.status_code == 200, verified.text
+    return offer_id, source_id, evidence.json()["id"], fields
+
+
+def test_script_formats_gate_on_reviewed_and_demonstrated_capture(auth_client):
+    """A first-person script is only generated from human-attested footage."""
+    offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
+
+    blocked = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                               params={"format": "tested_tutorial"})
+    assert blocked.status_code == 409, blocked.text
+    assert "redaction" in blocked.json()["detail"]
+
+    blocked_claim = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                                     params={"format": "claim_walkthrough"})
+    assert blocked_claim.status_code == 409, blocked_claim.text
+
+    capture = auth_client.post(f"/offers/{offer_id}/captures", headers=SVC, json={
+        "video_path": "projects/format/cap.mp4",
+        "step_log": [{"step": "open official page", "note": "no secrets"}],
+    })
+    assert capture.status_code == 201, capture.text
+
+    # Approving the redaction is not evidence of a successful claim.
+    missing_outcome = auth_client.post(
+        f"/captures/{capture.json()['id']}/redaction-review",
+        headers=AUTH, json={"approved": True},
+    )
+    assert missing_outcome.status_code == 422, missing_outcome.text
+
+    not_demonstrated = auth_client.post(
+        f"/captures/{capture.json()['id']}/redaction-review",
+        headers=AUTH, json={"approved": True, "claim_outcome": "not_demonstrated",
+                            "note": "footage shows the setup; benefit not obtained"},
+    )
+    assert not_demonstrated.status_code == 200, not_demonstrated.text
+
+    tutorial = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                                params={"format": "tested_tutorial"})
+    assert tutorial.status_code == 201, tutorial.text
+    assert tutorial.json()["format"] == "tested_tutorial"
+    assert "did not demonstrate" in tutorial.json()["markdown"].lower()
+
+    still_blocked = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                                     params={"format": "claim_walkthrough"})
+    assert still_blocked.status_code == 409, still_blocked.text
+    assert "demonstrated" in still_blocked.json()["detail"]
+
+    # A second reviewed capture explicitly records the successful claim.
+    second = auth_client.post(f"/offers/{offer_id}/captures", headers=SVC, json={
+        "video_path": "projects/format/cap-2.mp4",
+        "step_log": [{"step": "claim the benefit", "note": "no secrets"}],
+    })
+    assert second.status_code == 201, second.text
+    reviewed = auth_client.post(
+        f"/captures/{second.json()['id']}/redaction-review", headers=AUTH,
+        json={"approved": True, "claim_outcome": "demonstrated",
+              "note": "benefit visible in account"},
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    claim = auth_client.post(f"/offers/{offer_id}/script", headers=SVC,
+                             params={"format": "claim_walkthrough"})
+    assert claim.status_code == 201, claim.text
+    assert claim.json()["format"] == "claim_walkthrough"
+    assert "i claimed" in claim.json()["markdown"].lower()
+
+
+def test_clearing_extraction_conflicts_requires_a_human_note(auth_client):
+    offer_id, _, evidence_id, fields = _verified_offer_for_auth(auth_client)
+    conflicted = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": fields,
+        "conflicts": [{"field": "value", "values": ["free", "$5"],
+                       "evidence_ids": [evidence_id]}],
+        "model": "pytest",
+    })
+    assert conflicted.status_code == 201, conflicted.text
+
+    no_note = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": fields, "conflicts": [], "model": "pytest",
+    })
+    assert no_note.status_code == 422, no_note.text
+    assert "review_note" in no_note.json()["detail"]
+
+    reviewed = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": fields, "conflicts": [], "model": "pytest",
+        "review_note": "checked both snapshots; the current terms show free",
+    })
+    assert reviewed.status_code == 201, reviewed.text
+
+
+def test_held_upload_reconcile_records_a_human_checked_outcome(auth_client):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Reconcile Co", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = __import__("uuid").UUID(offer["id"])
+    _run("UPDATE offers SET state = 'verified', recheck_at = now() + interval '1 day', "
+         "expires_at = now() + interval '1 day' WHERE id = $1", offer_id)
+    sid = _run(
+        """
+        INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
+                               privacy, idempotency_key, version_hash)
+        VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
+                'itest-reconcile-1', 'hash-1')
+        RETURNING id
+        """, offer_id)[0]["id"]
+
+    started = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert started.status_code == 200, started.text
+    held = auth_client.post(f"/schedules/{sid}/result", headers=SVC, json={
+        "ok": False, "hold": True, "detail": "upload timed out; outcome unknown",
+    })
+    assert held.status_code == 200, held.text
+
+    worker = auth_client.post(f"/schedules/{sid}/reconcile", headers=SVC, json={
+        "outcome": "not_live", "note": "checked platform",
+    })
+    assert worker.status_code == 403, "a worker cannot resolve an unknown upload"
+
+    no_id = auth_client.post(f"/schedules/{sid}/reconcile", headers=AUTH, json={
+        "outcome": "published", "note": "checked channel",
+    })
+    assert no_id.status_code == 422, no_id.text
+
+    confirmed = auth_client.post(f"/schedules/{sid}/reconcile", headers=AUTH, json={
+        "outcome": "published", "remote_post_id": "vid-human-checked",
+        "remote_url": "https://www.youtube.com/watch?v=vid-human-checked",
+        "note": "opened the channel; video is present and private",
+    })
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["state"] == "published"
+    detail = json.loads(_run(
+        "SELECT outcome_detail::text AS d FROM schedules WHERE id = $1", sid,
+    )[0]["d"])
+    assert detail["hold"] is False
+    assert detail.get("attempt") is None
+    assert detail["reconciled_by"] == REVIEWER
+    assert detail["reconcile_outcome"] == "published"
+
+
 def test_hold_flag_is_stored_and_cleared_by_resume(auth_client):
     """A held post (unknown upload outcome) must not be auto-retried; an
     operator resuming it clears the hold."""
@@ -2500,7 +2674,11 @@ def test_human_stage_refuses_automation_actor(auth_client):
     })
     assert capture.status_code == 201, capture.text
     reviewed = auth_client.post(f"/captures/{capture.json()['id']}/redaction-review",
-                                headers=AUTH, json={"approved": True})
+                                headers=AUTH, json={
+                                    "approved": True,
+                                    "claim_outcome": "demonstrated",
+                                    "note": "watched the full capture",
+                                })
     assert reviewed.status_code == 200, reviewed.text
 
     scripts = auth_client.get(f"/offers/{offer_id}/scripts", headers=SVC).json()

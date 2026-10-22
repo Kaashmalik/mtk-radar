@@ -323,6 +323,8 @@ class ExtractionIn(BaseModel):
     model: Optional[str] = Field(default=None, max_length=200)
     #: Optional for legacy/manual callers; the acquisition worker always sends it.
     coverage: Optional[ExtractionCoverage] = None
+    #: Human explanation when a reviewer edits claims or clears conflicts.
+    review_note: Optional[str] = Field(default=None, min_length=3, max_length=2000)
 
     @model_validator(mode="after")
     def typed_claim_values(self) -> "ExtractionIn":

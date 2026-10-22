@@ -10,7 +10,7 @@ Rules enforced here (master plan §4):
 
 import json
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -32,11 +32,19 @@ class CaptureIn(BaseModel):
     notes: Optional[str] = None
 
 
+ClaimOutcome = Literal["demonstrated", "not_demonstrated", "not_attempted"]
+
+
 class RedactionReviewIn(BaseModel):
     # v0.16: optional when a reviewer token binds identity (enforced server-side)
     reviewer: Optional[str] = None
     approved: bool
     note: Optional[str] = None
+    # v0.31: what the reviewer actually saw happen in the footage. Approval of
+    # the redaction is not evidence that the claim succeeded; a claim-walkthrough
+    # script needs `demonstrated`, and tested tutorials word the result honestly
+    # when it was not demonstrated.
+    claim_outcome: Optional[ClaimOutcome] = None
 
 
 @router.post("/offers/{offer_id}/captures", status_code=201)
@@ -92,7 +100,9 @@ async def list_captures(
         """
         SELECT c.id, c.offer_id, o.title AS offer_title, c.video_path,
                c.step_log::text AS step_log, c.secret_findings::text AS secret_findings,
-               c.redaction_reviewed, c.reviewer, c.review_note, c.created_at
+               c.redaction_reviewed, c.reviewer, c.review_note,
+               c.claim_outcome, c.claim_outcome_reviewer, c.claim_outcome_at,
+               c.created_at
         FROM capture_sessions c JOIN offers o ON o.id = c.offer_id
         WHERE ($1::uuid IS NULL OR c.offer_id = $1)
         ORDER BY c.created_at DESC LIMIT $2
@@ -117,15 +127,31 @@ async def redaction_review(capture_id: uuid.UUID, review: RedactionReviewIn,
         raise HTTPException(status_code=404, detail="capture not found")
     if not review.approved and capture["redaction_reviewed"]:
         raise HTTPException(status_code=409, detail="already reviewed — re-run via a new review")
+    if review.approved and review.claim_outcome is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "an approved redaction review must record what happened: "
+                "claim_outcome is demonstrated, not_demonstrated, or not_attempted"
+            ),
+        )
 
     reviewer_on_record = effective_reviewer(request, review.reviewer, require=True)
     row = await pool.fetchrow(
         """
         UPDATE capture_sessions
-        SET redaction_reviewed = $2, reviewer = $3, review_note = COALESCE($4, review_note)
+        SET redaction_reviewed = $2, reviewer = $3, review_note = COALESCE($4, review_note),
+            claim_outcome = CASE WHEN $2 THEN $5 ELSE NULL END,
+            claim_outcome_reviewer = CASE WHEN $2 THEN $3 ELSE NULL END,
+            claim_outcome_at = CASE WHEN $2 THEN clock_timestamp() ELSE NULL END
         WHERE id = $1
-        RETURNING id, redaction_reviewed
+        RETURNING id, redaction_reviewed, claim_outcome
         """,
         capture_id, review.approved, reviewer_on_record, review.note,
+        review.claim_outcome,
     )
-    return {"id": row["id"], "redaction_reviewed": row["redaction_reviewed"]}
+    return {
+        "id": row["id"],
+        "redaction_reviewed": row["redaction_reviewed"],
+        "claim_outcome": row["claim_outcome"],
+    }

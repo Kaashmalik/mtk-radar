@@ -785,6 +785,128 @@ async def attempt(schedule_id: uuid.UUID, body: AttemptIn) -> dict:
             "attempt_token": token, "attempt": marker}
 
 
+class ScheduleReconcileIn(BaseModel):
+    """A human decision after checking the platform for a held upload.
+
+    The publishing worker cannot resolve an unknown outcome (it may have
+    uploaded before dying). Only a reviewer may say "it is live" or "it is not
+    live", and that decision is recorded against their identity.
+    """
+
+    outcome: str = Field(pattern="^(published|not_live|still_processing)$")
+    remote_post_id: Optional[str] = Field(default=None, max_length=500)
+    remote_url: Optional[str] = Field(default=None, max_length=2000)
+    note: str = Field(min_length=3, max_length=2000)
+
+
+@router.post("/schedules/{schedule_id}/reconcile")
+async def reconcile_held_upload(schedule_id: uuid.UUID, body: ScheduleReconcileIn,
+                                request: Request) -> dict:
+    """Resolve a HELD/unknown upload after a human checks the platform.
+
+    This is deliberately separate from the worker result endpoint:
+    - `published` requires the remote post id the human actually saw;
+    - `not_live` clears the open attempt so a deliberate retry is safe;
+    - `still_processing` keeps the hold and the attempt marker intact.
+    """
+    actor = effective_reviewer(request, None, require=True)
+    if is_automation_actor(actor):
+        raise HTTPException(
+            status_code=403,
+            detail="automation may not reconcile an unknown upload — a named human must check the platform",
+        )
+    pool = db.get()
+    schedule = await _load(pool, schedule_id)
+    if schedule["state"] not in ("scheduled", "paused", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot reconcile a post in state '{schedule['state']}'",
+        )
+    detail = _json_value(schedule.get("outcome_detail"), {})
+    open_attempt = detail.get("attempt") if isinstance(detail, dict) else None
+    held = bool(detail.get("hold")) if isinstance(detail, dict) else False
+    if not held and not isinstance(open_attempt, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="this post is not held; there is no unknown upload outcome to reconcile",
+        )
+    if body.outcome == "published" and not body.remote_post_id:
+        raise HTTPException(
+            status_code=422,
+            detail="confirming a held upload as published requires the remote post id you verified",
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    if body.outcome == "published":
+        patch = {
+            "hold": False,
+            "attempt": None,
+            "detail": body.note,
+            "reconciled_by": actor,
+            "reconciled_at": now,
+            "reconcile_outcome": body.outcome,
+        }
+        row = await pool.fetchrow(
+            """
+            UPDATE schedules
+            SET state = 'published', remote_post_id = $2,
+                remote_url = COALESCE($3, remote_url),
+                published_confirmed_at = now(),
+                outcome_detail = (outcome_detail - 'attempt') || $4::jsonb,
+                updated_at = now()
+            WHERE id = $1
+            RETURNING state::text AS state, remote_post_id
+            """,
+            schedule_id, body.remote_post_id, body.remote_url, json.dumps(patch),
+        )
+    elif body.outcome == "not_live":
+        patch = {
+            "hold": False,
+            "attempt": None,
+            "detail": body.note,
+            "reconciled_by": actor,
+            "reconciled_at": now,
+            "reconcile_outcome": body.outcome,
+        }
+        row = await pool.fetchrow(
+            """
+            UPDATE schedules
+            SET state = 'failed', retry_count = retry_count + 1,
+                outcome_detail = (outcome_detail - 'attempt') || $2::jsonb,
+                updated_at = now()
+            WHERE id = $1
+            RETURNING state::text AS state, remote_post_id
+            """,
+            schedule_id, json.dumps(patch),
+        )
+    else:
+        # Still processing: keep the post out of the queue and preserve the
+        # open attempt so a later human decision remains explicit.
+        patch = {
+            "hold": True,
+            "detail": body.note,
+            "reconciled_by": actor,
+            "reconciled_at": now,
+            "reconcile_outcome": body.outcome,
+        }
+        row = await pool.fetchrow(
+            """
+            UPDATE schedules
+            SET state = 'paused', outcome_detail = outcome_detail || $2::jsonb,
+                updated_at = now()
+            WHERE id = $1
+            RETURNING state::text AS state, remote_post_id
+            """,
+            schedule_id, json.dumps(patch),
+        )
+    await _audit(pool, actor=actor, action=f"schedule:reconcile:{body.outcome}",
+                 entity="schedules", entity_id=schedule_id,
+                 detail={"note": body.note, "remote_post_id": body.remote_post_id,
+                         "remote_url": body.remote_url})
+    return {"id": schedule_id, "state": row["state"],
+            "remote_post_id": row["remote_post_id"], "outcome": body.outcome}
+
+
 @router.post("/schedules/{schedule_id}/result")
 async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
     """Publishing worker reports outcomes (idempotent by remote post id).

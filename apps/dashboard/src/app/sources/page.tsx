@@ -6,6 +6,7 @@
  */
 
 import "./styles.css";
+import SourceActions from "./SourceActions";
 import SourceForm from "./SourceForm";
 import { apiFetch } from "@/lib/api";
 
@@ -21,6 +22,11 @@ type Source = {
   polling_cadence: string;
   trust_tier: string;
   last_checked_at: string | null;
+  tos_reviewed_at: string | null;
+  tos_reviewer: string | null;
+  tos_reference: string | null;
+  tos_expires_at: string | null;
+  tos_valid: boolean;
 };
 
 const TIER_COLORS: Record<string, string> = {
@@ -83,7 +89,7 @@ export default async function SourcesPage() {
                 <thead>
                   <tr>
                     <th>provider</th><th>domain</th><th>adapter</th><th>tier</th>
-                    <th>cadence</th><th>last poll</th><th>state</th>
+                    <th>cadence</th><th>last poll</th><th>state</th><th>permission</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -117,6 +123,7 @@ export default async function SourcesPage() {
                           {s.enabled ? "enabled" : "disabled"}
                         </span>
                       </td>
+                      <td><SourceActions source={s} /></td>
                     </tr>
                   ))}
                 </tbody>
