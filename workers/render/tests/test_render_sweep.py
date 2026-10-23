@@ -39,6 +39,11 @@ class FakeClient:
             raise httpx.ConnectError("api down")
         return FakeResponse(self.candidates)
 
+    def post(self, path, json=None):
+        # No durable queue on this fake: sync/claim fall back (404) and the
+        # classic candidate sweep remains the driver.
+        return FakeResponse({"detail": "not found"}, 404)
+
 
 def _patch_client(monkeypatch, candidates, fail=False):
     monkeypatch.setattr(render_main.httpx, "Client",
@@ -226,3 +231,133 @@ def test_ffmpeg_preflight_passes_when_the_binary_exists(monkeypatch):
     monkeypatch.setattr(render_main, "FFMPEG_PATH", "/usr/bin/ffmpeg")
     monkeypatch.setattr(render_main.shutil, "which", lambda cmd: "/usr/bin/ffmpeg")
     assert render_main._require_ffmpeg() == "/usr/bin/ffmpeg"
+
+
+# ------------------------------------------------- durable queue drain (v0.33)
+
+
+class QueueClient:
+    """Fake client whose /jobs endpoints speak the real queue contract."""
+
+    def __init__(self, candidates, claims):
+        self.candidates = candidates
+        self.claims = list(claims)  # claim bodies served in order
+        self.results = []
+        self.enqueued = []
+
+    def get(self, path, params=None):
+        return FakeResponse(self.candidates)
+
+    def post(self, path, json=None):
+        if path == "/jobs":
+            self.enqueued.append(json)
+            return FakeResponse({"id": "job-1", "created": True}, 201)
+        if path == "/jobs/claim":
+            return FakeResponse(self.claims.pop(0) if self.claims
+                                else {"claimed": False})
+        if path.startswith("/jobs/") and path.endswith("/result"):
+            self.results.append((path.split("/")[2], json))
+            return FakeResponse({"id": path.split("/")[2], "status": "done"})
+        return FakeResponse({"ok": True})
+
+
+def _candidate(offer_id="off-1", language="en"):
+    return {"offer_id": offer_id, "script_version": 3,
+            "script_version_hash": "sh3", "capture_id": "cap-1",
+            "missing_presets": ["landscape"], "language": language}
+
+
+def _claimed_job(offer_id="off-1", language="en"):
+    return {"claimed": True, "id": "job-1", "kind": "render_package",
+            "entity_id": offer_id,
+            "payload": {"offer_id": offer_id, "language": language},
+            "lease_expires_at": "2030-01-01T00:00:00Z"}
+
+
+def test_claimed_render_job_drives_the_render(monkeypatch, tmp_path):
+    candidates = [_candidate()]
+    client = QueueClient(candidates, [_claimed_job()])
+    calls = []
+
+    class FakeJob:
+        def __init__(self, offer_id, api_url, out_root):
+            self.offer_id = offer_id
+
+        def run(self, capture_video, preset_keys, skip_narration, capture_id=None,
+                languages=None):
+            calls.append((self.offer_id, capture_id))
+
+    monkeypatch.setattr(render_main, "RenderJob", FakeJob)
+    keys = render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio", candidates)
+    assert keys == {("off-1", "en")}
+    job_id, payload = client.results[-1]
+    assert payload["ok"] is True and payload["detail"] == "rendered"
+    assert calls == [("off-1", "cap-1")], "the claimed job drives the same render path"
+
+
+def test_stale_render_job_resolves_without_rendering(monkeypatch, tmp_path):
+    client = QueueClient([_candidate()], [_claimed_job(offer_id="off-gone")])
+    class NeverJob:
+        def __init__(self, *a, **k):
+            raise AssertionError("no render may start for a stale job")
+    monkeypatch.setattr(render_main, "RenderJob", NeverJob)
+    keys = render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio",
+        [_candidate()])
+    assert keys == set()
+    _, payload = client.results[-1]
+    assert payload["ok"] is True and "no longer" in payload["detail"]
+
+
+def test_failed_render_requeues_the_job(monkeypatch, tmp_path):
+    client = QueueClient([_candidate()], [_claimed_job()])
+
+    class BoomJob:
+        def __init__(self, offer_id, api_url, out_root):
+            pass
+
+        def run(self, **kwargs):
+            raise RuntimeError("encoder crashed")
+
+    monkeypatch.setattr(render_main, "RenderJob", BoomJob)
+    keys = render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio",
+        [_candidate()])
+    assert keys == set()
+    _, payload = client.results[-1]
+    assert payload["ok"] is False and payload["retry_after_s"] == 300
+
+
+def test_queue_unavailable_degrades_to_sweep_only(monkeypatch, tmp_path):
+    candidates = [_candidate()]
+    client = QueueClient(candidates, [])
+    client.post = lambda path, json=None: FakeResponse({"detail": "not found"}, 404)
+    calls = []
+
+    class FakeJob:
+        def __init__(self, offer_id, api_url, out_root):
+            self.offer_id = offer_id
+
+        def run(self, capture_video, preset_keys, skip_narration, capture_id=None,
+                languages=None):
+            calls.append(self.offer_id)
+
+    monkeypatch.setattr(render_main, "RenderJob", FakeJob)
+    _patch_client(monkeypatch, candidates)
+    assert render_main._ensure_render_jobs(client, candidates) == 0
+    assert render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio",
+        candidates) == set()
+    # the classic sweep still renders the candidate
+    rendered = render_main.sweep("http://fake", tmp_path, ["landscape"], True, limit=5)
+    assert rendered == 1
+
+
+def test_kill_knob_disables_the_render_queue(monkeypatch, tmp_path):
+    monkeypatch.setenv("MTK_RENDER_JOB_QUEUE", "0")
+    client = QueueClient([_candidate()], [_claimed_job()])
+    assert render_main._ensure_render_jobs(client, [_candidate()]) == 0
+    assert render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio",
+        [_candidate()]) == set()

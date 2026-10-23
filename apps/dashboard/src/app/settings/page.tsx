@@ -9,6 +9,7 @@
 import "./styles.css";
 import AutomationForm, { type AutomationPolicy } from "./AutomationForm";
 import LanguagePolicyForm, { type LanguagePolicy } from "./LanguagePolicyForm";
+import NotificationsCard from "./NotificationsCard";
 import ReleasePolicyForm, { type ReleasePolicy } from "./ReleasePolicyForm";
 import SettingsForm from "./SettingsForm";
 import { apiFetch } from "@/lib/api";
@@ -38,6 +39,16 @@ type PolicyResponse = {
   presets: Record<string, AutomationPolicy>;
   updated_at: string | null;
   updated_by: string | null;
+};
+
+type MediaBackup = {
+  enabled: boolean;
+  schedule: string;
+  retention_days: number;
+  destination: string;
+  last_run_at: string | null;
+  last_status: "not_configured" | "running" | "ok" | "failed" | "verified";
+  last_manifest: string;
 };
 
 type StatusResponse = {
@@ -104,7 +115,8 @@ function timeLabel(iso: string): string {
 }
 
 export default async function SettingsPage() {
-  const [setting, languageRes, releaseRes, policyRes, statusRes, accounts] = await Promise.all([
+  const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts] =
+    await Promise.all([
     getJson<{ key: string; value: { windows?: string[] } | null }>(
       "/settings/publish_windows",
       { key: "publish_windows", value: null },
@@ -116,6 +128,10 @@ export default async function SettingsPage() {
     getJson<{ key: string; value: ReleasePolicy | null }>(
       "/settings/release_policy",
       { key: "release_policy", value: null },
+    ),
+    getJson<{ key: string; value: MediaBackup | null }>(
+      "/settings/media_backup",
+      { key: "media_backup", value: null },
     ),
     getJson<PolicyResponse>("/automation/policy", {
       policy: FALLBACK_POLICY,
@@ -151,6 +167,7 @@ export default async function SettingsPage() {
   ]);
 
   const windows = setting.value?.windows ?? ["18:00"];
+  const backup = backupRes.value;
   const languagePolicy = languageRes.value ?? FALLBACK_LANGUAGE_POLICY;
   const releasePolicy = releaseRes.value ?? { require_package_assets: true, require_playback_review: true };
   const policy = policyRes.policy ?? FALLBACK_POLICY;
@@ -285,6 +302,56 @@ export default async function SettingsPage() {
       <section className="card">
         <h2>Publishing windows</h2>
         <SettingsForm initialWindows={windows} />
+      </section>
+
+      <NotificationsCard />
+
+      <section className="card">
+        <h2>Media backup</h2>
+        {!backup || (!backup.enabled && backup.last_status === "not_configured") ? (
+          <p className="muted small" style={{ marginTop: 0 }}>
+            No media backup is recorded. Backups run from the deployment host
+            (infra/backup.sh + a systemd timer) and report their status here via
+            the <code>media_backup</code> setting.
+          </p>
+        ) : (
+          <div className="stats">
+            <div>
+              <strong>
+                <span
+                  className={`pill ${
+                    backup.last_status === "ok" || backup.last_status === "verified"
+                      ? "pill-accent"
+                      : backup.last_status === "failed"
+                        ? "pill-danger"
+                        : "pill-muted"
+                  }`}
+                >
+                  {backup.last_status}
+                </span>
+              </strong>
+              <span>last backup status</span>
+            </div>
+            <div>
+              <strong>{backup.schedule}</strong>
+              <span>schedule ({backup.retention_days}-day retention)</span>
+            </div>
+            <div>
+              <strong>{backup.last_run_at ? backup.last_run_at.slice(0, 16).replace("T", " ") : "—"}</strong>
+              <span>last run (UTC)</span>
+            </div>
+          </div>
+        )}
+        {backup?.destination && (
+          <p className="muted small">
+            Destination: <code>{backup.destination}</code>
+            {backup.last_manifest ? (
+              <>
+                {" "}· manifest: <code>{backup.last_manifest}</code>
+              </>
+            ) : null}
+          </p>
+        )}
       </section>
 
       <section className="card">

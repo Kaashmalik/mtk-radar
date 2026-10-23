@@ -78,43 +78,68 @@ single-sourced:
   connection metadata-test button on Connections; and a release-policy card in
   Settings.
 
-Verification on the audit machine: **857 backend tests passed** (integration
-tests against a disposable PostgreSQL database with real migrations), Python
-lint/compile clean, dashboard production build passed (including the new
-`/inbox` route). That is code/test evidence only; it is not live-provider,
+Verification on the audit machine (latest pass): **899 backend tests passed**
+(integration tests against a disposable PostgreSQL database with real
+migrations, including the new collector/render job-queue, reschedule,
+notification-probe and migration-030 tests), Python lint/compile clean,
+dashboard production build passed. That is code/test evidence only; it is not
+live-provider,
 restore or deployment proof.
 
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
 
-- **Publishing worker is now job-queue-driven (day-2 pass).** The worker
-  claims `publish_schedule` jobs (`/jobs/claim`, SKIP LOCKED + lease +
-  reported result) before its classic sweep, INSIDE the sweep lock, so one
-  worker can never double-attempt a post. Schedule creation sets
+- **All three recurring workers are now job-queue-driven (day-2 pass).** The
+  publishing worker claims `publish_schedule` jobs (`/jobs/claim`, SKIP LOCKED
+  + lease + reported result) before its classic sweep, INSIDE the sweep lock,
+  so one worker can never double-attempt a post. Schedule creation sets
   `run_after` to the publish time; retries (auto-retry transition) and human
   resume **re-arm** the job with a fresh attempt budget; migration 029
-  backfills owed jobs for posts that predate the queue and is idempotent.
-  The queue degrades fail-open (queue unreachable / older API ⇒ sweep-only;
-  the sweep remains the authoritative fallback), while safety stays
-  fail-closed at the release gate/attempt layer. `MTK_PUBLISH_JOB_QUEUE=0`
-  disables the drain. Integration tests pin the lifecycle, re-arm and 029
-  backfill semantics; they also caught and fixed a real 500 in
-  `POST /jobs/{id}/result` (int into a text-concat interval). **Render and
-  collector workers are still list-pollers** — their kinds (`render_package`,
-  `collect`) exist but no worker drains them yet.
-- **Dashboard workflows remain partial.** This pass added inbox
+  backfills owed publish jobs and is idempotent. **Collectors:** source
+  creation enqueues a recurring `collect` job (`collect:{id}`, max_attempts 5);
+  `POST /sources/{id}/poll-result` re-arms it — healthy poll → pending at the
+  source cadence with a fresh attempt budget, failed poll → retry in 300 s
+  keeping attempts, so 5 consecutive failures dead-letter the job into
+  operator attention; migration 030 backfills enabled sources (idempotent).
+  The collector claims due `collect` jobs through the SAME `_poll` path as the
+  sweep; a disabled/removed source resolves its job as done. **Render:** the
+  worker mirrors the derived `/render-candidates` list into durable
+  `render_package` jobs (dedupe keyed to the exact script version hash, so a
+  rewritten script is a NEW job) and drains them via the same per-candidate
+  code path as the sweep; the derived candidate list stays authoritative — a
+  candidate reappears after a restart by recomputation, so lost work is
+  impossible even without the queue, and stale jobs resolve as
+  "no longer a render candidate". Every drain degrades fail-open (queue
+  unreachable / older API ⇒ sweep-only; the sweep remains the authoritative
+  fallback) while safety stays fail-closed at the gate/attempt layers.
+  Knobs: `MTK_PUBLISH_JOB_QUEUE=0`, `MTK_COLLECT_JOB_QUEUE=0`,
+  `MTK_RENDER_JOB_QUEUE=0`. Integration tests pin the publish lifecycle,
+  re-arm, dead-letter and 029/030 backfill semantics; they caught and fixed a
+  real 500 in `POST /jobs/{id}/result` (int into a text-concat interval).
+  `POST /jobs/{id}/retry` (v0.33) revives a dead/failed job for the operator —
+  409 on pending/leased/done/cancelled, 404 unknown.
+- **Dashboard workflows (day-2 pass closed several):** this pass added inbox
   search/filter/pagination, the release-readiness card, playback sign-off,
-  cancel, connection tests and the release-policy card. Still missing:
-  per-conflict resolution UI, raw-snapshot inspection, studio
-  script/metadata/caption/chapter editing and revision save, reschedule UI,
-  notification tests, storage/backup status views, and several "Needs You"
-  actions (render failure, correction, expiry, token reconnect, worker
-  restart). Several pages still render an outage as an empty pipeline or zero
-  metrics instead of "unavailable".
-- **The wording guard is English/`official_explainer` only.** Format/claim
-  binding now runs at render registration and in the release gate, but the
-  first-person-result guard itself does not yet cover Urdu or the other
-  formats.
+  cancel, connection tests, the release-policy card, AND NOW a reschedule
+  control on the calendar (future-time validated, calls
+  `POST /schedules/{id}/reschedule`, human-token only), a notification
+  delivery-test card in Settings (honest "not configured" state),
+  a one-click dead-job retry on the attention page (`POST /jobs/{id}/retry`),
+  and a media-backup status card from the `media_backup` setting. Still
+  missing: per-conflict resolution UI, raw-snapshot inspection, and studio
+  script/metadata/caption/chapter editing with revision save. Several pages
+  still render an outage as an empty pipeline or zero metrics instead of
+  "unavailable".
+- **The wording guard now covers every format and language (day-2 pass).**
+  `assert_format_wording` blocks first-person result wording for
+  `official_explainer` in English, Urdu script AND Roman-Urdu
+  transliteration, and blocks unproven outcome wording ("claim approved" /
+  "کلیم منظور" / "claim approve ho gaya" / "paisay mil gaye"…) for
+  `tested_tutorial` in all three too; `claim_walkthrough` legitimately uses
+  first person (the demonstrated-capture binding is its gate, checked at
+  render registration and in the release gate), so wording there stays
+  allowed by design. Render registration re-checks the guard against the
+  actual stored script.
 - **Attention truncation is by design but bounded:** counts are global;
   per-kind item lists cap at 50 rows.
 - **Security/observability hardening added (day-2 pass):** per-IP sliding

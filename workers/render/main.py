@@ -652,6 +652,154 @@ def _render_stage_allowed(policy: dict | None) -> bool:
     return (policy.get("stages") or {}).get("render") == "auto"
 
 
+def _render_candidate(api_url: str, out_root: Path, skip_narration: bool,
+                      motion_template: str, candidate: dict,
+                      preset_keys: list[str]) -> bool:
+    """Render ONE candidate through the same code path as a manual run.
+
+    Shared by the job-driven drain and the classic sweep so automation can
+    never produce a different artifact depending on which path drove it.
+    Returns False when the API reports no genuinely missing variant."""
+    offer_id = candidate["offer_id"]
+    # The API reports which variants are genuinely missing. Never re-render
+    # a landscape export just because the vertical one is still absent.
+    missing = [key for key in preset_keys
+               if key in (candidate.get("missing_presets") or preset_keys)]
+    if not missing:
+        return False
+    log.info("render sweep: rendering offer %s (script v%s, %s)", offer_id,
+             candidate.get("script_version"), ", ".join(missing))
+    language = candidate.get("language") or "en"
+    # Keep the v0.19 three-argument constructor shape for the default
+    # English/studio case (fake jobs and older callers rely on it).
+    job_kwargs = {}
+    if language != "en":
+        job_kwargs["language"] = language
+    if motion_template != "studio":
+        job_kwargs["motion_template"] = motion_template
+    job = RenderJob(offer_id, api_url, out_root, **job_kwargs)
+    kwargs = {
+        "capture_video": None,
+        "preset_keys": missing,
+        "skip_narration": skip_narration,
+        "capture_id": candidate.get("capture_id"),
+    }
+    # Keep the v0.19 FakeJob-compatible call shape for English, while a
+    # non-English candidate renders only its own language.
+    if language != "en":
+        kwargs["languages"] = (language,)
+    job.run(**kwargs)
+    return True
+
+
+def _jobs_enabled() -> bool:
+    return os.environ.get("MTK_RENDER_JOB_QUEUE", "1").strip().lower() \
+        not in {"0", "false", "no"}
+
+
+def _ensure_render_jobs(client: httpx.Client, candidates: list[dict]) -> int:
+    """Record owed render work in the durable queue (best effort).
+
+    Dedupe key binds to the EXACT script version (`render:{offer}:{lang}:
+    {script_hash}`), so a rewritten script naturally creates a NEW job and a
+    rendered candidate never re-queues the old one. Failures here never stop
+    the sweep — the derived candidate list stays authoritative. Returns the
+    number of jobs confirmed present."""
+    if not _jobs_enabled() or not candidates:
+        return 0
+    present = 0
+    for candidate in candidates:
+        key = "render:{}:{}:{}".format(
+            candidate["offer_id"], candidate.get("language") or "en",
+            candidate.get("script_version_hash") or candidate.get("script_version") or "0")
+        try:
+            resp = client.post("/jobs", json={
+                "kind": "render_package",
+                "entity_id": candidate["offer_id"],
+                "payload": {"offer_id": candidate["offer_id"],
+                            "language": candidate.get("language") or "en",
+                            "script_version": candidate.get("script_version")},
+                "dedupe_key": key[:300], "max_attempts": 5,
+            })
+            if resp.status_code < 300:
+                present += 1
+            elif resp.status_code == 404:
+                return 0  # older API without the jobs queue
+        except httpx.HTTPError as exc:
+            log.warning("render job sync failed (%s) — sweep-only this run", exc)
+            return 0
+    return present
+
+
+def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
+                       preset_keys: list[str], skip_narration: bool,
+                       motion_template: str, candidates: list[dict]) -> set:
+    """Claim render_package jobs and render those candidates. Fail-open to
+    the classic sweep: queue unreachable / older API / claim refused all
+    degrade to sweep-only, and the render gates at the API stay fail-closed.
+    Returns the (offer, language) keys rendered here, so the classic sweep
+    skips them instead of rendering twice off its stale candidate list."""
+    if not _jobs_enabled() or not candidates:
+        return set()
+    by_key = {(c["offer_id"], c.get("language") or "en"): c for c in candidates}
+    rendered_keys: set = set()
+    for _ in range(50):  # bounded per sweep; results remove claimed jobs
+        try:
+            resp = client.post("/jobs/claim", json={
+                "worker": "render-worker", "lease_s": 3600,
+                "kinds": ["render_package"]})
+        except httpx.HTTPError:
+            return rendered_keys
+        # re-check the kill switch between candidates
+        current = _load_policy(client)
+        if current is not None and not _render_stage_allowed(current):
+            log.info("render stage changed mid-drain — queue drain stopped")
+            return rendered_keys
+        if resp.status_code != 200:
+            return rendered_keys
+        try:
+            body = resp.json()
+        except ValueError:
+            return rendered_keys
+        if not body.get("claimed"):
+            return rendered_keys
+        job_id = body["id"]
+        offer_id = body.get("entity_id")
+        language = (body.get("payload") or {}).get("language") or "en"
+        candidate = by_key.get((offer_id, language))
+        if candidate is None:
+            # rendered meanwhile / offer state moved on / script superseded:
+            # the derived list no longer owes this render.
+            _job_result(client, job_id, ok=True,
+                        detail="no longer a render candidate — nothing owed")
+            continue
+        try:
+            _render_candidate(api_url, out_root, skip_narration, motion_template,
+                              candidate, preset_keys)
+            _job_result(client, job_id, ok=True, detail="rendered")
+            rendered_keys.add((offer_id, language))
+        except SystemExit as exc:
+            _job_result(client, job_id, ok=True, detail=f"skipped: {exc}")
+        except Exception as exc:  # noqa: BLE001 — one candidate never stops the drain
+            log.exception("render job %s failed for offer %s", job_id, offer_id)
+            _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
+                        retry_after_s=300)
+    return rendered_keys
+
+
+def _job_result(client: httpx.Client, job_id: str, *, ok: bool,
+                detail: str | None = None, retry_after_s: int | None = None) -> None:
+    payload: dict = {"ok": ok}
+    if detail:
+        payload["detail"] = detail[:1900]
+    if retry_after_s is not None:
+        payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+    try:
+        client.post(f"/jobs/{job_id}/result", json=payload)
+    except httpx.HTTPError as exc:
+        log.warning("could not report result for render job %s: %s", job_id, exc)
+
+
 def sweep(api_url: str, out_root: Path, preset_keys: list[str],
           skip_narration: bool, limit: int = 10,
           motion_template: str = "studio") -> int:
@@ -682,8 +830,21 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
         log.error("render sweep skipped (API unreachable): %s", exc)
         return 0
 
+    # Durable owed-work record (v0.33): mirror the derived candidates into the
+    # jobs queue (best effort), then drain what the queue drives. The derived
+    # list stays authoritative — a candidate reappears after a restart by
+    # recomputation, so lost work is impossible even without the queue.
+    synced = _ensure_render_jobs(client, candidates)
+    drained_keys = _drain_render_jobs(client, api_url, out_root, preset_keys,
+                                      skip_narration, motion_template, candidates)
+    if synced or drained_keys:
+        log.info("render queue: %d job(s) tracked, %d rendered via the job drain",
+                 synced, len(drained_keys))
+
     rendered = 0
     for candidate in candidates:
+        if (candidate["offer_id"], candidate.get("language") or "en") in drained_keys:
+            continue  # already rendered via the queue drain this sweep
         # The kill switch is re-checked before each irreversible render, so a
         # pause during a long sweep takes effect immediately.
         current = _load_policy(client)
@@ -691,41 +852,14 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
             log.info("render stage changed to %s — stopping the sweep before the "
                      "next render", "paused" if current.get("paused") else "not auto")
             break
-        offer_id = candidate["offer_id"]
-        # The API reports which variants are genuinely missing. Never re-render
-        # a landscape export just because the vertical one is still absent.
-        missing = [key for key in preset_keys
-                   if key in (candidate.get("missing_presets") or preset_keys)]
-        if not missing:
-            continue
-        log.info("render sweep: rendering offer %s (script v%s, %s)", offer_id,
-                 candidate.get("script_version"), ", ".join(missing))
-        language = candidate.get("language") or "en"
-        # Keep the v0.19 three-argument constructor shape for the default
-        # English/studio case (fake jobs and older callers rely on it).
-        job_kwargs = {}
-        if language != "en":
-            job_kwargs["language"] = language
-        if motion_template != "studio":
-            job_kwargs["motion_template"] = motion_template
-        job = RenderJob(offer_id, api_url, out_root, **job_kwargs)
         try:
-            kwargs = {
-                "capture_video": None,
-                "preset_keys": missing,
-                "skip_narration": skip_narration,
-                "capture_id": candidate.get("capture_id"),
-            }
-            # Keep the v0.19 FakeJob-compatible call shape for English, while a
-            # non-English candidate renders only its own language.
-            if language != "en":
-                kwargs["languages"] = (language,)
-            job.run(**kwargs)
-            rendered += 1
+            if _render_candidate(api_url, out_root, skip_narration, motion_template,
+                                 candidate, preset_keys):
+                rendered += 1
         except SystemExit as exc:
-            log.error("render sweep: %s skipped — %s", offer_id, exc)
+            log.error("render sweep: %s skipped — %s", candidate["offer_id"], exc)
         except Exception as exc:  # noqa: BLE001 — one candidate never stops the sweep
-            log.exception("render sweep: %s failed: %s", offer_id, exc)
+            log.exception("render sweep: %s failed: %s", candidate["offer_id"], exc)
     log.info("render sweep complete: %d/%d rendered", rendered, len(candidates))
     return rendered
 
