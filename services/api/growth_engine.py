@@ -178,6 +178,19 @@ def recommendations(
         bool(r.get("retention_3s_estimated"))
         for r in rows if _value(r, "retention_3s") is not None
     )
+    # 2026 playbook pivot thresholds, applied only to actually measured rows:
+    # CTR below 4% -> change the thumbnail or title; average view duration
+    # below 40% -> read the retention graph and cut the dead segment.
+    measured_ctr = [
+        _num(_value(r, "ctr")) for r in rows
+        if _value(r, "ctr") is not None and _num(_value(r, "impressions")) > 0
+    ]
+    avg_ctr = mean(measured_ctr) if measured_ctr else None
+    measured_avd = [
+        _num(_value(r, "avg_view_percentage")) for r in rows
+        if _value(r, "avg_view_percentage") is not None
+    ]
+    avg_avd = mean(measured_avd) if measured_avd else None
 
     # A platform recommendation needs a minimum sample and more than one post
     # on the winning platform. Two measured posts are a lead, not proof.
@@ -211,6 +224,28 @@ def recommendations(
                       "official-terms/proof frame into the first 3 seconds and cut the "
                       "intro card to under 1 second.",
             "metric": "retention",
+        })
+    if avg_ctr is not None and avg_ctr < 4.0:
+        out.append({
+            "priority": "high",
+            "title": "Swap the packaging: CTR is under 4%",
+            "detail": f"Average impression CTR is {avg_ctr:.1f}%. Per the 2026 "
+                      "playbook, change the thumbnail or title immediately — "
+                      "one variable at a time (the studio A/B variants and "
+                      "experiments exist for exactly this), then re-measure. "
+                      "Do not touch the video itself while testing packaging.",
+            "metric": "packaging",
+        })
+    if avg_avd is not None and avg_avd < 40.0:
+        out.append({
+            "priority": "high",
+            "title": "Cut the dead segment from the next script",
+            "detail": f"Average view duration is {avg_avd:.0f}% — below the "
+                      "40% bar. Open the retention graph to find the exact "
+                      "drop-off mark and cut that part from the next script; "
+                      "if the drop is inside the first 30 seconds, the hook "
+                      "needs the fix, not the middle.",
+            "metric": "avd",
         })
     if avg_engagement is not None and avg_engagement < 3:
         out.append({

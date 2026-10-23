@@ -24,13 +24,23 @@ from pagination import (
     set_next_cursor,
 )
 from settings_store import audit
-from trend_engine import radar_bands, score_item
+from trend_engine import apply_competitor_evidence, radar_bands, score_item
 
 router = APIRouter(prefix="/trends", tags=["trends"])
 
 
 class TrendStatusIn(BaseModel):
     status: str = Field(pattern="^(radar|shortlisted|promoted|dismissed)$")
+
+
+class CompetitorIn(BaseModel):
+    channel: str = Field(min_length=1, max_length=120)
+    subscribers: float = Field(ge=0)
+    views_28d: float = Field(default=0, ge=0)
+
+
+class CompetitorEvidenceIn(BaseModel):
+    competitors: list[CompetitorIn] = Field(min_length=1, max_length=10)
 
 
 def _decode(row) -> dict:
@@ -196,6 +206,57 @@ async def scan_trends(limit: int = Query(default=100, le=500)) -> dict:
         "updated": updated,
         "processed": len(scored_ids),
         "message": "Radar refreshed — shortlist a lead, then verify it like any other offer.",
+    }
+
+
+@router.post("/{trend_id}/competitors")
+async def add_competitor_evidence(trend_id: uuid.UUID,
+                                  body: CompetitorEvidenceIn) -> dict:
+    """Record the operator's 3-competitor-rule research on a candidate.
+
+    The 2026 playbook weights a topic by whether similar mid-size channels
+    (10k-100k subscribers) get views above their subscriber count. The radar
+    cannot scrape YouTube itself — the operator supplies the measured evidence
+    and the engine bumps demand transparently, showing the new drivers and
+    risks. A trend stays a proposal; verification still happens via offers.
+    """
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        SELECT id, demand_score, freshness_score, feasibility_score,
+               competition_gap, audience_fit, monetization,
+               score_reason::text AS score_reason, signals::text AS signals
+        FROM trend_candidates WHERE id = $1
+        """,
+        trend_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="trend candidate not found")
+
+    updated = apply_competitor_evidence(
+        dict(row), [competitor.model_dump() for competitor in body.competitors])
+    saved = await pool.fetchrow(
+        """
+        UPDATE trend_candidates SET
+            demand_score = $2, score = $3,
+            score_reason = $4::jsonb, signals = $5::jsonb, updated_at = now()
+        WHERE id = $1
+        RETURNING id, score, demand_score
+        """,
+        trend_id, updated["demand_score"], updated["score"],
+        json.dumps(updated["score_reason"]), json.dumps(updated["signals"]),
+    )
+    await audit(pool, actor="operator", action="trend:competitor_evidence",
+                entity="trend_candidates", entity_id=trend_id,
+                detail={"channels": len(body.competitors),
+                        "score": str(saved["score"])})
+    return {
+        "id": str(saved["id"]),
+        "score": float(saved["score"]),
+        "demand_score": float(saved["demand_score"]),
+        "competitor_evidence": updated["signals"].get("competitor_evidence", {}),
+        "why_now": updated["score_reason"].get("why_now", []),
+        "risks": updated["score_reason"].get("risks", []),
     }
 
 

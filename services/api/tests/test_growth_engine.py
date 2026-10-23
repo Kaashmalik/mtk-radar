@@ -140,3 +140,50 @@ def test_zero_platform_views_are_not_a_winner():
         {"platform": "facebook", "views": 0, "impressions": 100},
     ])
     assert not any("leads this small measured set" in rec["detail"] for rec in recs)
+
+
+# --------------------------------- 2026 playbook: CTR 4% / AVD 40% pivots
+
+def row(**kw):
+    base = {
+        "platform": "youtube", "language": "en", "views": 1000, "likes": 40,
+        "comments": 10, "impressions": 50_000, "ctr": 5.2,
+        "avg_view_percentage": 45.0, "retention_3s": 0.62,
+        "link_clicks": 0,
+    }
+    base.update(kw)
+    return base
+
+
+def test_ctr_below_four_percent_recommends_a_packaging_swap():
+    from growth_engine import recommendations
+
+    recs = recommendations([row()])
+    packaging = [r for r in recs if r["metric"] == "packaging"]
+    assert packaging == [], "healthy CTR (5.2%) must not trigger a swap"
+
+    weak = recommendations([row(ctr=3.1)])
+    packaging = [r for r in weak if r["metric"] == "packaging"]
+    assert packaging and packaging[0]["priority"] == "high"
+    assert "4%" in packaging[0]["title"] or "4%" in packaging[0]["detail"]
+
+    # Without impressions the CTR simply is not measured — never a rec.
+    unmeasured = recommendations([row(ctr=1.0, impressions=0)])
+    assert [r for r in unmeasured if r["metric"] == "packaging"] == []
+
+
+def test_avd_below_forty_percent_recommends_a_retention_cut():
+    from growth_engine import recommendations
+
+    healthy = recommendations([row()])
+    assert [r for r in healthy if r["metric"] == "avd"] == []
+
+    weak = recommendations([row(avg_view_percentage=31.5)])
+    avd = [r for r in weak if r["metric"] == "avd"]
+    assert avd and avd[0]["priority"] == "high"
+    assert "32%" in avd[0]["detail"]  # 31.5 rounds to 32
+    assert "retention graph" in avd[0]["detail"]
+
+    # Missing AVD is "unavailable", not a 0% measurement.
+    assert [r for r in recommendations([row(avg_view_percentage=None)])
+            if r["metric"] == "avd"] == []

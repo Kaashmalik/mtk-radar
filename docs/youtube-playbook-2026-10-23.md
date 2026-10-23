@@ -16,7 +16,7 @@ Sources: 2026 master plan (user-provided), `docs/enhancement-plan-2026-10-22.md`
 | Master plan rule | Platform behavior |
 |---|---|
 | Sub-niche over generalist | **Operator.** The niche lives in brand settings (channel name, categories). The generator only packages verified offers in the configured categories — it cannot drift off-niche because every video is bound to a verified offer. |
-| "3-competitor" rule (10k–100k subs, views > subs = trending) | **Operator**, supported by the trend radar: `trend_candidates` scores discovery leads; competitor research itself stays human judgment. |
+| "3-competitor" rule (10k–100k subs, views > subs = trending) | **Operator-measured, platform-scored.** The radar applies the rule deterministically: record competitor stats via the radar's "3-competitor check" (`POST /trends/{id}/competitors`) and demand is bumped *only* when ≥ 3 similar channels in the 10k–100k band out-perform their subscriber count (`signals.competitor_evidence`, plus a driver/risk in `score_reason`). The platform never scrapes YouTube for this — the numbers must be human-measured. |
 | Google Trends / YouTube Research "Content Gaps" / Reddit + TikTok monitoring | **Operator.** Radar candidates are entered via the studio; the platform never auto-picks a topic without a verified offer behind it. |
 
 ## 2. Tags & metadata (2026 framework)
@@ -60,7 +60,7 @@ specific + channel name).
 | Setup & branding (days 1–5) | **Operator** in YouTube Studio (brand account, avatar/banner, About page). Channel name synced into mtk-radar brand settings so tags/packaging stay branded. |
 | Topic batching (days 6–10): 10 ideas from competitor gaps, 4 fully scripted | **Platform supports.** Trend radar → offers → studio generates full packages (script, A/B metadata, covers, captions) per offer; scripts are reviewable/revisable before anything is recorded. |
 | Launch (days 11–25): first 2 videos same day, then weekly (e.g. Thursday 3 PM) | **Generated + enforced pipeline.** Scheduling with timezone-aware local time; two same-day schedules or two weekly slots are ordinary schedule rows. The release gate decides "may this go out"; the publishing worker executes. |
-| Analyze & pivot (days 26–30): CTR < 4% → change thumbnail/title; AVD < 40% → consult retention graph | **Operator with data support.** Metrics land via the analytics worker; the experiment system A/B-tests titles/covers (`studio/experiments`). Thresholds (CTR 4% / AVD 40%) are review heuristics in the weekly growth review — they annotate decisions, they do not auto-block. |
+| Analyze & pivot (days 26–30): CTR < 4% → change thumbnail/title; AVD < 40% → consult retention graph | **Platform-flagged, operator-decided.** The growth review emits a high-priority "Swap the packaging: CTR is under 4%" recommendation when measured impression CTR averages below 4%, and "Cut the dead segment" when average view duration is below 40% — computed only over actually measured rows (missing data is "unavailable", never a 0). The studio A/B experiments then test the fix one variable at a time. The thresholds never auto-block releases. |
 
 ---
 
