@@ -56,6 +56,44 @@ def _wrap(text: str, max_chars: int, max_lines: int) -> list[str]:
     return lines or ["Offer walkthrough"]
 
 
+def build_thumbnail_text(offer: dict[str, Any]) -> str:
+    """Thumbnail wording: at most 3 words, never repeating the title verbatim.
+
+    Keep this logic identical to `services/api/seo.py` (`build_thumbnail_text`):
+    the release gate validates the studio-published thumbnail text while this
+    module draws the actual pixels, so a drift here would make the gate bless
+    something the viewer never sees. Both derive the same deterministic answer
+    from the same offer JSON.
+    """
+    title_words = set(re.findall(r"[a-z0-9]+", _clean(offer.get("title")).lower()))
+
+    def fresh(candidate: str) -> str | None:
+        words = _clean(candidate).split()
+        if not words or len(words) > 3:
+            return None
+        lowered = [w.lower() for w in words]
+        if any(word in title_words for word in lowered):
+            return None
+        return " ".join(words).upper()
+
+    value = offer.get("value") if isinstance(offer.get("value"), dict) else {}
+    amount = _clean(value.get("amount")) if isinstance(value, dict) else ""
+    currency = _clean(value.get("currency")) if isinstance(value, dict) else ""
+    candidates = [
+        f"{amount} {currency}".strip() if amount and currency else "",
+        _clean(offer.get("promo_code")),
+        "verified claim",
+        "walkthrough",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        fitted = fresh(candidate)
+        if fitted:
+            return fitted
+    return "VERIFIED CLAIM"
+
+
 def build_cover_spec(
     offer: dict[str, Any],
     *,
@@ -71,8 +109,14 @@ def build_cover_spec(
     eyebrow = "VERIFIED CLAIM" if language == "en" else "تصدیق شدہ کلیم"
     cta = ("REAL WALKTHROUGH · SOURCES BELOW" if language == "en"
            else "حقیقی کلیم · ذرائع نیچے")
+    # 2026 packaging rule: the big thumbnail text is at most 3 words and never
+    # repeats the title — the title already does its job in the metadata. The
+    # full title stays in the spec for accessibility labels and audit only.
+    thumbnail_text = build_thumbnail_text(offer)
     return {
-        "version": 1,
+        "version": 2,
+        "thumbnail_text": thumbnail_text,
+        "thumbnail_lines": _wrap(thumbnail_text, 16 if preset == "vertical" else 22, 2),
         "language": language,
         "variant": variant,
         "preset": preset_data["key"],
@@ -102,11 +146,12 @@ def render_svg(spec: dict[str, Any]) -> str:
             if rtl else "Inter, DejaVu Sans, system-ui, sans-serif")
     title_size = 76 if spec["preset"] == "landscape" else 88
     line_height = title_size * 1.14
+    big_lines = spec.get("thumbnail_lines") or spec["title_lines"]
     title_lines = "".join(
         f'<text x="{x}" y="{250 + i * line_height}" text-anchor="{anchor}" '
         f'font-family="{font}" font-size="{title_size}" font-weight="800" '
         f'fill="{palette["text"]}">{escape(line)}</text>'
-        for i, line in enumerate(spec["title_lines"])
+        for i, line in enumerate(big_lines)
     )
     radar_cx = width - 150 if not rtl else 150
     radar_cy = height - 160
@@ -185,7 +230,7 @@ def _try_png(svg_path: Path, png_path: Path, spec: dict[str, Any]) -> Path | Non
                 font = ImageFont.truetype(candidate, 64)
                 break
         y = 220
-        for line in spec["title_lines"]:
+        for line in spec.get("thumbnail_lines") or spec["title_lines"]:
             draw.text((76, y), line, font=font, fill=palette["text"])
             y += 78
         draw.text((76, 130), spec["eyebrow"], fill=palette["accent"])

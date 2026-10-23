@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 import db
 from api_hardening import effective_reviewer
 from schedules_state import script_version_hash
-from seo import PLATFORMS, build_variants
+from seo import PLATFORMS, build_thumbnail_text, build_variants
 from settings_store import audit, get_language_policy, get_value
 from scriptgen import (
     SCRIPT_FORMATS,
@@ -292,6 +292,8 @@ async def generate_content(offer_id: uuid.UUID, body: StudioGenerateIn,
         cover_spec = {
             "language": copy_language,
             "voiceover_language": language,
+            # 2026 packaging rule: ≤3 words, never the title itself.
+            "thumbnail_text": build_thumbnail_text(offer),
             "title": offer.get("title", "Offer walkthrough"),
             "provider": offer.get("provider", ""),
             "eyebrow": "VERIFIED CLAIM" if copy_language == "en" else "تصدیق شدہ کلیم",

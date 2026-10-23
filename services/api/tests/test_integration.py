@@ -2446,22 +2446,49 @@ def _gate_ready_schedule(auth_client, marker):
         """,
         offer_id, marker, version_hash,
     )[0]["id"]
+    # An approved metadata variant that satisfies the 2026 packaging rules:
+    # a <=50-character title and 5-8 plain (no '#') search tags ending with the
+    # channel name. The release gate validates these pins at attempt time.
+    variant_id = _run(
+        """
+        INSERT INTO content_variants (offer_id, language, kind, platform,
+                                      variant_key, payload, status, version,
+                                      version_hash, created_by)
+        VALUES ($1, 'en', 'metadata', 'youtube', 'default', $2::jsonb,
+                'approved', 1, $3, 'pytest')
+        RETURNING id
+        """,
+        offer_id,
+        json.dumps({
+            "title": f"Gate offer walkthrough {marker}"[:50],
+            "caption": "Official terms only. Results depend on the provider.",
+            "tags": ["free domain", "free domain 2026", "gate co",
+                     "verified walkthrough", "mtk codex"],
+            "hashtags": [],
+            "pinned_comment": "Sources are in the description.",
+            "website_url": "https://mtk.example/guide",
+            "cta": "Full guide on our site",
+        }),
+        f"meta-{marker}",
+    )[0]["id"]
+
     sid = _run(
         """
         INSERT INTO schedules (offer_id, platform, state, local_time, timezone,
                                privacy, idempotency_key, version_hash, render_id,
                                render_sha256, metadata_hash, cover_path, cover_sha256,
-                               captions_sha256)
+                               captions_sha256, content_variant_id)
         VALUES ($1, 'youtube', 'scheduled', now(), 'Asia/Karachi', 'private',
                 $2, $3, $4, repeat('a', 64), repeat('d', 64),
-                'projects/gate/' || $2 || '.jpg', repeat('b', 64), repeat('c', 64))
+                'projects/gate/' || $2 || '.jpg', repeat('b', 64), repeat('c', 64), $5)
         RETURNING id
         """,
-        offer_id, f"gate-{marker}", version_hash, render_id,
+        offer_id, f"gate-{marker}", version_hash, render_id, variant_id,
     )[0]["id"]
     return {
         "offer_id": str(offer_id), "schedule_id": str(sid),
         "render_id": str(render_id), "version_hash": version_hash,
+        "content_variant_id": str(variant_id),
     }
 
 
@@ -2528,6 +2555,59 @@ def test_release_gate_blocks_attempt_with_incomplete_package(auth_client):
             "value": {"require_package_assets": True,
                       "require_playback_review": True}})
         assert reset.status_code == 200, reset.text
+
+
+def test_release_gate_enforces_2026_packaging_quality(auth_client):
+    """2026 playbook metadata rules, enforced (not advisory): the pinned
+    metadata variant must carry a phone-safe title (<=50 chars) and 5-8 plain
+    search tags without '#'. An 80-character title with hashtag 'tags' blocks
+    the release; fixing the variant clears it without re-scheduling."""
+    ids = _gate_ready_schedule(auth_client, "gate-quality")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
+    variant_id = __import__("uuid").UUID(ids["content_variant_id"])
+    long_title = ("I Tested Every Single Free Domain Offer On The Internet "
+                  "And Here Is What Actually Worked For Me Long Run")
+    assert len(long_title) > 50
+    _run(
+        "UPDATE content_variants SET payload = $2::jsonb WHERE id = $1",
+        variant_id,
+        json.dumps({
+            "title": long_title,
+            "caption": "Official terms only. Results depend on the provider.",
+            "tags": ["#free", "#domain", "#deal", "#students", "#tech", "#web",
+                     "#hosting", "#ai", "#startup", "#education", "#code"],
+            "hashtags": [],
+        }),
+    )
+
+    # The dashboard-visible preview names every quality problem structurally.
+    preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+    assert preview["ok"] is False
+    codes = {p["code"] for p in preview["problems"]}
+    assert "metadata_title_too_long" in codes
+    assert "metadata_tags_hashtags" in codes
+
+    refused = auth_client.post(f"/schedules/{sid}/attempt", headers=SVC, json={})
+    assert refused.status_code == 409, refused.text
+    assert "metadata_title_too_long" in refused.text
+
+    # Fix the packaging on the same approved variant — the gate clears it.
+    _run(
+        "UPDATE content_variants SET payload = $2::jsonb WHERE id = $1",
+        variant_id,
+        json.dumps({
+            "title": "Gate walkthrough",
+            "caption": "Official terms only. Results depend on the provider.",
+            "tags": ["free domain", "free domain 2026", "gate co",
+                     "verified walkthrough", "mtk codex"],
+            "hashtags": [],
+        }),
+    )
+    cleared = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+    cleared_codes = {p["code"] for p in cleared["problems"]}
+    assert "metadata_title_too_long" not in cleared_codes
+    assert "metadata_tags_hashtags" not in cleared_codes
+    assert cleared["ok"] is True
 
 
 def test_release_gate_binds_claim_outcome_to_script_format(auth_client):
@@ -4143,6 +4223,36 @@ def test_evidence_snapshot_inspection_serves_captured_and_raw_text(auth_client):
 
 
 # -------------------------------- day-3: studio editing with revision saves
+
+def test_studio_generates_2026_compliant_youtube_packaging(auth_client):
+    """2026 playbook, end-to-end from the generator: youtube metadata variants
+    carry phone-safe titles (<=50 chars) and 5-8 plain search tags (no '#'),
+    and every cover spec names its <=3-word, non-repeating thumbnail text."""
+    offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
+    generated = auth_client.post(f"/studio/offers/{offer_id}/generate", headers=AUTH, json={
+        "languages": ["en"], "platforms": ["youtube"], "format": "official_explainer",
+    })
+    assert generated.status_code == 201, generated.text
+
+    overview = auth_client.get(f"/studio/offers/{offer_id}", headers=AUTH).json()
+    metas = [v for v in overview["variants"]
+             if v["kind"] == "metadata" and v.get("platform") == "youtube"]
+    assert metas, "no youtube metadata variants generated"
+    for meta in metas:
+        payload = meta["payload"] if isinstance(meta["payload"], dict) else json.loads(meta["payload"])
+        assert len(str(payload["title"])) <= 50, payload["title"]
+        tags = payload.get("tags")
+        assert isinstance(tags, list) and 5 <= len(tags) <= 8, tags
+        assert all(not str(t).startswith("#") for t in tags), tags
+
+    covers = [v for v in overview["variants"] if v["kind"] == "cover"]
+    assert covers, "no cover variants generated"
+    for cover in covers:
+        payload = cover["payload"] if isinstance(cover["payload"], dict) else json.loads(cover["payload"])
+        thumb = str(payload.get("thumbnail_text", ""))
+        assert 0 < len(thumb.split()) <= 3, thumb
+        assert thumb.upper() != str(payload.get("title", "")).upper(), thumb
+
 
 def test_studio_script_revision_saves_new_version_and_enforces_wording(auth_client):
     offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
