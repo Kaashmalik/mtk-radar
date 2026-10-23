@@ -203,14 +203,14 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
                     "UPDATE jobs SET status = CASE WHEN $2 THEN 'dead' ELSE 'failed' END, "
                     "last_error = $3, lease_expires_at = NULL, lease_holder = NULL, "
                     "run_after = CASE WHEN $2 THEN run_after ELSE now() + "
-                    "($4 || ' seconds')::interval END, updated_at = now() WHERE id = $1",
+                    "make_interval(secs => $4::int) END, updated_at = now() WHERE id = $1",
                     job_id, dead, body.detail, body.retry_after_s or 0,
                 )
                 return {"id": str(job_id), "status": "dead" if dead else "failed"}
             await conn.execute(
                 "UPDATE jobs SET status = 'pending', last_error = $2, "
                 "lease_expires_at = NULL, lease_holder = NULL, "
-                "run_after = now() + ($3 || ' seconds')::interval, updated_at = now() "
+                "run_after = now() + make_interval(secs => $3::int), updated_at = now() "
                 "WHERE id = $1",
                 job_id, body.detail, body.retry_after_s,
             )

@@ -280,9 +280,150 @@ class Publisher:
         if not self._acquire_sweep_lock("publishing"):
             return 0
         try:
-            return self._sweep(now)
+            drained = self._drain_publish_jobs(now)
+            return drained + self._sweep(now)
         finally:
             self._release_sweep_lock("publishing")
+
+    # ------------------------------------ durable jobs queue drain (v0.33)
+    # "Owed work" is recorded in the jobs table (028) and enqueued at
+    # schedule creation; this drain makes the worker actually CLAIM that
+    # work (SKIP LOCKED, lease, result) instead of relying on list polling.
+    # Placement inside the sweep lock is deliberate: job drain and classic
+    # sweep run sequentially, so one worker can never double-attempt the
+    # same post. The classic sweep below REMAINS the authoritative fallback —
+    # a queue outage degrades to polling, never to lost posts.
+    def _publish_jobs_enabled(self) -> bool:
+        return os.environ.get("MTK_PUBLISH_JOB_QUEUE", "1").strip().lower() \
+            not in {"0", "false", "no"}
+
+    def _drain_publish_jobs(self, now: datetime) -> int:
+        """Claim and run publish_schedule jobs until the queue is dry.
+
+        Fail-open contract: if the queue endpoint is missing (older API)
+        or unreachable, the sweep below still drives publishing. Failures
+        are Fail-CLOSED at the release gate/attempt layer, so nothing here
+        can bypass a safety check.
+        """
+        if not self._publish_jobs_enabled():
+            return 0
+        published = 0
+        for _ in range(200):  # bounded per sweep; results remove claimed jobs
+            if _STOP:
+                break
+            if self.policy and self.policy.get("dry_run"):
+                return published
+            try:
+                res = self.api.post(
+                    "/jobs/claim",
+                    json={"worker": "publishing-worker", "lease_s": 900,
+                          "kinds": ["publish_schedule"]},
+                )
+            except httpx.HTTPError as exc:
+                log.warning("job queue unreachable (%s) — sweep-only mode", exc)
+                return published
+            if res.status_code == 404:
+                log.info("job queue not available on this API — sweep-only mode")
+                return published
+            if res.status_code >= 300:
+                log.warning("job claim refused (%s) — sweep-only this run",
+                            res.status_code)
+                return published
+            try:
+                body = res.json()
+            except ValueError:
+                log.warning("job claim returned a non-JSON payload — sweep-only mode")
+                return published
+            if not body.get("claimed"):
+                return published
+            job_id = body["id"]
+            try:
+                published += self._run_publish_job(
+                    job_id, body.get("entity_id"), now)
+            except Exception as exc:  # noqa: BLE001 — a job failure must not kill the sweep
+                log.exception("publish job %s failed unexpectedly", job_id)
+                self._job_result(job_id, ok=False,
+                                 detail=f"unexpected: {exc}", retry_after_s=1800)
+        return published
+
+    def _job_result(self, job_id: str, *, ok: bool, detail: str | None = None,
+                    retry_after_s: int | None = None) -> None:
+        payload: dict = {"ok": ok}
+        if detail:
+            payload["detail"] = detail[:1900]
+        if retry_after_s is not None:
+            payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+        try:
+            self.api.post(f"/jobs/{job_id}/result", json=payload)
+        except httpx.HTTPError as exc:
+            # lease expiry re-arms the claim; the sweep remains the fallback
+            log.warning("could not report result for job %s: %s", job_id, exc)
+
+    def _run_publish_job(self, job_id: str, schedule_id: str | None,
+                         now: datetime) -> int:
+        """Run one claimed publish_schedule job. Returns 1 when a post was
+        published. The schedule row — not the job payload — is the source of
+        truth for state and due-ness."""
+        if not schedule_id:
+            self._job_result(job_id, ok=False,
+                             detail="job has no schedule entity_id",
+                             retry_after_s=3600)
+            return 0
+        try:
+            res = self.api.get(f"/schedules/{schedule_id}")
+        except httpx.HTTPError as exc:
+            log.warning("schedule %s lookup failed (%s) — job re-queued", schedule_id, exc)
+            self._job_result(job_id, ok=False,
+                             detail=f"schedule lookup failed: {exc}",
+                             retry_after_s=600)
+            return 0
+        if res.status_code == 404:
+            self._job_result(job_id, ok=True,
+                             detail="schedule no longer exists — nothing owed")
+            return 0
+        if res.status_code >= 300:
+            self._job_result(job_id, ok=False,
+                             detail=f"schedule lookup refused ({res.status_code})",
+                             retry_after_s=600)
+            return 0
+        try:
+            post = res.json()
+        except ValueError:
+            self._job_result(job_id, ok=False, detail="non-JSON schedule payload",
+                             retry_after_s=600)
+            return 0
+        state = post.get("state")
+        if state != "scheduled":
+            # cancelled / paused / failed / already published — the owed work
+            # either moved or was decided by a human; record it and move on.
+            self._job_result(job_id, ok=True,
+                             detail=f"nothing owed — schedule state is {state!r}")
+            return 0
+        if not _is_due(post.get("local_time"), now):
+            try:
+                when = datetime.fromisoformat(
+                    str(post["local_time"]).replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                wait_s = max(int((when - now).total_seconds()) + 1, 1)
+            except ValueError:
+                wait_s = 3600
+            self._job_result(job_id, ok=False, detail="publish time not reached",
+                             retry_after_s=wait_s)
+            return 0
+        adapters = self.build_adapters()
+        if not self._automation_allowed():
+            log.info("automation policy paused mid-drain — job %s left leased", job_id)
+            return 0
+        if self._publish(post, adapters):
+            self._job_result(job_id, ok=True, detail="published")
+            return 1
+        # _publish already reported the outcome (hold/retry/failure) — the
+        # job re-checks shortly and resolves itself from the schedule state.
+        self._job_result(job_id, ok=False,
+                         detail="publish attempt did not complete — see schedule outcome",
+                         retry_after_s=600)
+        return 0
 
     def _sweep(self, now: datetime) -> int:
         adapters = self.build_adapters()

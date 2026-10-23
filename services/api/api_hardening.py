@@ -36,6 +36,7 @@ can be exercised by tests without a database or the real app startup.
 import hashlib
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -64,6 +65,97 @@ _AUTOMATION_PREFIXES = ("automation:", "system:")
 # token_hash -> (name, cached_at). Positives only; revocation takes effect on
 # the next request or ≤TTL. reset_reviewer_cache() clears it immediately.
 _REVIEWER_CACHE: dict[str, tuple[str, float]] = {}
+
+# ---- brute-force protection (v0.33) -----------------------------------------
+# Every 401/503 from the auth gate counts against the client IP in a sliding
+# window. Past AUTH_FAILURE_LIMIT failures inside AUTH_FAILURE_WINDOW_S, the
+# IP is served 429 for a cooldown — otherwise a reviewer-token could be
+# brute-forced at line rate. Only auth-gate outcomes count: a valid credential
+# resets the record immediately, and dev-open mode (no tokens) never engages.
+AUTH_FAILURE_LIMIT = int(os.environ.get("MTK_AUTH_FAILURE_LIMIT", "15"))
+AUTH_FAILURE_WINDOW_S = float(os.environ.get("MTK_AUTH_FAILURE_WINDOW_S", "60"))
+_AUTH_FAILURES: dict[str, list[float]] = {}
+_AUTH_FAILURES_LOCK = threading.Lock()
+_AUTH_FAILURES_MAX_KEYS = 10_000  # bounded: a spoofed-IP flood cannot grow it forever
+
+
+def _client_ip(request: Request) -> str:
+    # Direct peer by default. Trust the proxy chain only when the operator
+    # says this deployment sits behind one (MTK_TRUST_PROXY=1) — otherwise the
+    # header is client-controlled and trivially spoofable.
+    if os.environ.get("MTK_TRUST_PROXY", "").strip().lower() in {"1", "true", "yes"}:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:120]
+    return (request.client.host if request.client else "unknown")[:120]
+
+
+def _auth_failure_check(ip: str, now: float | None = None) -> bool:
+    """True when this IP is over the failure budget (a 429 should be served)."""
+    now = now if now is not None else time.monotonic()
+    with _AUTH_FAILURES_LOCK:
+        hits = [t for t in _AUTH_FAILURES.get(ip, ()) if now - t < AUTH_FAILURE_WINDOW_S]
+        if len(hits) >= AUTH_FAILURE_LIMIT:
+            _AUTH_FAILURES[ip] = hits
+            return True
+        return False
+
+
+def _auth_failure_record(ip: str, now: float | None = None) -> None:
+    now = now if now is not None else time.monotonic()
+    with _AUTH_FAILURES_LOCK:
+        hits = [t for t in _AUTH_FAILURES.get(ip, ()) if now - t < AUTH_FAILURE_WINDOW_S]
+        hits.append(now)
+        if len(_AUTH_FAILURES) < _AUTH_FAILURES_MAX_KEYS or ip in _AUTH_FAILURES:
+            _AUTH_FAILURES[ip] = hits
+        # dict full and IP unseen: drop the oldest entry instead of growing forever
+        elif _AUTH_FAILURES:
+            oldest = min(_AUTH_FAILURES, key=lambda k: _AUTH_FAILURES[k][0])
+            del _AUTH_FAILURES[oldest]
+            _AUTH_FAILURES[ip] = hits
+
+
+def _auth_failure_reset(ip: str) -> None:
+    with _AUTH_FAILURES_LOCK:
+        _AUTH_FAILURES.pop(ip, None)
+
+
+def reset_auth_failures() -> None:
+    """Test/ops hook: clear the failure budget (e.g. between scenarios)."""
+    with _AUTH_FAILURES_LOCK:
+        _AUTH_FAILURES.clear()
+
+
+# ---- Prometheus-style request counters (v0.33) -------------------------------
+# method + route template + status-class → count. Route templates (not raw
+# paths) keep cardinality bounded: /schedules/{schedule_id}, never per-entity.
+_REQUEST_COUNTS: dict[tuple[str, str, str], int] = {}
+_REQUEST_COUNTS_LOCK = threading.Lock()
+_REQUEST_COUNTS_MAX_KEYS = 500
+
+
+def record_request(method: str, route_template: str, status: int) -> None:
+    status_class = f"{status // 100}xx"
+    try:
+        key = (method[:8], route_template[:120], status_class)
+    except Exception:  # noqa: BLE001 — observability must never break a request
+        return
+    with _REQUEST_COUNTS_LOCK:
+        if key not in _REQUEST_COUNTS and len(_REQUEST_COUNTS) >= _REQUEST_COUNTS_MAX_KEYS:
+            return  # bounded: drop rather than grow unbounded
+        _REQUEST_COUNTS[key] = _REQUEST_COUNTS.get(key, 0) + 1
+
+
+def request_counter_snapshot() -> dict[tuple[str, str, str], int]:
+    with _REQUEST_COUNTS_LOCK:
+        return dict(_REQUEST_COUNTS)
+
+
+def auth_failure_ips() -> int:
+    """How many client IPs are currently carrying auth-failure history."""
+    with _AUTH_FAILURES_LOCK:
+        return len(_AUTH_FAILURES)
 
 
 def reset_reviewer_cache() -> None:
@@ -211,9 +303,19 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
             request.state.credential_class = CREDENTIAL_DISABLED
             return await call_next(request)
 
+        ip = _client_ip(request)
+        if _auth_failure_check(ip):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "too many failed authentication attempts — "
+                                   f"retry after {int(AUTH_FAILURE_WINDOW_S)}s"},
+                headers={"Retry-After": str(int(AUTH_FAILURE_WINDOW_S))},
+            )
+
         header = request.headers.get("authorization", "")
         scheme, _, credential = header.partition(" ")
         if scheme.lower() != "bearer" or not credential:
+            _auth_failure_record(ip)
             return _auth_required("missing or malformed Authorization header")
 
         # constant-time compare for every configured non-human credential
@@ -221,6 +323,7 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
 
         for configured, cls in self._tokens.items():
             if hmac.compare_digest(credential, configured):
+                _auth_failure_reset(ip)
                 request.state.actor = None
                 request.state.credential_class = cls
                 return await call_next(request)
@@ -229,15 +332,18 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
             try:
                 reviewer = await self._resolve_reviewer(credential)
             except _BackendUnavailable:
+                _auth_failure_record(ip)
                 return JSONResponse(
                     status_code=503,
                     content={"detail": "auth backend unavailable — token validity unknown"},
                 )
             if reviewer:
+                _auth_failure_reset(ip)
                 request.state.actor = reviewer
                 request.state.credential_class = CREDENTIAL_REVIEWER
                 return await call_next(request)
 
+        _auth_failure_record(ip)
         return _auth_required("invalid token")
 
     async def _resolve_reviewer(self, credential: str) -> str | None:
@@ -300,4 +406,11 @@ class _RequestLogMiddleware(BaseHTTPMiddleware):
             response.status_code,
             duration_ms,
         )
+        # Route TEMPLATE (set by the router after routing) keeps label
+        # cardinality bounded; unmatched/404 requests fall back to the raw path
+        # but only unmatched literal requests (no interleaved entity ids) can
+        # accumulate — the snapshot caps at 500 keys regardless.
+        route = request.scope.get("route")
+        template = getattr(route, "path", None) or request.url.path
+        record_request(request.method, template, response.status_code)
         return response

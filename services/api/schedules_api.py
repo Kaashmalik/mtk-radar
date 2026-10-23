@@ -404,14 +404,15 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
     # instead of only polling row state.
     await pool.execute(
         """
-        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts)
-        VALUES ('publish_schedule', $1, $2::jsonb, $3, 3)
+        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts, run_after)
+        VALUES ('publish_schedule', $1, $2::jsonb, $3, 3, $4::timestamptz)
         ON CONFLICT (dedupe_key) DO NOTHING
         """,
         row["id"],
         json.dumps({"platform": body.platform, "language": body.language,
                     "package_hash": package_hash}),
         f"publish:{row['id']}:{package_hash}",
+        body.local_time,
     )
     return {"id": row["id"], "state": row["state"], "created": True,
             "idempotency_key": idempotency_key, "language": body.language,
@@ -647,6 +648,8 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
         f"WHERE id = $1 RETURNING state::text AS state, version_hash",
         *params,
     )
+    if body.to == "scheduled":
+        await _rearm_publish_job(pool, schedule_id)
     await _audit(pool, actor=reviewer_on_record or "operator",
                  action=f"schedule:{schedule['state']}->{body.to}",
                  entity="schedules", entity_id=schedule_id,
@@ -734,6 +737,7 @@ async def resume(schedule_id: uuid.UUID, reviewer: str = Query(default="operator
         "UPDATE schedules SET state = 'scheduled', updated_at = now() WHERE id = $1 RETURNING state::text AS state",
         schedule_id,
     )
+    await _rearm_publish_job(pool, schedule_id)
     # A human resumed the post: clear the hold so the worker may try again.
     # If an unknown attempt marker was explicitly acknowledged, clear it too
     # and keep an audit trail of who made that call.
@@ -1313,6 +1317,31 @@ async def _gate_automation_schedule(pool, schedule: dict) -> None:
             status_code=409,
             detail="automation schedule approval refused: " + "; ".join(problems),
         )
+
+
+async def _rearm_publish_job(pool, schedule_id: uuid.UUID) -> None:
+    """(Re)arm the durable publish job when a post (re)enters 'scheduled'.
+
+    Covers retries (auto-retry transition), human resume, and re-scheduling
+    after a rewrite: the existing job row goes back to 'pending' with a fresh
+    attempt budget and its run_after aligned to the post's publish time. If
+    the package changed, a NEW job was enqueued at schedule creation with a
+    new dedupe key — this UPDATE only touches rows for this schedule. No-op
+    when no job row exists (post predates 028; the classic sweep still
+    drives it — the sweep remains the authoritative fallback).
+    """
+    await pool.execute(
+        """
+        UPDATE jobs j
+        SET status = 'pending', run_after = COALESCE(s.local_time, j.run_after),
+            attempts = 0, last_error = NULL, lease_holder = NULL,
+            lease_expires_at = NULL, updated_at = now()
+        FROM schedules s
+        WHERE j.entity_id = $1 AND j.kind = 'publish_schedule'
+          AND s.id = j.entity_id AND s.state = 'scheduled'
+        """,
+        schedule_id,
+    )
 
 
 async def _load(pool, schedule_id: uuid.UUID) -> dict:

@@ -266,6 +266,8 @@ from content_studio_api import router as _studio_router
 from worker_health import EXPECTED_WORKERS
 from worker_health import router as _workers_router
 from upload_sessions_api import router as _upload_sessions_router
+from jobs_api import router as _jobs_router
+from metrics_api import router as _metrics_router
 from schedules_state import script_version_hash
 
 
@@ -324,7 +326,8 @@ def auth_client(client):
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
               _media_router, _settings_router, _analytics_router, _health_router,
               _locks_router, _automation_router, _studio_router, _attention_router,
-              _workers_router, _upload_sessions_router):
+              _workers_router, _upload_sessions_router, _jobs_router,
+              _metrics_router):
         app2.include_router(r)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
@@ -3603,3 +3606,126 @@ def test_upload_authorization_refuses_while_automation_is_paused(auth_client):
         assert "paused" in refused.json()["detail"]
     finally:
         _set_policy(auth_client, {"mode": "assisted", "paused": False, "dry_run": False})
+
+
+# ----------------------------------------------------------- jobs queue (v0.33)
+
+
+def test_publish_job_lifecycle_and_rearm_on_reschedule(auth_client):
+    """The durable queue contract end to end: enqueue is idempotent,
+    claim leases atomically (SKIP LOCKED), results close or retry the job,
+    and a failed job is RE-ARMED when a post re-enters 'scheduled'."""
+
+    def _job_row(jid):
+        return _run(
+            "SELECT status::text AS status, attempts, last_error, "
+            "lease_holder, run_after::text AS run_after FROM jobs WHERE id = $1",
+            __import__("uuid").UUID(jid),
+        )[0]
+
+    # -- enqueue + idempotency (same dedupe key returns the SAME job)
+    sid = __import__("uuid").UUID(
+        _gate_ready_schedule(auth_client, "job-lifecycle")["schedule_id"])
+    first = auth_client.post(
+        "/jobs", headers=SVC,
+        json={"kind": "publish_schedule", "entity_id": str(sid),
+              "payload": {"platform": "youtube"},
+              "dedupe_key": f"publish-test:{sid}", "max_attempts": 3},
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["created"] is True
+    again = auth_client.post(
+        "/jobs", headers=SVC,
+        json={"kind": "publish_schedule", "entity_id": str(sid),
+              "dedupe_key": f"publish-test:{sid}"},
+    )
+    assert again.status_code == 201 and again.json()["created"] is False
+    assert again.json()["id"] == first.json()["id"]
+    jid = first.json()["id"]
+
+    # -- claim leases the job and bumps attempts
+    claimed = auth_client.post(
+        "/jobs/claim", headers=SVC,
+        json={"worker": "publishing-worker", "lease_s": 600,
+              "kinds": ["publish_schedule"]},
+    )
+    assert claimed.status_code == 200
+    while not claimed.json().get("claimed"):  # a backfilled job may win
+        peek = auth_client.get("/jobs?status=pending", headers=SVC).json()
+        assert peek, "expected a claimable job"
+        # dead/older jobs could shadow — keep claiming until ours arrives
+        claimed = auth_client.post(
+            "/jobs/claim", headers=SVC,
+            json={"worker": "publishing-worker", "lease_s": 600, "kinds": []})
+    if claimed.json()["id"] == jid:
+        row = _job_row(jid)
+        assert row["status"] == "leased" and row["attempts"] == 1
+        assert row["lease_holder"] == "publishing-worker"
+
+    # -- result: ok=False with a retry_after → re-queued 'pending' with backoff
+    res = auth_client.post(f"/jobs/{jid}/result", headers=SVC,
+                           json={"ok": False, "detail": "upload refused",
+                                 "retry_after_s": 1})
+    assert res.status_code == 200
+    row = _job_row(jid)
+    assert row["status"] == "pending", "a retryable failure re-queues with backoff"
+    assert row["last_error"] == "upload refused"
+
+    # -- a POST that re-enters 'scheduled' RE-ARMS the job: fresh budget
+    pause = auth_client.post(f"/schedules/{sid}/transition", headers=HUMAN,
+                             json={"to": "paused", "note": "rearm test"})
+    assert pause.status_code == 200, pause.text
+    resume = auth_client.post(f"/schedules/{sid}/transition", headers=HUMAN,
+                              json={"to": "scheduled", "note": "rearm test"})
+    assert resume.status_code == 200, resume.text
+    row = _job_row(jid)
+    assert row["status"] == "pending", "resume must re-arm the owed-work job"
+    assert row["attempts"] == 0 and row["last_error"] is None
+    local_time = _run("SELECT local_time::text AS t FROM schedules WHERE id = $1",
+                      sid)[0]["t"]
+    assert row["run_after"] == local_time, \
+        "run_after must track the publish time, not the enqueue moment"
+
+
+def test_migration_029_backfills_owed_publish_jobs(auth_client):
+    """Re-applying 029 against a live schema is a no-op for covered posts and
+    backfills any scheduled post without a job (keyed identically to the
+    creation-time enqueue so the two can never double-record)."""
+    ids = _gate_ready_schedule(auth_client, "job-backfill")
+    sid = ids["schedule_id"]
+
+    # 029 is two idempotent statements; apply them exactly as the migration
+    # runner does (execute → simple query protocol, multiple commands OK)
+    migration = (Path(__file__).resolve().parent.parent
+                 / "db" / "migrations" / "029_publish_job_backfill.sql").read_text()
+
+    def _apply_migration() -> None:
+        async def go():
+            import asyncpg as _apg
+            conn = await _apg.connect(DSN)
+            try:
+                await conn.execute(migration)
+            finally:
+                await conn.close()
+        asyncio.run(go())
+
+    _apply_migration()
+
+    rows = _run(
+        "SELECT dedupe_key, run_after::text AS run_after FROM jobs "
+        "WHERE entity_id = $1 AND kind = 'publish_schedule'", __import__("uuid").UUID(sid))
+    assert len(rows) == 1, "exactly one job per scheduled post, ever"
+    package_hash = _run("SELECT package_hash FROM schedules WHERE id = $1",
+                        __import__("uuid").UUID(sid))[0]["package_hash"]
+    assert rows[0]["dedupe_key"] == f"publish:{sid}:{package_hash or ''}"
+    local_time = _run("SELECT local_time::text AS t FROM schedules WHERE id = $1",
+                      __import__("uuid").UUID(sid))[0]["t"]
+    assert rows[0]["run_after"] == local_time
+
+    # idempotent: a second application must not duplicate
+    _apply_migration()
+    rows = _run(
+        "SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+        "AND kind = 'publish_schedule'", __import__("uuid").UUID(sid))
+    assert rows[0]["n"] == 1
+
