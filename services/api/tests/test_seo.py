@@ -5,6 +5,7 @@ from seo import (
     build_hashtags,
     build_metadata,
     build_variants,
+    metadata_summary,
     with_utm,
 )
 
@@ -77,3 +78,54 @@ def test_disclosure_and_evidence_are_packaged():
     )
     assert "AI-generated" in meta["caption"]
     assert "https://example.com/terms" in meta["caption"]
+
+
+# --------------------------------------- 2026 packaging rules (YT playbook)
+
+def test_youtube_title_fits_mobile_and_variants_differ():
+    long_offer = {**OFFER, "title": "Six months of the developer plan completely free for verified students in eligible countries"}
+    a, b = build_variants("youtube", long_offer, channel_name="MTK Codex")
+    assert len(a["title"]) <= 50, a["title"]
+    assert len(b["title"]) <= 50, b["title"]
+    assert a["title"] != b["title"]
+    # A short base title is preserved, not padded into cryptic fragments.
+    short = build_metadata("youtube", {**OFFER, "title": "Free .tech domain"})
+    assert "Free .tech domain" in short["title"]
+
+
+def test_youtube_tags_are_few_plain_and_branded():
+    meta = build_metadata("youtube", OFFER, channel_name="MTK Codex")
+    tags = meta["tags"]
+    assert 5 <= len(tags) <= 8, tags
+    assert all(not t.startswith("#") for t in tags), "hashtags belong in the description, not tags"
+    assert "free domain" in tags, "the broad category keyword leads"
+    assert any("2026" in t for t in tags), "a dated sub-keyword targets current searches"
+    assert tags[-1] == "mtk codex", "the channel name is the branded tag"
+    assert len(" ".join(tags)) <= 500
+    # Instagram keeps the legacy hashtag behaviour.
+    ig = build_metadata("instagram", OFFER)
+    assert ig["tags"] and all(t.startswith("#") for t in ig["tags"])
+
+
+def test_thumbnail_text_is_three_words_max_and_not_the_title():
+    from seo import build_thumbnail_text
+    with_promo = {**OFFER, "title": "One-year .tech domain for students",
+                  "promo_code": "SAVE2026"}
+    text = build_thumbnail_text(with_promo)
+    assert 0 < len(text.split()) <= 3
+    assert text == "SAVE2026", "the specific verified fact wins"
+    # A code that ALSO appears in the title is not fresh — fall through.
+    self_referential = build_thumbnail_text(
+        {**OFFER, "title": "SAVE2026 free domain", "promo_code": "SAVE2026"})
+    assert "SAVE2026" not in self_referential
+    assert len(self_referential.split()) <= 3
+    # No specifics at all → the verified badge, never the title itself.
+    plain = build_thumbnail_text({"title": "A very long descriptive runtime title"})
+    assert len(plain.split()) <= 3
+    assert plain.lower() not in plain.lower() or plain == "VERIFIED CLAIM"
+
+
+def test_metadata_summary_carries_the_plain_tags():
+    meta = build_metadata("youtube", OFFER, channel_name="MTK Codex")
+    summary = metadata_summary(meta)
+    assert summary["tags"] == meta["tags"]

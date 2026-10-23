@@ -118,6 +118,19 @@ inspection, script revision and operator variants), Python lint/compile clean,
 dashboard typecheck and production build passed. That is code/test evidence
 only; it is not live-provider, restore or deployment proof.
 
+Day-4 pass (2026-10-23, YouTube playbook alignment — see
+`docs/youtube-playbook-2026-10-23.md`): the 2026 packaging rules are now
+generated AND enforced. `seo.py` builds ~50-character YouTube titles
+(`YOUTUBE_TITLE_TARGET`), 5–8 plain search tags (1 broad + 2–4 specific +
+channel name, no '#') and a ≤3-word, non-title-repeating thumbnail text
+(`build_thumbnail_text`, mirrored in `workers/render/covers.py` which now
+renders that text as the big cover lines). The release gate blocks
+non-compliant pinned metadata (`metadata_title_too_long`, `metadata_tags_invalid`,
+`metadata_tags_hashtags`) and oversized approved thumbnail text
+(`thumbnail_text_too_long`) under the mandatory-package policy. Studio cover
+previews show the real thumbnail wording. New tests: 4 SEO unit tests, 2 cover
+tests, a studio packaging test and a gate quality test.
+
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
 

@@ -202,6 +202,70 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
                     + ", ".join(missing),
                 ))
 
+            # ---- 2026 packaging quality rules ---------------------------------
+            # The metadata must be *watchable on a phone*: a ~50-character
+            # title (mobile truncation), 5-8 plain search tags (YouTube says
+            # tags barely matter and penalizes misleading ones), and thumbnail
+            # wording of at most 3 words that does not repeat the title.
+            variant = None
+            if schedule["content_variant_id"]:
+                variant = await pool.fetchrow(
+                    "SELECT kind, payload::text AS payload FROM content_variants "
+                    "WHERE id = $1",
+                    schedule["content_variant_id"],
+                )
+                if variant is None:
+                    problems.append(_problem(
+                        "metadata_variant_missing",
+                        "the pinned metadata variant no longer exists — "
+                        "re-schedule from the studio",
+                    ))
+                elif variant["kind"] == "metadata":
+                    payload = _json_value(variant["payload"], {})
+                    title = str(payload.get("title") or "").strip()
+                    if not title:
+                        problems.append(_problem(
+                            "metadata_title_missing",
+                            "the approved metadata has no title",
+                        ))
+                    elif len(title) > 50:
+                        problems.append(_problem(
+                            "metadata_title_too_long",
+                            f"packaging title is {len(title)} characters — keep "
+                            "YouTube titles within 50 so the hook survives "
+                            "mobile truncation",
+                        ))
+                    tags = payload.get("tags")
+                    if not isinstance(tags, list) or not (5 <= len(tags) <= 8):
+                        problems.append(_problem(
+                            "metadata_tags_invalid",
+                            "YouTube tags must be 5-8 plain search keywords "
+                            "(1 broad + 2-4 specific + the channel name)",
+                        ))
+                    if any(str(tag).lstrip().startswith("#") for tag in tags):
+                        problems.append(_problem(
+                            "metadata_tags_hashtags",
+                            "YouTube tags must be plain keywords without '#' — "
+                            "hashtags belong in the description",
+                        ))
+            cover_variant = await pool.fetchrow(
+                "SELECT payload::text AS payload FROM content_variants "
+                "WHERE offer_id = $1 AND kind = 'cover' AND status = 'approved' "
+                "ORDER BY version DESC LIMIT 1",
+                schedule["offer_id"],
+            )
+            if cover_variant:
+                thumb_text = str(
+                    (_json_value(cover_variant["payload"], {}) or {}).get("thumbnail_text")
+                    or ""
+                ).strip()
+                if thumb_text and len(thumb_text.split()) > 3:
+                    problems.append(_problem(
+                        "thumbnail_text_too_long",
+                        f"approved thumbnail text is {len(thumb_text.split())} "
+                        "words — keep it at most 3 words, readable on a phone",
+                    ))
+
         # ---- final human playback review ----------------------------------
         if policy["require_playback_review"] and not render["playback_approved"]:
             problems.append(_problem(

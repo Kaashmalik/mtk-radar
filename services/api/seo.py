@@ -41,6 +41,27 @@ _DEFAULT_HASHTAGS: Final[dict[str, tuple[str, ...]]] = {
     "urdu": ("#اردو", "#پاکستان", "#ٹیکنالوجی", "#فری"),
 }
 
+#: Plain (no '#') YouTube search keywords per category — the broad, primary
+#: tag first, as the 2026 packaging rules prescribe: tags play a minimal role
+#: in discovery, so 5-8 well-chosen ones beat 30 hashtags.
+_CATEGORY_KEYWORD: Final[dict[str, str]] = {
+    "student_programs": "student discounts",
+    "developer_tools": "developer tools",
+    "model_hubs": "free ai models",
+    "cloud_platforms": "cloud free tier",
+    "domains_hosting": "free domain",
+    "ai_tools": "ai tools",
+    "education": "online learning",
+    "startup_perks": "startup deals",
+}
+
+_DEFAULT_KEYWORD: Final = "free offers"
+
+#: Keep YouTube titles within ~50 characters so the hook survives mobile
+#: truncation; the 100-character platform ceiling stays a hard cap only.
+YOUTUBE_TITLE_TARGET: Final = 50
+YOUTUBE_TAG_TARGET: Final = (5, 8)
+
 _CATEGORY_TAGS: Final[dict[str, str]] = {
     "student_programs": "student",
     "developer_tools": "developer",
@@ -115,6 +136,117 @@ def build_hashtags(offer: dict[str, Any], platform: str, *,
     return out
 
 
+def youtube_category_keyword(category: str | None) -> str:
+    """The one broad, primary search keyword for a category (no '#')."""
+    return _CATEGORY_KEYWORD.get(str(category or "").lower(), _DEFAULT_KEYWORD)
+
+
+def build_youtube_tags(offer: dict[str, Any], *,
+                       language: str = "en",
+                       channel_name: str | None = None) -> list[str]:
+    """5-8 plain YouTube search tags: 1 broad + 2-4 specific + channel name.
+
+    YouTube's own guidance is that tags play a minimal role in discovery and
+    misleading tags are penalized. So: no '#'-prefixed hashtags (those belong
+    in the description), no irrelevant keywords, never more than the tight
+    target band, and every tag is derived from a verified offer field or the
+    channel identity.
+    """
+    broad = youtube_category_keyword(offer.get("category"))
+    specific: list[str] = []
+    provider = _clean(offer.get("provider")).lower()
+    if provider and len(provider) <= 40 and provider != broad:
+        specific.append(provider)
+    promo = _clean(offer.get("promo_code")).lower()
+    if promo and re.fullmatch(r"[a-z0-9][a-z0-9-]*", promo) and promo not in broad:
+        specific.append(promo)
+    ordered: list[str] = [broad, f"{broad} 2026", *specific, "verified walkthrough"]
+    if channel_name:
+        channel = _clean(channel_name).lower()
+        if channel and channel not in ordered:
+            ordered.append(channel)
+    # Pad from the category hashtag pool (stripped to plain keywords) to reach
+    # the minimum of the band, then enforce the band ceiling.
+    low, high = YOUTUBE_TAG_TARGET
+    if len(ordered) < low:
+        niche_key = _CATEGORY_TAGS.get(str(offer.get("category") or "").lower(), "broad")
+        for tag in _DEFAULT_HASHTAGS.get(niche_key, ()):
+            plain = tag.lstrip("#").lower()
+            if plain and plain not in ordered:
+                ordered.append(plain)
+            if len(ordered) >= low:
+                break
+    seen: set[str] = set()
+    out: list[str] = []
+    total = 0
+    for tag in ordered:
+        normalized = _clean(tag).lower()
+        if not normalized or normalized in seen:
+            continue
+        if total + len(normalized) + 1 > 500:
+            break
+        seen.add(normalized)
+        out.append(normalized)
+        total += len(normalized) + 1
+        if len(out) >= high:
+            break
+    return out
+
+
+def build_thumbnail_text(offer: dict[str, Any]) -> str:
+    """Thumbnail wording: at most 3 words, never repeating the title verbatim.
+
+    The thumbnail must be readable on a tiny phone screen, so it leads with a
+    single specific verified fact (promo code, or the value amount with its
+    currency) and never repeats the title text. Falls back to the generic
+    verified badge when no specific fact survives the overlap filter.
+    """
+    title_words = set(re.findall(r"[a-z0-9]+", _clean(offer.get("title")).lower()))
+
+    def fresh(candidate: str) -> str | None:
+        words = _clean(candidate).split()
+        if not words or len(words) > 3:
+            return None
+        lowered = [w.lower() for w in words]
+        if any(word in title_words for word in lowered):
+            return None
+        return " ".join(words).upper()
+
+    value = offer.get("value") if isinstance(offer.get("value"), dict) else {}
+    amount = _clean(value.get("amount")) if isinstance(value, dict) else ""
+    currency = _clean(value.get("currency")) if isinstance(value, dict) else ""
+    candidates = [
+        f"{amount} {currency}".strip() if amount and currency else "",
+        _clean(offer.get("promo_code")),
+        "verified claim",
+        "walkthrough",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        fitted = fresh(candidate)
+        if fitted:
+            return fitted
+    return "VERIFIED CLAIM"
+
+
+def _fit_title(base: str, suffix: str, limit: int) -> str:
+    """Trim a title to `limit` characters on a word boundary, suffix kept."""
+    base = _clean(base)
+    if len(base) + len(suffix) <= limit:
+        return base + suffix
+    words = base.split()
+    budget = limit - len(suffix)
+    while words and len(" ".join(words)) > budget:
+        words.pop()
+    trimmed = " ".join(words)
+    if len(trimmed) >= 12:
+        return trimmed + suffix
+    # The base is unusably short once trimmed — ship the plain base instead of
+    # a cryptic fragment.
+    return base[:limit].rstrip()
+
+
 def with_utm(url: str, *, platform: str, offer_id: Any, language: str = "en") -> str:
     """Attach campaign parameters without duplicating existing keys."""
     if not url:
@@ -166,6 +298,7 @@ def build_metadata(
     language: str = "en",
     variant: str = "default",
     hashtags: list[str] | None = None,
+    channel_name: str | None = None,
 ) -> dict[str, Any]:
     """Build one platform/language metadata payload with hard limits."""
     if platform not in PLATFORMS:
@@ -174,11 +307,19 @@ def build_metadata(
     limits = PLATFORM_LIMITS[platform]
     disclosure = disclosure or {}
     title_base = _clean(offer.get("title") or "Offer walkthrough")
-    suffix = _TITLE_SUFFIX.get(language, _TITLE_SUFFIX["en"])
-    title = f"{title_base} — {suffix}"
+    suffix_en = f" — {_TITLE_SUFFIX.get(language, _TITLE_SUFFIX['en'])}" \
+        if _TITLE_SUFFIX.get(language) else ""
+    title = f"{title_base}{suffix_en}"
     if variant == "b":
         title = ("Verified walkthrough: " if language == "en"
                  else "تصدیق شدہ واک تھرو: ") + title_base
+    if platform == "youtube":
+        # ~50-character mobile-safe titles; the 100-char platform ceiling is
+        # only a last-resort guard.
+        if variant == "b":
+            title = _fit_title(title, "", YOUTUBE_TITLE_TARGET)
+        else:
+            title = _fit_title(title_base, suffix_en, YOUTUBE_TITLE_TARGET)
     if limits["title"]:
         title = title[: limits["title"]].rstrip()
     else:
@@ -230,7 +371,13 @@ def build_metadata(
     if correction_url:
         lines.append(("Corrections & updates: " if language == "en" else "تصحیح اور اپ ڈیٹس: ") + correction_url)
 
-    tags = hashtags if hashtags is not None else build_hashtags(offer, platform, language=language)
+    if platform == "youtube":
+        # Plain 5-8 search keywords; hashtags live in the description, not in
+        # the tags field.
+        tags = hashtags if hashtags is not None else build_youtube_tags(
+            offer, language=language, channel_name=channel_name)
+    else:
+        tags = hashtags if hashtags is not None else build_hashtags(offer, platform, language=language)
     if tags and platform in ("instagram", "tiktok"):
         lines.append(" ".join(tags))
     if evidence_urls:
@@ -262,13 +409,16 @@ def build_variants(platform: str, offer: dict[str, Any], *,
                    disclosure: dict[str, Any] | None = None,
                    correction_url: str | None = None,
                    website_url: str | None = None,
-                   language: str = "en") -> list[dict[str, Any]]:
+                   language: str = "en",
+                   channel_name: str | None = None) -> list[dict[str, Any]]:
     """Two reviewable packaging options (A/B) for experimentation."""
     return [
         build_metadata(platform, offer, evidence_urls, disclosure, correction_url,
-                       website_url, language, variant="default"),
+                       website_url, language, variant="default",
+                       channel_name=channel_name),
         build_metadata(platform, offer, evidence_urls, disclosure, correction_url,
-                       website_url, language, variant="b"),
+                       website_url, language, variant="b",
+                       channel_name=channel_name),
     ]
 
 
@@ -277,6 +427,7 @@ def metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": metadata.get("title", ""),
         "caption": metadata.get("caption", ""),
+        "tags": metadata.get("tags", []),
         "hashtags": metadata.get("hashtags", []),
         "website_url": metadata.get("website_url", ""),
         "pinned_comment": metadata.get("pinned_comment", ""),

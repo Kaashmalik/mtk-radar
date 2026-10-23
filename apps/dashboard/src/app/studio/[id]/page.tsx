@@ -285,6 +285,10 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
           <div className="grid-3">
             {covers.map((cover) => {
               const payload = (typeof cover.payload === "string" ? {} : cover.payload) as Record<string, unknown>;
+              // 2026 packaging rule: the big thumbnail wording is at most 3
+              // words and never repeats the title; the full title stays as a
+              // small reference line (and in the real render, the aria-label).
+              const thumbText = String(payload.thumbnail_text ?? payload.title ?? offer.title);
               const title = String(payload.title ?? offer.title);
               const variant = String(payload.variant ?? cover.variant_key);
               return (
@@ -293,7 +297,8 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
                     <div style={{ fontSize: "0.62rem", letterSpacing: "0.14em", opacity: 0.85 }}>
                       {String(payload.eyebrow ?? "VERIFIED CLAIM")}
                     </div>
-                    <strong style={{ display: "block", marginTop: 6, fontSize: "1rem" }}>{title}</strong>
+                    <strong style={{ display: "block", marginTop: 6, fontSize: "1.35rem", textTransform: "uppercase" }}>{thumbText}</strong>
+                    <span style={{ display: "block", marginTop: 4, fontSize: "0.62rem", opacity: 0.65 }}>{title}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 6 }}>
                     <span style={{ fontSize: "0.65rem", opacity: 0.8 }}>{cover.language} · {variant}</span>
