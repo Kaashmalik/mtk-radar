@@ -35,13 +35,13 @@ type StaleRow = {
 
 export const dynamic = "force-dynamic";
 
-async function getOffers(): Promise<OfferRow[]> {
+async function getOffers(): Promise<OfferRow[] | null> {
   try {
     const res = await apiFetch(`/offers?limit=100`, { cache: "no-store" });
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     return await res.json();
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -95,8 +95,13 @@ export default async function ReviewPage() {
       )}
 
       <section className="card">
-        <h2>Offers ({offers.length})</h2>
-        {offers.length === 0 ? (
+        <h2>Offers ({offers === null ? "–" : offers.length})</h2>
+        {offers === null ? (
+          <p className="muted" style={{ color: "var(--warn)" }}>
+            Review desk unavailable — the API did not answer. This is not “no
+            offers”: refresh once the stack is reachable.
+          </p>
+        ) : offers.length === 0 ? (
           <p className="muted">
             No offers yet. Promote inbox items at <a href="/">the review inbox</a>{" "}
             or POST <code>/offers</code>.

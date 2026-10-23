@@ -8,6 +8,8 @@ import "../../styles.css";
 import Link from "next/link";
 
 import StudioGenerateButton from "./StudioGenerateButton";
+import PackageEditor from "./PackageEditor";
+import ScriptRevise from "./ScriptRevise";
 import VariantExplorer from "./VariantExplorer";
 import { apiFetch } from "@/lib/api";
 
@@ -15,6 +17,7 @@ type Script = {
   id: string;
   version: number;
   language: string;
+  format: string;
   markdown: string;
   metadata: Record<string, unknown> | string;
   created_by: string | null;
@@ -215,21 +218,30 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
                   captions and metadata from verified evidence.
                 </div>
               ) : (
-                <pre
-                  className="mono"
-                  style={{
-                    maxHeight: 360,
-                    overflow: "auto",
-                    whiteSpace: "pre-wrap",
-                    direction: language === "ur" ? "rtl" : "ltr",
-                    textAlign: language === "ur" ? "right" : "left",
-                    fontSize: "0.76rem",
-                    lineHeight: 1.65,
-                    margin: 0,
-                  }}
-                >
-                  {script.markdown}
-                </pre>
+                <>
+                  <pre
+                    className="mono"
+                    style={{
+                      maxHeight: 360,
+                      overflow: "auto",
+                      whiteSpace: "pre-wrap",
+                      direction: language === "ur" ? "rtl" : "ltr",
+                      textAlign: language === "ur" ? "right" : "left",
+                      fontSize: "0.76rem",
+                      lineHeight: 1.65,
+                      margin: 0,
+                    }}
+                  >
+                    {script.markdown}
+                  </pre>
+                  <ScriptRevise
+                    scriptId={script.id}
+                    version={script.version}
+                    language={language}
+                    markdown={script.markdown}
+                    format={script.format}
+                  />
+                </>
               )}
             </div>
           );
@@ -247,6 +259,17 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
           </div>
         </div>
         <VariantExplorer variants={data.variants} />
+        {data.has_content ? (
+          <>
+            <div style={{ height: "0.8rem" }} />
+            <details>
+              <summary className="small"><strong>Edit captions, chapters &amp; metadata</strong></summary>
+              <div style={{ marginTop: "0.6rem" }}>
+                <PackageEditor offerId={offer.id} languages={scriptLanguages as unknown as string[]} />
+              </div>
+            </details>
+          </>
+        ) : null}
       </section>
 
       <section className="card">

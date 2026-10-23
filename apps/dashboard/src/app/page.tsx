@@ -72,12 +72,9 @@ export const dynamic = "force-dynamic";
 export default async function Home() {
   const [health, items, analytics, trends, attention] = await Promise.all([
     getJson<{ status?: string }>("/health", {}),
-    getJson<ItemRow[]>("/items?processed=false&limit=12", []),
+    getJson<ItemRow[] | null>("/items?processed=false&limit=12", null),
     getJson<Analytics | null>("/analytics", null),
-    getJson<Trends>("/trends", {
-      candidates: [],
-      summary: { total: 0, hot: 0, shortlisted: 0, average_score: 0 },
-    }),
+    getJson<Trends | null>("/trends", null),
     getJson<Attention | null>("/attention", null),
   ]);
 
@@ -88,8 +85,12 @@ export default async function Home() {
   const scheduled = (analytics?.schedules_by_state ?? [])
     .filter((row) => ["approved", "scheduled", "needs_approval"].includes(row.state))
     .reduce((sum, row) => sum + Number(row.n), 0);
-  const needsYou = attention?.total ?? reviewCount;
-  const growth = analytics?.growth?.score ?? 0;
+  // An outage must never read as "0 pending": show the counts only when at
+  // least one of the sources actually answered.
+  const attentionKnown = attention !== null || analytics !== null;
+  const needsYou = attention ? attention.total : reviewCount;
+  // A missing composite score ("–") is different from a measured 0.0/100.
+  const growth = analytics ? analytics?.growth?.score ?? null : null;
   const topRecommendation = analytics?.growth?.recommendations?.[0];
 
   return (
@@ -120,15 +121,24 @@ export default async function Home() {
               {health.status === "ok" ? "API online" : "API unreachable"}
             </span>
           </div>
-          <div className="metric-row"><span>Radar leads</span><strong>{trends.summary.total}</strong></div>
-          <div className="metric-row"><span>Hot leads</span><strong>{trends.summary.hot}</strong></div>
-          <div className="metric-row"><span>Awaiting a human</span><strong>{needsYou}</strong></div>
+          <div className="metric-row">
+            <span>Radar leads</span>
+            <strong>{trends ? trends.summary.total : "–"}</strong>
+          </div>
+          <div className="metric-row"><span>Hot leads</span><strong>{trends ? trends.summary.hot : "–"}</strong></div>
+          <div className="metric-row">
+            <span>Awaiting a human</span>
+            <strong>{attentionKnown ? needsYou : "–"}</strong>
+          </div>
           <div className="metric-row"><span>Scheduled / approval</span><strong>{scheduled}</strong></div>
           <div className="metric-row">
             <span title="Internal directional blend of measured fields, not a platform metric">
               Growth score <span className="muted small">(internal)</span>
             </span>
-            <strong>{growth.toFixed(1)}<span className="muted small">/100</span></strong>
+            <strong>
+              {growth == null ? "–" : growth.toFixed(1)}
+              <span className="muted small">/100</span>
+            </strong>
           </div>
           {topRecommendation && (
             <p className="small muted" style={{ marginTop: "0.8rem", marginBottom: 0 }}>
@@ -143,10 +153,14 @@ export default async function Home() {
       <section className="kpi-grid" aria-label="Key metrics">
         <div className="kpi"><strong>{analytics?.items_total ?? "–"}</strong><span>Inbox items</span><small>discovery pool</small></div>
         <div className="kpi"><strong>{analytics?.verification?.live_offers ?? "–"}</strong><span>Live offers</span><small>{analytics?.verification?.recheck_due ?? 0} recheck due</small></div>
-        <div className="kpi"><strong>{trends.summary.hot}</strong><span>Hot radar</span><small>score ≥ 78</small></div>
+        <div className="kpi"><strong>{trends ? trends.summary.hot : "–"}</strong><span>Hot radar</span><small>score ≥ 78</small></div>
         <div className="kpi"><strong>{scheduled}</strong><span>In queue</span><small>approval → publish</small></div>
         <div className="kpi"><strong>{big(analytics?.publishing?.published)}</strong><span>Published</span><small>{big(analytics?.metrics_totals?.views)} measured views</small></div>
-        <div className="kpi"><strong>{growth.toFixed(1)}</strong><span>Growth loop</span><small>{analytics?.metrics_totals?.posts_measured ?? 0} posts measured</small></div>
+        <div className="kpi">
+          <strong>{growth == null ? "–" : growth.toFixed(1)}</strong>
+          <span>Growth loop</span>
+          <small>{analytics?.metrics_totals?.posts_measured ?? 0} posts measured</small>
+        </div>
       </section>
 
       <section className="grid-2">
@@ -158,7 +172,12 @@ export default async function Home() {
             </div>
             <Link href="/radar" className="btn btn-ghost">Full radar</Link>
           </div>
-          {trends.candidates.length === 0 ? (
+          {trends === null ? (
+            <div className="empty-state">
+              Radar unavailable — the API did not answer. Refresh once the stack
+              is reachable; scores are never invented to fill the gap.
+            </div>
+          ) : trends.candidates.length === 0 ? (
             <div className="empty-state">
               No scored leads yet. Open the radar and run a scan to turn the inbox into
               ranked topics.
@@ -198,7 +217,11 @@ export default async function Home() {
             <Link href="/queue" className="btn btn-ghost">Queue</Link>
           </div>
           {offers.length === 0 ? (
-            <div className="empty-state">No offers yet — promote a reviewed item to start.</div>
+            <div className="empty-state">
+              {analytics === null
+                ? "Pipeline unavailable — the API did not answer. Counts are never faked."
+                : "No offers yet — promote a reviewed item to start."}
+            </div>
           ) : (
             offers.map((row) => {
               const max = Math.max(...offers.map((entry) => Number(entry.n)), 1);
@@ -226,9 +249,14 @@ export default async function Home() {
             <h2>Review inbox</h2>
             <p>Unprocessed candidates from trusted sources and saved links, exactly once.</p>
           </div>
-          <span className="tag">{items.length} shown</span>
+          <span className="tag">{items === null ? "– shown" : `${items.length} shown`}</span>
         </div>
-        {items.length === 0 ? (
+        {items === null ? (
+          <div className="empty-state">
+            Inbox unavailable — the API did not answer. Refresh once the collector
+            and API are reachable.
+          </div>
+        ) : items.length === 0 ? (
           <div className="empty-state">
             No candidates yet. Run the collector worker or save a page with the extension.
           </div>

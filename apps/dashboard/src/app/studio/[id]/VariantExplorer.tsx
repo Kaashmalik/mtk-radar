@@ -10,22 +10,34 @@ type Variant = {
   platform: string | null;
   variant_key: string;
   payload: Record<string, unknown> | string;
+  text_content: string | null;
   status: string;
 };
 
 export default function VariantExplorer({ variants }: { variants: Variant[] }) {
-  const metadata = useMemo(
-    () => variants.filter((variant) => variant.kind === "metadata"),
+  const editorial = useMemo(
+    () => variants.filter(
+      (variant) => variant.kind === "metadata"
+        || variant.kind === "captions"
+        || variant.kind === "hook",
+    ),
     [variants],
   );
+  const kinds = useMemo(
+    () => Array.from(
+      new Set(editorial.map((variant) => variant.kind)),
+    ) as ("metadata" | "captions" | "hook")[],
+    [editorial],
+  );
   const languages = useMemo(
-    () => Array.from(new Set(metadata.map((variant) => variant.language))),
-    [metadata],
+    () => Array.from(new Set(editorial.map((variant) => variant.language))),
+    [editorial],
   );
   const platforms = useMemo(
-    () => Array.from(new Set(metadata.map((variant) => variant.platform ?? "all"))),
-    [metadata],
+    () => Array.from(new Set(editorial.map((variant) => variant.platform ?? "all"))),
+    [editorial],
   );
+  const [kind, setKind] = useState<"metadata" | "captions" | "hook">("metadata");
   const [language, setLanguage] = useState(languages[0] ?? "en");
   const [platform, setPlatform] = useState(platforms[0] ?? "youtube");
   const [statuses, setStatuses] = useState<Record<string, string>>({});
@@ -51,11 +63,13 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
     }
   }
 
-  const visible = metadata.filter(
-    (variant) => variant.language === language && (variant.platform ?? "all") === platform,
+  const visible = editorial.filter(
+    (variant) => variant.kind === kind
+      && variant.language === language
+      && (variant.platform ?? "all") === platform,
   );
 
-  if (metadata.length === 0) {
+  if (editorial.length === 0) {
     return (
       <div className="empty-state">
         No metadata variants yet. Generate content to create English titles,
@@ -67,6 +81,16 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
   return (
     <div>
       <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.8rem" }}>
+        {kinds.length > 1 && (
+          <div className="lang-tabs" aria-label="Asset kind">
+            {kinds.map((value) => (
+              <button key={value} type="button" aria-pressed={value === kind}
+                      onClick={() => setKind(value)}>
+                {value}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="lang-tabs" aria-label="Voiceover version">
           {languages.map((value) => (
             <button key={value} type="button" aria-pressed={value === language}
@@ -94,19 +118,44 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
           const hashtags = Array.isArray(payload.hashtags) ? payload.hashtags.map(String) : [];
           const pinned = String(payload.pinned_comment ?? "");
           const website = String(payload.website_url ?? "");
+          const chapters = Array.isArray(payload.chapters) ? payload.chapters : [];
+          const isCopyAsset = variant.kind !== "metadata";
+          const bodyText = isCopyAsset ? String(payload.text ?? variant.text_content ?? "") : caption;
           return (
             <article className="variant-card" key={variant.id}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                <h3>Variant {variant.variant_key.toUpperCase()}</h3>
+                <h3>
+                  {isCopyAsset
+                    ? `${variant.kind.toUpperCase()} · ${variant.variant_key}`
+                    : `Variant ${variant.variant_key.toUpperCase()}`}
+                </h3>
                 <span className="tag">{statuses[variant.id] ?? variant.status}</span>
               </div>
-              <strong style={{ fontSize: "0.86rem" }}>{title}</strong>
-              <pre>{caption}</pre>
-              {hashtags.length > 0 && (
-                <p className="small muted" style={{ marginBottom: 0 }}>{hashtags.join(" ")}</p>
-              )}
-              {website && <p className="small" style={{ marginBottom: 0 }}>↗ {website}</p>}
-              {pinned && <p className="small muted" style={{ marginBottom: 0 }}>Pinned: {pinned}</p>}
+              {isCopyAsset
+                ? (
+                  <>
+                    <pre>{bodyText}</pre>
+                    {chapters.length > 0 && (
+                      <p className="small muted" style={{ marginBottom: 0 }}>
+                        Chapters: {chapters.length}
+                        {chapters.every(
+                          (chapter) => typeof (chapter as { time?: unknown })?.time === "string",
+                        ) ? "" : " (times parse at publish)"}
+                      </p>
+                    )}
+                  </>
+                )
+                : (
+                  <>
+                    <strong style={{ fontSize: "0.86rem" }}>{title}</strong>
+                    <pre>{caption}</pre>
+                    {hashtags.length > 0 && (
+                      <p className="small muted" style={{ marginBottom: 0 }}>{hashtags.join(" ")}</p>
+                    )}
+                    {website && <p className="small" style={{ marginBottom: 0 }}>↗ {website}</p>}
+                    {pinned && <p className="small muted" style={{ marginBottom: 0 }}>Pinned: {pinned}</p>}
+                  </>
+                )}
               {(statuses[variant.id] ?? variant.status) !== "approved" && (
                 <button type="button" className="button small" disabled={busy === variant.id}
                         onClick={() => approve(variant.id)}>

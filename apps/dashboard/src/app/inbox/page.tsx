@@ -50,11 +50,11 @@ async function getInbox(q: string | undefined, filter: string, cursor: string | 
   if (cursor) params.set("cursor", cursor);
   try {
     const res = await apiFetch(`/items?${params.toString()}`, { cache: "no-store" });
-    if (!res.ok) return { items: [] as ItemRow[], next: null as string | null };
+    if (!res.ok) return { items: null, next: null as string | null };
     const next = res.headers.get("X-Next-Cursor");
     return { items: (await res.json()) as ItemRow[], next };
   } catch {
-    return { items: [] as ItemRow[], next: null };
+    return { items: null, next: null };
   }
 }
 
@@ -125,7 +125,12 @@ export default async function InboxPage({
           ))}
         </div>
 
-        {items.length === 0 ? (
+        {items === null ? (
+          <div className="empty-state">
+            Inbox unavailable — the API did not answer. This is deliberately not
+            “inbox is clear”: refresh once the API is reachable.
+          </div>
+        ) : items.length === 0 ? (
           <div className="empty-state">
             {q
               ? <>Nothing matches “{q}” in this filter.</>

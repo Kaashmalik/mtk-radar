@@ -4010,3 +4010,250 @@ def test_notification_probe_reports_unreachable_webhook(auth_client, monkeypatch
     body = res.json()
     assert body["configured"] is True and body["ok"] is False
     assert body["status"] is None and "unreachable" in body["detail"]
+
+
+# -------------------------------- day-3: per-conflict resolution + snapshot view
+
+def test_conflict_resolution_resolves_per_conflict_and_is_human_only(auth_client):
+    offer_id, _, evidence_id, fields = _verified_offer_for_auth(auth_client)
+    conflicted = auth_client.post(f"/offers/{offer_id}/extraction", headers=SVC, json={
+        "fields": fields,
+        "conflicts": [
+            {"field": "value", "values": ["free", "$5"], "evidence_ids": [evidence_id]},
+            {"field": "eligibility", "reason": "sources disagree on who qualifies"},
+        ],
+        "model": "pytest",
+    })
+    assert conflicted.status_code == 201, conflicted.text
+
+    # Conflict triage is a human judgement: machine credentials are refused.
+    machine = auth_client.post(f"/offers/{offer_id}/conflicts/resolve", headers=SVC, json={
+        "resolutions": [{"field": "value"}],
+        "review_note": "machine says so",
+    })
+    assert machine.status_code == 403, machine.text
+
+    # A resolution naming a field with no open conflict is rejected.
+    unknown = auth_client.post(f"/offers/{offer_id}/conflicts/resolve", headers=AUTH, json={
+        "resolutions": [{"field": "promo_code"}],
+        "review_note": "there was never a conflict on this field",
+    })
+    assert unknown.status_code == 422, unknown.text
+    assert "no open conflict" in unknown.json()["detail"]
+
+    # Partial resolution: replace one claim with a corrected value that cites
+    # the same immutable snapshot; the other conflict stays open.
+    partial = auth_client.post(f"/offers/{offer_id}/conflicts/resolve", headers=AUTH, json={
+        "resolutions": [{
+            "field": "value", "value": "$5 for new accounts", "evidence_id": evidence_id,
+            "excerpt": SNAPSHOT_TEXT, "confidence": 0.9,
+            "note": "current terms page shows the $5 discount",
+        }],
+        "review_note": "checked both snapshots; the discount is the current value",
+    })
+    assert partial.status_code == 201, partial.text
+    assert partial.json()["resolved"] == ["value"]
+    assert partial.json()["remaining_conflicts"] == 1
+    assert partial.json()["complete"] is False
+
+    shown = auth_client.get(f"/offers/{offer_id}", headers=AUTH).json()
+    def parsed(obj):
+        if isinstance(obj, str):
+            return json.loads(obj)
+        return obj or {}
+    latest = parsed(shown.get("extraction"))
+    latest["fields"] = parsed(latest.get("fields"))
+    latest["conflicts"] = parsed(latest.get("conflicts"))
+    assert latest["fields"]["value"]["value"] == "$5 for new accounts"
+    assert latest["fields"]["value"]["evidence_id"] == evidence_id
+    assert len(latest["conflicts"]) == 1
+    assert latest["conflicts"][0]["field"] == "eligibility"
+    assert shown["state"] == "evidence_needed"
+
+    # Dismissal-only resolution: keep the recorded claim, drop the conflict.
+    dismiss = auth_client.post(f"/offers/{offer_id}/conflicts/resolve", headers=AUTH, json={
+        "resolutions": [{"field": "eligibility", "note": "both snapshots agree students qualify"}],
+        "review_note": "both cited snapshots state the same eligibility",
+    })
+    assert dismiss.status_code == 201, dismiss.text
+    assert dismiss.json()["resolved"] == ["eligibility"]
+    assert dismiss.json()["remaining_conflicts"] == 0
+
+    shown2 = auth_client.get(f"/offers/{offer_id}", headers=AUTH).json()
+    final = parsed(shown2.get("extraction"))
+    final["fields"] = parsed(final.get("fields"))
+    final["conflicts"] = parsed(final.get("conflicts"))
+    assert final["conflicts"] == []
+    assert final["fields"]["eligibility"]["value"] == "students"
+    assert not (shown2["correction_note"] or "").strip(), \
+        "the conflict triage note must be cleared once every conflict is resolved"
+
+
+def test_evidence_snapshot_inspection_serves_captured_and_raw_text(auth_client):
+    offer_id, source_id, _, _ = _verified_offer_for_auth(auth_client)
+    _run(
+        "UPDATE sources SET tos_reviewed_at = now(), tos_reviewer = 'pytest', "
+        "tos_reference = 'https://example.com/terms' WHERE id = $1",
+        __import__("uuid").UUID(str(source_id)),
+    )
+    raw_text = "FULL PAGE BODY — terms table with renewal price row."
+    extra = auth_client.post(f"/offers/{offer_id}/evidence", headers=AUTH, json={
+        "url": "https://example.com/raw-snapshot-terms",
+        "source_id": str(source_id), "official": True,
+        "captured_content": SNAPSHOT_TEXT, "excerpt": SNAPSHOT_TEXT,
+        "supported_fields": ["promo_code"],
+        **_procured("https://example.com/raw-snapshot-terms", raw_text),
+    })
+    assert extra.status_code == 201, extra.text
+    evidence_id = extra.json()["id"]
+    assert extra.json()["raw_preserved"] is True
+
+    captured = auth_client.get(
+        f"/offers/{offer_id}/evidence/{evidence_id}/snapshot", headers=AUTH)
+    assert captured.status_code == 200, captured.text
+    body = captured.json()
+    assert body["captured_text"] == SNAPSHOT_TEXT
+    assert body["raw_text"] is None and body["raw_preserved"] is True
+    assert body["content_hash"]
+
+    both = auth_client.get(
+        f"/offers/{offer_id}/evidence/{evidence_id}/snapshot?which=both", headers=AUTH)
+    assert both.status_code == 200, both.text
+    body = both.json()
+    assert body["raw_text"] == raw_text
+    assert body["raw_hash"] == hashlib.sha256(raw_text.encode()).hexdigest()
+    assert body["captured_truncated"] is False and body["raw_truncated"] is False
+
+    # `raw_content`/`captured_content` stay write-only on the offer payload.
+    shown = auth_client.get(f"/offers/{offer_id}", headers=AUTH).json()
+    for row in shown["evidence"]:
+        assert "raw_content" not in row and "captured_content" not in row
+
+    missing = auth_client.get(
+        f"/offers/{offer_id}/evidence/00000000-0000-0000-0000-000000000000/snapshot",
+        headers=AUTH)
+    assert missing.status_code == 404, missing.text
+
+    other_offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": "Other Co", "category": "student_programs", "offer_type": "coupon",
+    }).json()["id"]
+    cross = auth_client.get(f"/offers/{other_offer}/evidence/{evidence_id}/snapshot",
+                            headers=AUTH)
+    assert cross.status_code == 404, cross.text
+
+
+# -------------------------------- day-3: studio editing with revision saves
+
+def test_studio_script_revision_saves_new_version_and_enforces_wording(auth_client):
+    offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
+    generated = auth_client.post(f"/studio/offers/{offer_id}/generate", headers=AUTH, json={
+        "languages": ["en"], "platforms": ["youtube"], "format": "official_explainer",
+    })
+    assert generated.status_code == 201, generated.text
+
+    overview = auth_client.get(f"/studio/offers/{offer_id}", headers=AUTH).json()
+    script = next(s for s in overview["scripts"] if s["language"] == "en")
+    assert script["version"] == 1
+
+    # Machine credentials must not rewrite the spoken words.
+    machine = auth_client.post(f"/studio/scripts/{script['id']}/revise", headers=SVC, json={
+        "markdown": script["markdown"] + "\nOne extra sentence.",
+    })
+    assert machine.status_code == 403, machine.text
+
+    # A hand edit cannot smuggle in the first-person result claims the format
+    # forbids — the guard runs on the edited text, not the generator output.
+    smuggled = auth_client.post(f"/studio/scripts/{script['id']}/revise", headers=AUTH, json={
+        "markdown": script["markdown"] + "\nI claimed the offer and the money arrived.",
+        "note": "hype it up",
+    })
+    assert smuggled.status_code == 409, smuggled.text
+    assert "wording guard" in smuggled.json()["detail"]
+
+    revised = auth_client.post(f"/studio/scripts/{script['id']}/revise", headers=AUTH, json={
+        "markdown": script["markdown"] + "\nRenewal may apply after the first term; "
+                                          "eligibility is checked on the official page.",
+        "note": "added the renewal caveat from the terms snapshot",
+    })
+    assert revised.status_code == 201, revised.text
+    assert revised.json()["version"] == 2
+    assert revised.json()["language"] == "en"
+
+    overview = auth_client.get(f"/studio/offers/{offer_id}", headers=AUTH).json()
+    versions = sorted(s["version"] for s in overview["scripts"] if s["language"] == "en")
+    assert versions == [1, 2], "the approved v1 must survive a revision as a pinned version"
+    revised_row = next(s for s in overview["scripts"] if s["version"] == 2)
+    assert revised_row["format"] == "official_explainer"
+    metadata = revised_row["metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    assert metadata["revised_from_version"] == 1
+    assert "renewal caveat" in metadata["revision_note"]
+
+    identical = auth_client.post(f"/studio/scripts/{revised_row['id']}/revise", headers=AUTH, json={
+        "markdown": revised_row["markdown"].strip(),
+    })
+    assert identical.status_code == 422, identical.text
+
+
+def test_studio_operator_variants_captions_chapters_and_metadata(auth_client):
+    offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
+    generated = auth_client.post(f"/studio/offers/{offer_id}/generate", headers=AUTH, json={
+        "languages": ["en"], "platforms": ["youtube"], "format": "official_explainer",
+    })
+    assert generated.status_code == 201, generated.text
+
+    # Machine credentials must not author package copy.
+    machine = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=SVC, json={
+        "kind": "captions", "text_content": "Step one: open the official page.",
+    })
+    assert machine.status_code == 403, machine.text
+
+    bad_kind = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=AUTH, json={
+        "kind": "cover", "text_content": "not allowed",
+    })
+    assert bad_kind.status_code == 422, bad_kind.text
+
+    bad_chapters = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=AUTH, json={
+        "kind": "captions",
+        "text_content": "Captions body",
+        "payload": {"chapters": [{"time": "", "label": "Intro"}]},
+    })
+    assert bad_chapters.status_code == 422, bad_chapters.text
+
+    blocked = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=AUTH, json={
+        "kind": "captions",
+        "text_content": "I claimed the offer and the money arrived in my account.",
+    })
+    assert blocked.status_code == 409, blocked.text
+    assert "wording guard" in blocked.json()["detail"]
+
+    captions = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=AUTH, json={
+        "kind": "captions",
+        "text_content": "Eligibility is checked on the official terms page.",
+        "payload": {"chapters": [
+            {"time": "00:00", "label": "Intro"},
+            {"time": "00:22", "label": "How to claim"},
+        ]},
+    })
+    assert captions.status_code == 201, captions.text
+    assert captions.json()["status"] == "draft"
+
+    meta = auth_client.post(f"/studio/offers/{offer_id}/variants", headers=AUTH, json={
+        "kind": "metadata", "platform": "youtube", "variant_key": "operator_edit",
+        "text_content": "Verified student discount — terms explained",
+        "payload": {"title": "Verified student discount — terms explained",
+                    "description": "Official terms, renewal limits and how to claim."},
+    })
+    assert meta.status_code == 201, meta.text
+
+    overview = auth_client.get(f"/studio/offers/{offer_id}", headers=AUTH).json()
+    kinds = {(v["kind"], v["variant_key"], v["version"]) for v in overview["variants"]}
+    assert ("captions", "default", 1) in kinds
+    assert ("metadata", "operator_edit", 1) in kinds
+
+    approved = auth_client.post(
+        f"/studio/variants/{captions.json()['id']}/approve", headers=HUMAN,
+        json={"approved": True})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"

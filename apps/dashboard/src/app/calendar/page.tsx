@@ -31,13 +31,13 @@ type ScheduleRow = {
 
 export const dynamic = "force-dynamic";
 
-async function getSchedules(): Promise<ScheduleRow[]> {
+async function getSchedules(): Promise<ScheduleRow[] | null> {
   try {
     const res = await apiFetch(`/schedules?limit=200`, { cache: "no-store" });
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     return await res.json();
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -88,7 +88,7 @@ export default async function CalendarPage() {
   const [rows, accounts] = await Promise.all([getSchedules(), getAccounts()]);
 
   const byDay = new Map<string, ScheduleRow[]>();
-  for (const row of rows) {
+  for (const row of rows ?? []) {
     const key = dayKey(row.local_time);
     byDay.set(key, [...(byDay.get(key) ?? []), row]);
   }
@@ -149,7 +149,14 @@ export default async function CalendarPage() {
         )}
       </section>
 
-      {rows.length === 0 ? (
+      {rows === null ? (
+        <section className="card">
+          <p className="muted" style={{ color: "var(--warn)" }}>
+            Calendar unavailable — the API did not answer. Nothing is shown rather
+            than an empty calendar: an outage must not read as “nothing scheduled”.
+          </p>
+        </section>
+      ) : rows.length === 0 ? (
         <section className="card">
           <p className="muted">
             Nothing scheduled yet. Open an offer and schedule a private test post.
