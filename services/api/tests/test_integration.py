@@ -262,6 +262,7 @@ from health_api import router as _health_router
 from locks_api import router as _locks_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
+from trends_api import router as _trends_router
 from content_studio_api import router as _studio_router
 from worker_health import EXPECTED_WORKERS
 from worker_health import router as _workers_router
@@ -327,7 +328,7 @@ def auth_client(client):
               _media_router, _settings_router, _analytics_router, _health_router,
               _locks_router, _automation_router, _studio_router, _attention_router,
               _workers_router, _upload_sessions_router, _jobs_router,
-              _metrics_router):
+              _metrics_router, _trends_router):
         app2.include_router(r)
     # /sources + poll-result are declared on the main app with @app directly,
     # not on any router — mount the SAME handlers here so the collect-job
@@ -1714,6 +1715,74 @@ def test_inbox_and_radar_cursors_reach_the_tail_and_scan_marks_items_processed(c
 
     bad = client.get("/trends", params={"cursor": "not-a-cursor"})
     assert bad.status_code == 422
+
+
+def test_trend_competitor_evidence_rescores_and_leaves_an_audit_trail(auth_client):
+    """2026 playbook 3-competitor rule: the operator supplies measured
+    competitor stats, the engine bumps demand transparently, and the change is
+    audited. A trend stays a proposal — this never creates an offer."""
+    marker = __import__("uuid").uuid4().hex
+    import uuid as uuidlib
+    source_id = _run(
+        """
+        INSERT INTO sources (provider, canonical_domain, category, adapter, trust_tier)
+        VALUES ('CompCo', 'comp.example', 'domains_hosting', 'rss', 'B_discovery_lead')
+        RETURNING id
+        """,
+    )[0]["id"]
+    _run(
+        """
+        INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                           observed_at, text_hash)
+        VALUES ($1, $2, $3, $3, $4, now(), $5)
+        """,
+        source_id, f"comp-{marker}",
+        f"https://example.com/comp-{marker}",
+        f"Quiet domain lead {marker}", f"hash-comp-{marker}",
+    )
+    scanned = auth_client.post("/trends/scan", params={"limit": 50}, headers=AUTH)
+    assert scanned.status_code == 201, scanned.text
+    candidate = _run(
+        "SELECT id, score::text AS score, demand_score::text AS demand FROM trend_candidates "
+        "WHERE url = $1", f"https://example.com/comp-{marker}",
+    )[0]
+    base_score = float(candidate["score"])
+
+    evidence = auth_client.post(
+        f"/trends/{candidate['id']}/competitors", headers=AUTH,
+        json={"competitors": [
+            {"channel": "Mid A", "subscribers": 42000, "views_28d": 91000},
+            {"channel": "Mid B", "subscribers": 51000, "views_28d": 110000},
+            {"channel": "Mid C", "subscribers": 88000, "views_28d": 120000},
+        ]})
+    assert evidence.status_code == 200, evidence.text
+    body = evidence.json()
+    assert body["score"] > base_score, "measured competitor demand must raise the score"
+    assert body["competitor_evidence"]["demand_hits"] == 3
+    assert body["competitor_evidence"]["sample_ok"] is True
+    assert any("3-competitor rule" in d for d in body["why_now"])
+
+    stored = _run(
+        "SELECT score::text AS score, signals::text AS signals FROM trend_candidates "
+        "WHERE id = $1", uuidlib.UUID(str(candidate["id"])),
+    )[0]
+    assert float(stored["score"]) == body["score"]
+    assert json.loads(stored["signals"])["competitor_evidence"]["in_band"] == 3
+
+    audit_row = _run(
+        "SELECT actor, action FROM audit_log WHERE action = 'trend:competitor_evidence' "
+        "AND entity_id = $1", uuidlib.UUID(str(candidate["id"])),
+    )
+    assert audit_row, "the rescore must be auditable"
+
+    # Validation: unknown candidate and non-positive stats are rejected.
+    missing = auth_client.post(f"/trends/{uuidlib.uuid4()}/competitors", headers=AUTH,
+                               json={"competitors": [{"channel": "X", "subscribers": 1}]})
+    assert missing.status_code == 404
+    thin = auth_client.post(f"/trends/{candidate['id']}/competitors", headers=AUTH,
+                            json={"competitors": [{"channel": "X"}]})
+    assert thin.status_code == 422
+
 
 def test_whoami_distinguishes_reviewer_service_and_anonymous(auth_client):
     r = auth_client.get("/whoami")

@@ -10,7 +10,7 @@ import "../styles.css";
 import Link from "next/link";
 
 import RadarScope, { type RadarCandidate } from "../RadarScope";
-import { ScanButton, TrendAction } from "./RadarActions";
+import { CompetitorEvidence, ScanButton, TrendAction } from "./RadarActions";
 import { apiFetch } from "@/lib/api";
 
 type Candidate = RadarCandidate & {
@@ -195,6 +195,7 @@ export default async function RadarPage() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
                     <span className={`tag ${scoreTone(score)}`}>{candidate.status}</span>
                     <TrendAction id={candidate.id} status={candidate.status} />
+                    <CompetitorEvidence id={candidate.id} />
                   </div>
                 </div>
               );

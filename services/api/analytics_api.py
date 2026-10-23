@@ -112,9 +112,9 @@ async def analytics() -> dict:
         WITH latest AS (
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
-                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
-                 pm.retention_3s_estimated, pm.link_clicks, pm.subscribers_gained,
-                 pm.captured_at
+                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s,
+                 pm.avg_view_percentage, pm.retention_3s, pm.retention_3s_estimated,
+                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
           FROM post_metrics pm
           JOIN schedules s ON s.id = pm.schedule_id AND s.state = 'published'
           ORDER BY pm.schedule_id, pm.captured_at DESC
@@ -175,16 +175,16 @@ async def analytics() -> dict:
         WITH latest AS (
           SELECT DISTINCT ON (pm.schedule_id)
                  pm.schedule_id, pm.views, pm.likes, pm.comments, pm.impressions,
-                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s, pm.retention_3s,
-                 pm.retention_3s_estimated, pm.link_clicks, pm.subscribers_gained,
-                 pm.captured_at
+                 pm.avg_watch_s, pm.ctr, pm.avg_view_duration_s,
+                 pm.avg_view_percentage, pm.retention_3s, pm.retention_3s_estimated,
+                 pm.link_clicks, pm.subscribers_gained, pm.captured_at
           FROM post_metrics pm
           ORDER BY pm.schedule_id, pm.captured_at DESC
         )
         SELECT s.id AS schedule_id, s.platform, s.language, s.metadata_variant,
                o.title AS offer_title, l.views, l.likes, l.comments, l.impressions,
-               l.avg_watch_s, l.ctr, l.avg_view_duration_s, l.retention_3s,
-               l.retention_3s_estimated,
+               l.avg_watch_s, l.ctr, l.avg_view_duration_s,
+               l.avg_view_percentage, l.retention_3s, l.retention_3s_estimated,
                l.link_clicks, l.subscribers_gained, l.captured_at
         FROM schedules s
         JOIN offers o ON o.id = s.offer_id

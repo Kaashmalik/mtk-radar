@@ -131,6 +131,18 @@ non-compliant pinned metadata (`metadata_title_too_long`, `metadata_tags_invalid
 previews show the real thumbnail wording. New tests: 4 SEO unit tests, 2 cover
 tests, a studio packaging test and a gate quality test.
 
+Day-4 pass also turns the playbook's high-growth *selection* rules into
+platform features. The trend radar now applies the 3-competitor rule
+deterministically: `trend_engine.competitor_evidence()` + a
+`POST /trends/{id}/competitors` endpoint (audited) bump demand only for >= 3
+human-measured channels in the 10k-100k subscriber band that out-perform
+their subscriber count, with driver/risk text and a radar UI form
+(`CompetitorEvidence`). The growth review now flags the playbook pivot
+thresholds - CTR < 4% ("swap the packaging") and average view duration < 40%
+("cut the dead segment") - as high-priority recommendations over measured
+rows only. New tests: 2 trend-engine, 2 growth-engine, 1 integration (rescore
++ audit trail + validation).
+
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
 

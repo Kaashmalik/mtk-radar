@@ -50,6 +50,66 @@ _GENERIC_TITLE_WORDS: Final[frozenset[str]] = frozenset(
      "get", "your", "this", "that", "free", "offer", "deal", "official"}
 )
 
+#: The 2026 playbook's "3-competitor" rule: a topic is actively trending when
+#: similar channels with 10k-100k subscribers get views above their subscriber
+#: count. Below 10k the sample is noise; above 100k the niche is proven but
+#: you are competing with established channels, not joining a wave.
+COMPETITOR_SUB_BAND: Final[tuple[float, float]] = (10_000.0, 100_000.0)
+
+
+def _num(value: Any) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def competitor_evidence(competitors: Iterable[Any] | None) -> dict[str, Any]:
+    """Parse raw competitor channel stats into a transparent demand verdict.
+
+    Accepts dicts like {"channel": "Name", "subscribers": 42000,
+    "views_28d": 91000} (aliases: subs/recent_views/views). Returns how many
+    similar channels fall inside the 10k-100k band and how many of those
+    out-perform their subscriber count.
+    """
+    parsed: list[dict[str, Any]] = []
+    for entry in competitors or []:
+        if not isinstance(entry, dict):
+            continue
+        subs = _num(entry.get("subscribers") or entry.get("subs"))
+        if subs <= 0:
+            continue
+        parsed.append({
+            "channel": str(entry.get("channel") or entry.get("name") or "channel"),
+            "subscribers": subs,
+            "recent_views": _num(
+                entry.get("views_28d") or entry.get("recent_views") or entry.get("views")),
+        })
+    low, high = COMPETITOR_SUB_BAND
+    in_band = [c for c in parsed if low <= c["subscribers"] <= high]
+    demand_hits = [c for c in in_band if c["recent_views"] > c["subscribers"]]
+    return {
+        "provided": len(parsed),
+        "in_band": len(in_band),
+        "demand_hits": len(demand_hits),
+        "sample_ok": len(in_band) >= 3,
+        "channels": [
+            {"channel": c["channel"], "subscribers": c["subscribers"],
+             "recent_views": c["recent_views"], "outsizes_subs": c in demand_hits}
+            for c in in_band
+        ],
+    }
+
+
+def _competitor_bump(evidence: dict[str, Any]) -> float:
+    """Deterministic demand bonus from verified competitor evidence."""
+    if not evidence["sample_ok"] or not evidence["demand_hits"]:
+        return 0.0
+    return min(20.0, 8.0 + 6.0 * evidence["demand_hits"])
+
+
 
 def _age_hours(published_at: Any, now: datetime) -> float | None:
     if not published_at:
@@ -135,17 +195,90 @@ def _monetization(text: str, category: str | None) -> int:
     return min(100, score)
 
 
+def _composite(demand: float, freshness: float, feasibility: float,
+               gap: float, fit: float, money: float) -> float:
+    """The one score blend. Weights are order-stable and re-used everywhere a
+    component is re-computed (e.g. competitor evidence updates)."""
+    return round(
+        demand * 0.28
+        + freshness * 0.18
+        + feasibility * 0.18
+        + gap * 0.14
+        + fit * 0.12
+        + money * 0.10,
+        2,
+    )
+
+
+def apply_competitor_evidence(candidate: dict[str, Any],
+                              competitors: Iterable[Any] | None) -> dict[str, Any]:
+    """Re-score a stored candidate after the operator records competitor stats.
+
+    Pure function over the candidate row + fresh human research: bump the
+    demand component per the 3-competitor rule, update the explanatory
+    drivers/risks, and recompute the composite with the same weights. Nothing
+    is invented — the bump only happens for channels the operator measured.
+    """
+    evidence = competitor_evidence(competitors)
+    demand = _num(candidate.get("demand_score")) or 0.0
+    bump = _competitor_bump(evidence)
+    demand = min(100.0, demand + bump) if bump else demand
+
+    reason = candidate.get("score_reason") if isinstance(candidate.get("score_reason"), dict) else {}
+    reason = dict(reason)
+    drivers = [str(d) for d in reason.get("why_now", [])]
+    risks = [str(r) for r in reason.get("risks", [])]
+    if evidence["sample_ok"] and evidence["demand_hits"]:
+        drivers.append(
+            f"3-competitor rule: {evidence['demand_hits']} of {evidence['in_band']} "
+            "similar mid-size channels get more views than subscribers")
+    elif evidence["sample_ok"] and not evidence["demand_hits"]:
+        risks.append(
+            "mid-size competitors cover this story without outsized views — "
+            "demand unproven")
+    if evidence["provided"] and not evidence["sample_ok"]:
+        risks.append(
+            "competitor sample is thin — find 3 similar channels with "
+            "10k-100k subscribers before committing to this topic")
+    reason["why_now"] = drivers
+    reason["risks"] = risks
+
+    signals = candidate.get("signals") if isinstance(candidate.get("signals"), dict) else {}
+    signals = dict(signals)
+    signals["competitor_evidence"] = {
+        "provided": evidence["provided"],
+        "in_band": evidence["in_band"],
+        "demand_hits": evidence["demand_hits"],
+        "sample_ok": evidence["sample_ok"],
+        "channels": evidence["channels"],
+    }
+
+    out = dict(candidate)
+    out["demand_score"] = round(demand, 2)
+    out["score"] = _composite(
+        demand, _num(candidate.get("freshness_score")),
+        _num(candidate.get("feasibility_score")), _num(candidate.get("competition_gap")),
+        _num(candidate.get("audience_fit")), _num(candidate.get("monetization")))
+    out["score_reason"] = reason
+    out["signals"] = signals
+    return out
+
+
 def score_item(
     item: dict[str, Any],
     *,
     now: datetime | None = None,
     existing_offer_count: int = 0,
     duplicate_count: int = 0,
+    competitors: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
     """Return a scored candidate payload ready for `trend_candidates`.
 
     `item` accepts the inbox shape (title, text, published_at, source_provider,
-    source_category, trust_tier, country_scope, url).
+    source_category, trust_tier, country_scope, url). `competitors` optionally
+    carries the operator's 3-competitor-rule research; demand is bumped only
+    when at least 3 similar 10k-100k-subscriber channels out-perform their
+    subscriber count.
     """
     now = now or datetime.now(timezone.utc)
     title = str(item.get("title") or item.get("canonical_url") or item.get("url") or "Untitled lead")
@@ -170,15 +303,14 @@ def score_item(
     fit = _audience_fit(countries, category)
     money = _monetization(text, category)
 
-    score = round(
-        demand * 0.28
-        + freshness * 0.18
-        + feasibility * 0.18
-        + gap * 0.14
-        + fit * 0.12
-        + money * 0.10,
-        2,
-    )
+    # 2026 playbook: human competitor research (the "3-competitor" rule)
+    # strengthens the demand component — never more than what was measured.
+    comp = competitor_evidence(competitors)
+    bump = _competitor_bump(comp)
+    if bump:
+        demand = min(100.0, demand + bump)
+
+    score = _composite(demand, freshness, feasibility, gap, fit, money)
 
     drivers = []
     if hits:
@@ -191,6 +323,10 @@ def score_item(
         drivers.append("strong audience/region fit")
     if gap >= 65:
         drivers.append("uncrowded angle")
+    if bump:
+        drivers.append(
+            f"3-competitor rule: {comp['demand_hits']} of {comp['in_band']} "
+            "similar mid-size channels get more views than subscribers")
     if not drivers:
         drivers.append("worth a human look; signals are thin")
 
@@ -203,6 +339,14 @@ def score_item(
         risks.append("many near-identical leads already exist")
     if not countries:
         risks.append("eligibility region not recorded")
+    if comp["sample_ok"] and not comp["demand_hits"]:
+        risks.append(
+            "mid-size competitors cover this story without outsized views — "
+            "demand unproven")
+    if comp["provided"] and not comp["sample_ok"]:
+        risks.append(
+            "competitor sample is thin — find 3 similar channels with "
+            "10k-100k subscribers before committing to this topic")
 
     return {
         "item_id": item.get("id"),
@@ -230,6 +374,13 @@ def score_item(
             "source_tier": tier,
             "existing_offers": existing_offer_count,
             "duplicates": duplicate_count,
+            "competitor_evidence": {
+                "provided": comp["provided"],
+                "in_band": comp["in_band"],
+                "demand_hits": comp["demand_hits"],
+                "sample_ok": comp["sample_ok"],
+                "channels": comp["channels"],
+            },
         },
     }
 
