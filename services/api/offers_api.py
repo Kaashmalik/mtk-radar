@@ -45,6 +45,7 @@ from automation_api import load_policy
 from redact import scan as scan_secrets
 from schedules_state import script_version_hash
 from schemas import (
+    ConflictResolveIn,
     EvidenceIn,
     EvidenceProvenance,
     ExtractionCoverage,
@@ -556,6 +557,192 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
                           "fields": sorted(extraction.fields)})
     return {"id": row["id"], "complete": complete, "validation_errors": problems,
             "fact_pack": fact_pack, "coverage": coverage}
+
+
+@router.post("/{offer_id}/conflicts/resolve", status_code=201)
+async def resolve_conflicts(offer_id: uuid.UUID, body: ConflictResolveIn,
+                            request: Request) -> dict:
+    pool = db.get()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _resolve_conflicts(conn, offer_id, body, request)
+
+
+async def _resolve_conflicts(pool, offer_id: uuid.UUID, body: ConflictResolveIn,
+                             request: Request) -> dict:
+    """Per-conflict triage on the latest extraction.
+
+    Each resolution either dismisses the disagreement (keeping the recorded
+    claim) or replaces the claim with a corrected value that still cites an
+    immutable snapshot on this offer. Conflicts not mentioned stay open, so a
+    partial resolution can never silently whitewash a disagreement.
+    """
+    # Conflict triage is a human judgement: a worker or automation identity
+    # must never decide which side of a factual disagreement wins. require=True
+    # rejects service, worker, extension and automation:* identities.
+    actor = effective_reviewer(request, None, default="operator", require=True)
+    offer = await pool.fetchrow(
+        "SELECT id, state::text AS state FROM offers WHERE id = $1 FOR UPDATE", offer_id,
+    )
+    if not offer:
+        raise HTTPException(status_code=404, detail="offer not found")
+    latest = await pool.fetchrow(
+        "SELECT id, fields::text AS fields, conflicts::text AS conflicts, "
+        "coverage::text AS coverage FROM extractions "
+        "WHERE offer_id = $1 ORDER BY created_at DESC LIMIT 1",
+        offer_id,
+    )
+    if not latest:
+        raise HTTPException(status_code=404, detail="no extraction to resolve conflicts on")
+
+    fields = json.loads(latest["fields"]) if latest["fields"] else {}
+    conflicts = json.loads(latest["conflicts"]) if latest["conflicts"] else []
+    coverage_raw = json.loads(latest["coverage"]) if latest["coverage"] else None
+    open_fields = {str(c.get("field")) for c in conflicts if isinstance(c, dict)}
+    unknown = [r.field for r in body.resolutions if r.field not in open_fields]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"no open conflict for field(s): {', '.join(sorted(set(unknown)))}",
+        )
+
+    by_field = {r.field: r for r in body.resolutions}
+    remaining: list[dict] = []
+    resolved: list[str] = []
+    for conflict in conflicts:
+        field = str(conflict.get("field"))
+        r = by_field.get(field)
+        if r is None:
+            remaining.append(conflict)
+            continue
+        resolved.append(field)
+        if r.value is None or not r.value.strip():
+            continue  # dismissal only: keep the recorded claim, drop the conflict
+        existing = fields.get(field) or {}
+        evidence_id = r.evidence_id or existing.get("evidence_id")
+        evidence_url = existing.get("evidence_url")
+        if r.evidence_id:
+            ev = await pool.fetchrow(
+                "SELECT url::text AS url FROM evidence WHERE id = $1 AND offer_id = $2",
+                r.evidence_id, offer_id,
+            )
+            if not ev:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"evidence {r.evidence_id} not found on this offer",
+                )
+            evidence_url = ev["url"]
+        if not evidence_id or not evidence_url:
+            raise HTTPException(
+                status_code=422,
+                detail=f"resolving '{field}' with a new value requires evidence_id "
+                       "(the previous claim also carries no cited snapshot)",
+            )
+        fields[field] = {
+            "value": r.value.strip(),
+            "evidence_id": str(evidence_id),
+            "evidence_url": evidence_url,
+            "excerpt": (r.excerpt or r.note or existing.get("excerpt")
+                        or "human-resolved during conflict triage").strip(),
+            "confidence": (r.confidence if r.confidence is not None
+                           else existing.get("confidence")),
+            "basis": existing.get("basis"),
+            "excluded_regions": existing.get("excluded_regions") or [],
+        }
+
+    try:
+        coverage = ExtractionCoverage(**coverage_raw) if coverage_raw else None
+        replacement = ExtractionIn(
+            fields={k: v for k, v in fields.items() if v is not None},
+            conflicts=remaining,
+            complete=False,
+            model="conflict-resolution",
+            coverage=coverage,
+            review_note=body.review_note,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        result = await _add_extraction(pool, offer_id, replacement, actor=actor)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not remaining:
+        # The correction note the conflicts stamped is obsolete once the last
+        # one is resolved (targeted: a human correction note stays untouched).
+        await pool.execute(
+            "UPDATE offers SET correction_note = NULL, updated_at = now() "
+            "WHERE id = $1 AND correction_note LIKE '%extraction conflict(s) need review'",
+            offer_id,
+        )
+    await _audit(pool, actor=actor, action="resolve_extraction_conflicts",
+                 entity="offers", entity_id=offer_id,
+                 detail={"resolved": resolved, "remaining": len(remaining),
+                         "review_note": body.review_note})
+    return {**result, "resolved": resolved, "remaining_conflicts": len(remaining)}
+
+
+@router.get("/{offer_id}/evidence/{evidence_id}/snapshot")
+async def get_evidence_snapshot(
+    offer_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    which: str = Query(default="captured", pattern="^(captured|raw|both|none)$"),
+) -> dict:
+    """Raw snapshot inspection for the verification desk.
+
+    `captured_content` and `raw_content` are write-only everywhere else in the
+    API (hash-checked at ingest), so this is the only read path for the exact
+    text a claim cites. Long bodies are served truncated with an explicit flag
+    rather than silently clipped.
+    """
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        SELECT id, url::text AS url, requested_url, captured_at, content_hash, excerpt,
+               captured_content, raw_content, raw_hash, (raw_content IS NOT NULL) AS raw_preserved,
+               fetch_status, fetch_content_type, fetched_at
+        FROM evidence WHERE id = $1 AND offer_id = $2
+        """,
+        evidence_id, offer_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="evidence snapshot not found")
+
+    max_chars = 200_000
+
+    def clip(text: Optional[str]) -> tuple[Optional[str], bool]:
+        if text is None:
+            return None, False
+        return text[:max_chars], len(text) > max_chars
+
+    raw_text = raw_truncated = None
+    if which in ("raw", "both") and row["raw_content"] is not None:
+        decoded = bytes(row["raw_content"]).decode("utf-8", errors="replace")
+        raw_text, raw_truncated = clip(decoded)
+
+    captured_value = row["captured_content"] if which in ("captured", "both") else None
+    captured_text = captured_truncated = None
+    if captured_value is not None:
+        captured_text, captured_truncated = clip(captured_value)
+
+    return {
+        "id": str(row["id"]),
+        "offer_id": str(offer_id),
+        "url": row["url"],
+        "requested_url": row["requested_url"],
+        "captured_at": row["captured_at"],
+        "content_hash": row["content_hash"],
+        "excerpt": row["excerpt"],
+        "fetch_status": row["fetch_status"],
+        "fetch_content_type": row["fetch_content_type"],
+        "fetched_at": row["fetched_at"],
+        "captured_text": captured_text,
+        "captured_truncated": captured_truncated,
+        "raw_text": raw_text,
+        "raw_truncated": raw_truncated,
+        "raw_preserved": row["raw_preserved"],
+        "raw_hash": row["raw_hash"],
+        "which": which,
+    }
 
 
 # ---------------------------------------------------------------- transitions

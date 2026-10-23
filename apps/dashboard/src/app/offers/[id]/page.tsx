@@ -1,4 +1,5 @@
 import "./styles.css";
+import ConflictResolver, { type ExtractionConflict } from "./ConflictResolver";
 import CorrectionForm from "./CorrectionForm";
 import EvidenceForm from "./EvidenceForm";
 import ExtractionEditor, { type ExtractionSnapshot } from "./ExtractionEditor";
@@ -9,6 +10,7 @@ import { PlaybackReview } from "./PlaybackReview";
 import RedactionReview from "./RedactionReview";
 import { ReleaseReadiness } from "./ReleaseReadiness";
 import ScheduleForm from "./ScheduleForm";
+import SnapshotInspector from "./SnapshotInspector";
 import { apiFetch } from "@/lib/api";
 
 /**
@@ -336,6 +338,13 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
       <section className="card">
         <h2>Claims &amp; conflicts {offer.extraction?.complete ? "· complete" : "· needs review"}</h2>
         <ExtractionEditor offerId={offer.id} extraction={extraction} />
+        {extraction && (extraction.conflicts?.length ?? 0) > 0 && (
+          <ConflictResolver
+            offerId={offer.id}
+            conflicts={extraction.conflicts as ExtractionConflict[]}
+            fields={extraction.fields ?? {}}
+          />
+        )}
       </section>
 
       <section className="card">
@@ -541,6 +550,9 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                     )}
                     {ev.screenshot_path && <span>screenshot: <code>{ev.screenshot_path}</code></span>}
                     {ev.supported_fields && <span>supports: <code>{ev.supported_fields}</code></span>}
+                  </div>
+                  <div style={{ marginTop: "0.5rem" }}>
+                    <SnapshotInspector offerId={offer.id} evidenceId={ev.id} />
                   </div>
                 </details>
               </li>

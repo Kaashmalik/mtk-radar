@@ -9,12 +9,45 @@ still not a production-readiness certificate, and not a promise of views,
 subscribers or revenue.
 
 **Implementation status (22 October 2026, after the audit, the P1 completion
-pass, the hardening pass, and the release-integrity pass):** the plan is **not
-completely implemented**. The earlier P0/P1 pass closed several code-scoped
-findings (dashboard login gate, immutable revision/attempt media keys,
-persisted resumable upload sessions, per-preset render-queue coverage,
-authenticated byte-range playback, growth-score zero/unavailable handling, and
-keyset cursors on the core list endpoints). The hardening pass then closed:
+pass, the hardening pass, the release-integrity pass, and the day-3
+operator-workflow pass):** the plan is **not completely implemented**. The
+earlier P0/P1 pass closed several code-scoped findings (dashboard login gate,
+immutable revision/attempt media keys, persisted resumable upload sessions,
+per-preset render-queue coverage, authenticated byte-range playback,
+growth-score zero/unavailable handling, and keyset cursors on the core list
+endpoints). The day-3 pass then closed the last three code-scoped dashboard
+workflow gaps:
+
+- **Per-conflict resolution.** `POST /offers/{id}/conflicts/resolve`
+  (human-only via `require=True`) resolves open extraction conflicts one at a
+  time — keep the recorded claim (dismissal) or replace it with a corrected
+  value that still cites an immutable snapshot on the offer. Unreferenced
+  conflicts stay open; clearing the last conflict clears the stale conflict
+  correction note. The dashboard renders each conflict as a structured card
+  (field, disagreeing values, replacement value + evidence id, per-conflict
+  note) instead of a raw JSON dump.
+- **Raw-snapshot inspection.** `GET /offers/{id}/evidence/{eid}/snapshot`
+  serves the exact `captured_content` and (decode-on-read) `raw_content` a
+  claim cites — the only read path for the hash-checked write-only snapshot
+  text, served truncated at 200,000 chars with explicit flags. The offer
+  page's "Snapshot & provenance" block gained an on-demand text inspector.
+- **Studio editing with revision saves.** `POST /studio/scripts/{id}/revise`
+  saves an operator-edited script as a NEW immutable version (append-only; the
+  approved version keeps its hash so anything already rendered or scheduled
+  stays pinned) and re-runs the wording guard on the edited text, so a hand
+  edit cannot smuggle in first-person result wording. `POST
+  /studio/offers/{id}/variants` adds operator-authored captions, chapters
+  (payload `{"chapters": [{time, label}]}`) and YouTube title/description
+  drafts (kind `metadata|captions|hook`), all wording-guarded, all drafts that
+  still need explicit human approval. The studio page gained a per-script
+  revise editor and a package editor; the variant explorer now lists captions
+  and hook drafts with the same approve flow.
+- **Outage states.** Home, inbox, review desk and calendar now distinguish
+  "unavailable" (the API did not answer) from genuinely empty, and never
+  render a missing growth score as `0.0/100` or an outage as "nothing
+  scheduled".
+
+The hardening pass had earlier closed:
 
 - **Analytics provenance/degradation:** YouTube metric groups are requested
   separately; a provider-rejected group is recorded as unsupported instead of
@@ -78,13 +111,12 @@ single-sourced:
   connection metadata-test button on Connections; and a release-policy card in
   Settings.
 
-Verification on the audit machine (latest pass): **899 backend tests passed**
+Verification on this machine (day-3 pass): **903 backend tests passed**
 (integration tests against a disposable PostgreSQL database with real
-migrations, including the new collector/render job-queue, reschedule,
-notification-probe and migration-030 tests), Python lint/compile clean,
-dashboard production build passed. That is code/test evidence only; it is not
-live-provider,
-restore or deployment proof.
+migrations, including four new tests for conflict resolution, snapshot
+inspection, script revision and operator variants), Python lint/compile clean,
+dashboard typecheck and production build passed. That is code/test evidence
+only; it is not live-provider, restore or deployment proof.
 
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
@@ -125,11 +157,10 @@ list in §9 as complete):
   `POST /schedules/{id}/reschedule`, human-token only), a notification
   delivery-test card in Settings (honest "not configured" state),
   a one-click dead-job retry on the attention page (`POST /jobs/{id}/retry`),
-  and a media-backup status card from the `media_backup` setting. Still
-  missing: per-conflict resolution UI, raw-snapshot inspection, and studio
-  script/metadata/caption/chapter editing with revision save. Several pages
-  still render an outage as an empty pipeline or zero metrics instead of
-  "unavailable".
+  and a media-backup status card from the `media_backup` setting. The day-3
+  pass then added structured per-conflict resolution, raw-snapshot inspection,
+  and studio script/caption/chapter/metadata editing with revision save, plus
+  outage-aware empty states on the main pipeline pages.
 - **The wording guard now covers every format and language (day-2 pass).**
   `assert_format_wording` blocks first-person result wording for
   `official_explainer` in English, Urdu script AND Roman-Urdu

@@ -31,6 +31,7 @@ from scriptgen import (
     SCRIPT_FORMATS,
     ScriptGateError,
     SUPPORTED_LANGUAGES,
+    assert_format_wording,
     generate_multilingual,
 )
 from state import can_generate_video
@@ -91,7 +92,7 @@ async def studio_overview(offer_id: uuid.UUID) -> dict:
 
     scripts = await pool.fetch(
         """
-        SELECT id, version, language, markdown, metadata::text AS metadata,
+        SELECT id, version, language, format, markdown, metadata::text AS metadata,
                created_by, created_at
         FROM offer_scripts WHERE offer_id = $1
         ORDER BY language, version DESC
@@ -388,6 +389,239 @@ async def approve_variant(variant_id: uuid.UUID, body: VariantApprovalIn,
                 entity="content_variants", entity_id=variant_id,
                 detail={"offer_id": str(variant["offer_id"]), "note": body.note})
     return {"id": str(variant_id), "status": status, "approved": body.approved}
+
+
+class ScriptReviseIn(BaseModel):
+    """An operator-edited script saved as a NEW immutable revision.
+
+    Revisions are append-only: the previously approved version keeps its hash,
+    so anything already rendered or scheduled stays pinned to the exact words
+    it was approved with. A rewritten script simply becomes a new draft that
+    must be re-reviewed.
+    """
+
+    markdown: str = Field(min_length=20, max_length=200_000, pattern=r"\S")
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.post("/scripts/{script_id}/revise", status_code=201)
+async def revise_script(script_id: uuid.UUID, body: ScriptReviseIn,
+                        request: Request) -> dict:
+    pool = db.get()
+    script = await pool.fetchrow(
+        """
+        SELECT id, offer_id, language, version, format, markdown,
+               metadata::text AS metadata
+        FROM offer_scripts WHERE id = $1
+        """,
+        script_id,
+    )
+    if not script:
+        raise HTTPException(status_code=404, detail="script not found")
+    # Editing the spoken words is an editorial act: machine credentials must
+    # not rewrite what a human signed off (or is about to sign off).
+    actor = effective_reviewer(request, None, default="operator", require=True)
+    markdown = body.markdown.strip()
+    if markdown == script["markdown"].strip():
+        raise HTTPException(
+            status_code=422, detail="the revision is identical to the current script",
+        )
+    # The wording guard runs on the actual edited text, not the generator
+    # output: a hand-edited script cannot smuggle in first-person result
+    # claims the original format forbids.
+    try:
+        assert_format_wording(markdown, script["format"])
+    except ScriptGateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"wording guard rejected the revision: {exc}",
+        ) from exc
+
+    version_row = await pool.fetchrow(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM offer_scripts "
+        "WHERE offer_id = $1 AND language = $2",
+        script["offer_id"], script["language"],
+    )
+    version = int(version_row["next"])
+    metadata = {}
+    if isinstance(script["metadata"], str):
+        try:
+            metadata = json.loads(script["metadata"])
+        except ValueError:
+            metadata = {}
+    carried = {
+        key: metadata[key] for key in
+        ("beats", "checklist", "command_cards", "language", "format",
+         "voiceover_language", "copy_language", "captions_language")
+        if key in metadata
+    }
+    carried["revision_note"] = body.note
+    carried["revised_from_version"] = int(script["version"])
+    row = await pool.fetchrow(
+        """
+        INSERT INTO offer_scripts
+            (offer_id, version, language, format, markdown, checklist,
+             command_cards, created_by, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb)
+        RETURNING id
+        """,
+        script["offer_id"], version, script["language"], script["format"],
+        markdown, _json(metadata.get("checklist") or []),
+        _json(metadata.get("command_cards") or []), actor, _json(carried),
+    )
+    await pool.execute(
+        """
+        INSERT INTO content_variants
+            (offer_id, language, kind, variant_key, payload, text_content,
+             version, version_hash, created_by, status)
+        VALUES ($1, $2, 'script', 'default', $3::jsonb, $4, $5, $6, $7, 'draft')
+        ON CONFLICT (offer_id, language, kind, platform, variant_key, version)
+        DO NOTHING
+        """,
+        script["offer_id"], script["language"], _json(carried), markdown,
+        version, script_version_hash(markdown), actor,
+    )
+    await audit(pool, actor=actor, action="studio:script_revise",
+                entity="offer_scripts", entity_id=row["id"],
+                detail={"offer_id": str(script["offer_id"]),
+                        "language": script["language"], "version": version,
+                        "revised_from": int(script["version"]), "note": body.note})
+    return {
+        "id": str(row["id"]),
+        "offer_id": str(script["offer_id"]),
+        "language": script["language"],
+        "version": version,
+        "revised_from": int(script["version"]),
+        "message": "Revision saved as a new draft. Re-review and re-approve before render.",
+    }
+
+
+EDITABLE_VARIANT_KINDS = ("metadata", "captions", "hook")
+
+
+class VariantEditIn(BaseModel):
+    """An operator-authored variant (title/description copy, captions,
+    chapters, hook text) saved as a NEW draft version.
+
+    `payload` carries structured data (e.g. `{"chapters": [{"time": "00:00",
+    "label": "..."}]}`); `text_content` carries the flat text. Both pass the
+    same wording guard as generated content.
+    """
+
+    kind: str
+    language: str = "en"
+    platform: Optional[str] = None
+    variant_key: str = Field(
+        default="default", min_length=1, max_length=60,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+    )
+    text_content: str = Field(min_length=1, max_length=100_000, pattern=r"\S")
+    payload: dict = Field(default_factory=dict)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+def _validate_chapters(payload: dict) -> list[dict]:
+    chapters = payload.get("chapters")
+    if chapters is None:
+        return []
+    if not isinstance(chapters, list) or len(chapters) > 100:
+        raise HTTPException(status_code=422,
+                            detail="chapters must be a list of at most 100 entries")
+    cleaned = []
+    for chapter in chapters:
+        if (not isinstance(chapter, dict)
+                or not isinstance(chapter.get("time"), str)
+                or not chapter["time"].strip()
+                or not isinstance(chapter.get("label"), str)
+                or not chapter["label"].strip()
+                or len(chapter["time"]) > 20 or len(chapter["label"]) > 200):
+            raise HTTPException(
+                status_code=422,
+                detail="each chapter needs a 'time' (≤20 chars) and a 'label' (≤200 chars)",
+            )
+        cleaned.append({"time": chapter["time"].strip(),
+                        "label": chapter["label"].strip()})
+    payload["chapters"] = cleaned
+    return cleaned
+
+
+@router.post("/offers/{offer_id}/variants", status_code=201)
+async def add_variant_edition(offer_id: uuid.UUID, body: VariantEditIn,
+                              request: Request) -> dict:
+    pool = db.get()
+    await _offer(pool, offer_id)  # 404 if unknown
+    if body.kind not in EDITABLE_VARIANT_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail="kind must be one of: " + ", ".join(EDITABLE_VARIANT_KINDS)
+                   + " — script and cover variants are generator-owned",
+        )
+    if body.language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(status_code=422,
+                            detail=f"unknown language '{body.language}'")
+    if body.kind == "metadata" and body.platform not in PLATFORMS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"metadata variants are per-platform; choose one of: {', '.join(PLATFORMS)}",
+        )
+    if body.kind == "metadata" and not body.payload and not body.text_content:
+        raise HTTPException(status_code=422,
+                            detail="metadata edits need payload fields or text_content")
+    # Authoring copy is editorial: machine credentials must not add captions,
+    # hooks or metadata text to the package.
+    actor = effective_reviewer(request, None, default="operator", require=True)
+    _validate_chapters(body.payload)
+
+    script = await pool.fetchrow(
+        "SELECT format FROM offer_scripts WHERE offer_id = $1 AND language = $2 "
+        "ORDER BY version DESC LIMIT 1",
+        offer_id, body.language,
+    )
+    if not script:
+        raise HTTPException(
+            status_code=409,
+            detail=f"no '{body.language}' script yet — generate content first so the "
+                   "wording guard knows the script format",
+        )
+    text = body.text_content.strip()
+    try:
+        assert_format_wording(text, script["format"])
+    except ScriptGateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"wording guard rejected the edited {body.kind}: {exc}",
+        ) from exc
+
+    version_row = await pool.fetchrow(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM content_variants "
+        "WHERE offer_id = $1 AND language = $2 AND kind = $3 "
+        "AND platform IS NOT DISTINCT FROM $4 AND variant_key = $5",
+        offer_id, body.language, body.kind, body.platform, body.variant_key,
+    )
+    version = int(version_row["next"])
+    row = await pool.fetchrow(
+        """
+        INSERT INTO content_variants
+            (offer_id, language, kind, platform, variant_key, payload, text_content,
+             version, version_hash, created_by, status)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, 'draft')
+        RETURNING id
+        """,
+        offer_id, body.language, body.kind, body.platform, body.variant_key,
+        _json(body.payload), text, version, script_version_hash(text), actor,
+    )
+    await audit(pool, actor=actor, action="studio:variant:edit",
+                entity="content_variants", entity_id=row["id"],
+                detail={"offer_id": str(offer_id), "kind": body.kind,
+                        "language": body.language, "platform": body.platform,
+                        "variant_key": body.variant_key, "version": version,
+                        "note": body.note})
+    return {
+        "id": str(row["id"]), "kind": body.kind, "language": body.language,
+        "platform": body.platform, "variant_key": body.variant_key,
+        "version": version, "status": "draft",
+        "message": "Saved as a new draft. Approve it before it can be scheduled.",
+    }
 
 
 @router.get("/offers/{offer_id}/experiments")

@@ -343,3 +343,36 @@ class ExtractionIn(BaseModel):
             if name != "price" and field.basis:
                 raise ValueError("basis is only valid for a price claim")
         return self
+
+
+class ConflictResolutionIn(BaseModel):
+    """One operator decision for one open extraction conflict.
+
+    `value is None` means "keep the current claim as-is and dismiss the
+    conflict"; a nonblank `value` replaces the claim and must cite evidence —
+    either the cited snapshot on the existing field or an explicit
+    `evidence_id` belonging to the same offer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: ExtractionFieldName
+    value: Optional[str] = Field(default=None, max_length=2000)
+    excerpt: Optional[str] = Field(default=None, max_length=4000)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    evidence_id: Optional[uuid.UUID] = None
+    #: Why this side of the disagreement is the correct one.
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ConflictResolveIn(BaseModel):
+    """Per-conflict triage: resolve some or all open conflicts in one pass.
+
+    Conflicts not referenced here stay open. Clearing the last conflict always
+    requires a human `review_note` (same contract as a fresh extraction).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolutions: list[ConflictResolutionIn] = Field(min_length=1, max_length=64)
+    review_note: str = Field(min_length=3, max_length=2000)
