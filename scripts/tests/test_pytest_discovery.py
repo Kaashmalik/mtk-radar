@@ -14,7 +14,6 @@ import configparser
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-KNOWN_ROOTS = ("packages", "services", "workers", "scripts")
 
 
 def _listed_paths() -> list[str]:
@@ -25,12 +24,18 @@ def _listed_paths() -> list[str]:
 
 
 def _actual_test_dirs() -> set[str]:
+    """Every directory in the repo containing tests — not just the four roots
+    KNOWN at the time this guard was written. A future `tools/` or `infra/`
+    tree with tests must hit the same loud failure, or the guard re-opens the
+    silent-skip mode it exists to prevent."""
     found: set[str] = set()
-    for root in KNOWN_ROOTS:
-        for path in (REPO / root).rglob("test_*.py"):
-            # conftest-only helper dirs and one-off scripts carry no tests dir;
-            # the discovery unit is the directory containing the tests.
-            found.add(str(path.parent.relative_to(REPO)))
+    for path in REPO.rglob("test_*.py"):
+        parts = set(path.relative_to(REPO).parts)
+        if parts & {".venv", "node_modules", ".git", "__pycache__"}:
+            continue
+        # conftest-only helper dirs and one-off scripts carry no tests dir;
+        # the discovery unit is the directory containing the tests.
+        found.add(str(path.parent.relative_to(REPO)))
     return found
 
 

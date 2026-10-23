@@ -42,6 +42,11 @@ async function proxy(
 
   const { path } = await context.params;
   const target = new URL(request.url);
+  // Dot segments survive encodeURIComponent; Next normally normalizes them,
+  // but if one ever reaches here it must not shape the upstream URL.
+  if (path.some((segment) => segment === "." || segment === "..")) {
+    return NextResponse.json({ detail: "invalid path" }, { status: 400 });
+  }
   const upstream = `${API_URL.replace(/\/+$/, "")}/${path.map(encodeURIComponent).join("/")}${target.search}`;
 
   const headers = new Headers();

@@ -7,7 +7,7 @@ Non-negotiable rules from the master plan (§3, §4, §11). Violations block rel
 - No API keys, passwords, recovery codes, tokens, or personal account data in: recordings, transcripts, terminal history, downloadable projects, logs, or repo files.
 - Secrets live only in a vault/env manager; `.env` is git-ignored, only `.env.example` is committed.
 - Promo codes shown on camera must be public and verified as authorized for redistribution.
-- Object storage (captures, renders) is served via short-lived signed URLs.
+- Object storage is never exposed directly: there are no public or presigned URLs. Captures and renders stream only through the authenticated API (byte-range aware), with the dashboard proxy attaching the reviewer's HttpOnly session server-side.
 
 ## Capture sessions
 

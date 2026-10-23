@@ -22,7 +22,10 @@ the database, never in the browser, never in git. The database only records
 
 ---
 
-## 0. What is already verified (no keys needed)
+## 0. What was verified when this was written (no keys needed)
+
+> Point-in-time claims — NOT standing facts. Before a release, re-prove each row with `pnpm verify` (lint + tests + builds) and a live `--once` worker sweep; update the date below only after that run.
+
 
 | Area | How it is proven |
 | --- | --- |
