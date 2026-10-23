@@ -17,6 +17,35 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
   }
 }
 
+// The queue page answers "what still needs a person" — a truncated page
+// silently under-counts every gate. Follow X-Next-Cursor to exhaustion
+// (bounded) instead of filtering the first page.
+const MAX_PAGES = 40;
+const PAGE_LIMIT = 200;
+
+async function getJsonAll<T>(path: string, fallback: readonly T[]): Promise<T[]> {
+  const rows: T[] = [];
+  let cursor: string | null = null;
+  try {
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const sep = path.includes("?") ? "&" : "?";
+      const cursorPart = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const res = await apiFetch(`${path}${sep}limit=${PAGE_LIMIT}${cursorPart}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return rows.length ? rows : [...fallback];
+      const items = (await res.json()) as T[];
+      rows.push(...items);
+      cursor = res.headers.get("X-Next-Cursor");
+      if (!cursor || items.length === 0) return rows;
+    }
+    // MAX_PAGES exhausted: return what we have rather than looping forever.
+    return rows;
+  } catch {
+    return rows.length ? rows : [...fallback];
+  }
+}
+
 type Candidate = {
   offer_id: string;
   title: string;
@@ -84,13 +113,13 @@ function qcErrors(report: RenderDeadLetterItem["qc_report"]): string[] {
 
 export default async function QueuePage() {
   const [candidates, captures, offers, schedules, policy, deadLetter] = await Promise.all([
-    getJson<Candidate[]>("/render-candidates", []),
-    getJson<Capture[]>("/captures", []),
-    getJson<{ id: string; title: string; state: string; official_evidence: number }[]>(
+    getJsonAll<Candidate>("/render-candidates", []),
+    getJsonAll<Capture>("/captures", []),
+    getJsonAll<{ id: string; title: string; state: string; official_evidence: number }>(
       "/offers",
       [],
     ),
-    getJson<{ id: string; state: string; platform: string }[]>("/schedules", []),
+    getJsonAll<{ id: string; state: string; platform: string }>("/schedules", []),
     getJson<{ summary?: PolicySummary }>("/automation/policy", {}),
     getJson<RenderDeadLetter>("/render-dead-letter", { counts: {}, items: [] }),
   ]);

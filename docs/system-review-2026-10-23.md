@@ -99,6 +99,35 @@ so the backlog is explicit instead of tribal.
 | `redact.py` short-key (<20 char) patterns and GCP JSON keys | `services/api/redact.py` | P3 | No false-negative found for current providers; extend when a provider with short keys is added. |
 | `document_sections` cap enforced only at boundaries | `services/api/document_sections.py` | P3 | Split logic itself verified; add an internal assert when callers bypass the schema. |
 
+## Dashboard review follow-up (same day)
+
+The fourth audit (dashboard/DB/docs) delivered 10 findings, no P0s. Disposition:
+
+**Fixed in commit `bookkeeping` (this one):**
+- `/queue` counted from the first page of keyset-paginated endpoints — headline
+  gate counts silently under-reported. The page now follows `X-Next-Cursor` to
+  exhaustion (bounded 40 pages × limit 200) before filtering.
+- Dashboard proxy rejects `.`/`..` path segments before joining the upstream URL
+  (defensive; `encodeURIComponent` does not encode dot segments).
+- `scripts/tests/test_pytest_discovery.py` scans the whole repo tree for test
+  directories instead of four hardcoded roots — a future `tools/` tree with
+  tests now hits the same loud failure.
+- Doc contradictions corrected: `security-and-redaction.md` (no presigned URLs
+  exist — media streams through the authenticated API, which the code was
+  already doing), `enhancement-plan-2026-10-22.md` (resolved-P0 banner),
+  `master-plan-traceability.md` ("where it is intended to be proven", not
+  standing proof), `go-live-checklist.md` §0 marked point-in-time with re-proof
+  commands.
+
+**Already fixed by the main hardening commit `0f7dd23`:** the per-request
+reviewer-token DB connection (finding #10) — the middleware now uses the
+shared pool with a 5s negative cache.
+
+**No action needed:** media "open in new tab" (same-origin, `rel="noreferrer"`,
+no token in URL); `ReleaseReadiness` effect deps (keyed by id-set, no loop);
+migrations verified contiguous and index-covered; no localStorage/innerHTML
+token or XSS surface anywhere in the dashboard.
+
 ## Verification
 
 `pytest`: 941 passed (was 916 — 25 new tests). `ruff check .`: clean.

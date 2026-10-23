@@ -2,6 +2,9 @@
 
 **Plan date:** 22 October 2026 (UTC)
 
+> **Resolution note (23 October 2026, commit `0f7dd23`):** the P0 "no application-level login gate on the dashboard" finding below is CLOSED — the console sits behind a signed HttpOnly session cookie (`lib/session.ts`, `proxy.ts`), the backend proxy attaches tokens server-side, and the release gate enforces `claim_outcome`/QC bindings. Do not re-raise the closed P0s from this dated audit without re-checking the code first.
+
+
 **Baseline commit:** `448dced` — *feat: add laptop-first automation and Needs You inbox (v0.30)*
 
 **Status:** audit and recommendation, followed by implementation work. This is
