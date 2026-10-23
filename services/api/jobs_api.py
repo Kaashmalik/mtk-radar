@@ -35,6 +35,8 @@ from pagination import (
     set_next_cursor,
 )
 
+DEFAULT_RETRY_AFTER_S = 60  # seconds — default failure backoff
+
 router = APIRouter(tags=["jobs"])
 
 DEFAULT_LEASE_S = 900
@@ -199,12 +201,16 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
                 return {"id": str(job_id), "status": "done"}
             if row["attempts"] >= row["max_attempts"] or body.retry_after_s is None:
                 dead = row["attempts"] >= row["max_attempts"]
+                # A failure without an explicit delay gets the default backoff,
+                # never 0 — run_after = now() would re-claim instantly and
+                # tight-loop a failing job until it dead-letters.
+                backoff = body.retry_after_s if body.retry_after_s else DEFAULT_RETRY_AFTER_S
                 await conn.execute(
                     "UPDATE jobs SET status = CASE WHEN $2 THEN 'dead' ELSE 'failed' END, "
                     "last_error = $3, lease_expires_at = NULL, lease_holder = NULL, "
                     "run_after = CASE WHEN $2 THEN run_after ELSE now() + "
                     "make_interval(secs => $4::int) END, updated_at = now() WHERE id = $1",
-                    job_id, dead, body.detail, body.retry_after_s or 0,
+                    job_id, dead, body.detail, backoff,
                 )
                 return {"id": str(job_id), "status": "dead" if dead else "failed"}
             await conn.execute(

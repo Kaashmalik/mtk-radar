@@ -65,6 +65,11 @@ _AUTOMATION_PREFIXES = ("automation:", "system:")
 # token_hash -> (name, cached_at). Positives only; revocation takes effect on
 # the next request or ≤TTL. reset_reviewer_cache() clears it immediately.
 _REVIEWER_CACHE: dict[str, tuple[str, float]] = {}
+#: Short negative cache ("token unknown") so invalid tokens cannot force a
+#: fresh DB connection per request. Kept deliberately short: a newly created
+#: reviewer token starts working within this window at the latest.
+REVIEWER_MISS_TTL_S = 5.0
+_REVIEWER_MISS_CACHE: dict[str, float] = {}
 
 # ---- brute-force protection (v0.33) -----------------------------------------
 # Every 401/503 from the auth gate counts against the client IP in a sliding
@@ -160,6 +165,7 @@ def auth_failure_ips() -> int:
 
 def reset_reviewer_cache() -> None:
     _REVIEWER_CACHE.clear()
+    _REVIEWER_MISS_CACHE.clear()
 
 
 def token_from_env() -> str | None:
@@ -177,6 +183,19 @@ def actor_of(request: Request) -> str | None:
     """Authenticated reviewer identity for THIS request (None = service,
     worker, extension, or unauthenticated dev mode)."""
     return getattr(request.state, "actor", None)
+
+
+def _auth_pool():
+    """The shared db pool, if it is initialized (None during startup)."""
+    try:
+        import db as _db
+    except ImportError:  # pragma: no cover — hardening usable without services
+        return None
+    getter = getattr(_db, "pool", None) or getattr(_db, "get", None)
+    try:
+        return getter() if getter else None
+    except Exception:  # noqa: BLE001 — never let pool probing break auth
+        return None
 
 
 def credential_class(request: Request) -> str:
@@ -347,27 +366,43 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
         return _auth_required("invalid token")
 
     async def _resolve_reviewer(self, credential: str) -> str | None:
-        """sha256 lookup in reviewers (cached 60s for positives only —
-        revocation therefore takes effect on the next request or ≤60s)."""
+        """sha256 lookup in reviewers (cached 60s; revocation therefore takes
+        effect on the next request or ≤60s). Unknown tokens are cached
+        negatively for a short window too: every request bearing an invalid
+        token used to open a FRESH postgres connection, bypassing the shared
+        pool — a cheap per-request connection-amplification vector."""
         import asyncpg  # lazy: the hardening module stays importable without DB deps
 
         th = token_hash(credential)
+        now = time.monotonic()
         hit = _REVIEWER_CACHE.get(th)
-        if hit and time.monotonic() - hit[1] < REVIEWER_CACHE_TTL_S:
-            return hit[0]
+        if hit and now - hit[1] < REVIEWER_CACHE_TTL_S:
+            return hit[0] or None
+        miss = _REVIEWER_MISS_CACHE.get(th)
+        if miss and now - miss < REVIEWER_MISS_TTL_S:
+            return None
         try:
-            conn = await asyncpg.connect(self._db_url, timeout=5)
-            try:
-                name = await conn.fetchval(
+            pool = _auth_pool()
+            if pool is not None:
+                name = await pool.fetchval(
                     "SELECT name FROM reviewers WHERE token_hash = $1 AND active", th,
                 )
-            finally:
-                await conn.close()
+            else:
+                # Startup edge: no shared pool yet — one-off connection as before.
+                conn = await asyncpg.connect(self._db_url, timeout=5)
+                try:
+                    name = await conn.fetchval(
+                        "SELECT name FROM reviewers WHERE token_hash = $1 AND active", th,
+                    )
+                finally:
+                    await conn.close()
         except Exception:  # noqa: BLE001 — fail closed on any auth-backend error
             logger.exception("auth backend unavailable — failing closed")
             raise _BackendUnavailable() from None
         if name:
-            _REVIEWER_CACHE[th] = (name, time.monotonic())
+            _REVIEWER_CACHE[th] = (name, now)
+        else:
+            _REVIEWER_MISS_CACHE[th] = now
         return name
 
 

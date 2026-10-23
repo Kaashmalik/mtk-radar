@@ -551,6 +551,12 @@ class RenderJob:
                 if render_row.get("status") != "rendered":
                     continue  # failed/QC-rejected media is never uploaded as an asset
                 preset = render_row["preset"]
+                # All three assets of one render are treated as a unit: if any
+                # upload fails, the row reverts to its consistent local paths
+                # (and their matching digests) — never a half-managed mix.
+                original_paths = (render_row["video_path"],
+                                  render_row["captions_path"],
+                                  render_row["cover_path"])
                 try:
                     render_row["video_path"] = storage.put(
                         self.project / f"renders/{offer['id']}-{preset}{'' if language == 'en' else '-' + language}.mp4",
@@ -574,7 +580,10 @@ class RenderJob:
                                       revision=revision, attempt=attempt),
                         )
                 except OSError as exc:
-                    log.error("storage upload failed (%s) — keeping local paths", exc)
+                    (render_row["video_path"], render_row["captions_path"],
+                     render_row["cover_path"]) = original_paths
+                    log.error("storage upload failed (%s) — row reverted to local "
+                              "paths so path types and digests stay consistent", exc)
 
         for render_row in results:
             payload = {

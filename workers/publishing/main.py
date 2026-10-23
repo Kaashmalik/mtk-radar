@@ -245,14 +245,23 @@ class Publisher:
 
     # ---------------------------------------------------------------- sweep
 
-    def _acquire_sweep_lock(self, name: str, ttl_s: int = 300) -> bool:
+    def _acquire_sweep_lock(self, name: str, ttl_s: int = 3600) -> bool:
         """Claim the sweep lock so a second publisher instance cannot work the
         same queue (v0.22/v0.28). Fails CLOSED: if exclusivity cannot be
         proven, no upload starts — duplicating a public post is worse than a
-        delayed sweep."""
+        delayed sweep.
+
+        The TTL must cover the WORST sweep (job drain + due posts + up to
+        600s YouTube uploads each); a sweep that outlives its lock would let a
+        second publisher join mid-flight. Use `_renew_sweep_lock` between
+        items; a lost renewal aborts the sweep fail-closed.
+        """
+        if not getattr(self, "_sweep_holder", None):
+            self._sweep_holder = f"{name}-worker-{os.getpid()}"
         try:
             res = self.api.post("/locks/acquire",
-                                 json={"name": name, "holder": f"{name}-worker", "ttl_s": ttl_s})
+                                 json={"name": name, "holder": self._sweep_holder,
+                                       "ttl_s": ttl_s})
         except Exception as exc:  # noqa: BLE001 — no proof of exclusivity
             log.warning("sweep lock unavailable (%s) — skipping this sweep", exc)
             return False
@@ -264,9 +273,26 @@ class Publisher:
             log.info("another worker holds the %s lock — this sweep is skipped", name)
         return acquired
 
+    def _renew_sweep_lock(self, name: str) -> bool:
+        """Re-assert exclusivity mid-sweep; False means the lock was lost."""
+        try:
+            res = self.api.post("/locks/acquire",
+                                 json={"name": name, "holder": self._sweep_holder,
+                                       "ttl_s": 3600})
+        except Exception as exc:  # noqa: BLE001 — cannot prove exclusivity
+            log.warning("sweep lock renewal failed (%s) — aborting this sweep", exc)
+            return False
+        if res.status_code >= 300 or not bool(res.json().get("acquired", False)):
+            log.warning("sweep lock lost — aborting this sweep")
+            return False
+        return True
+
     def _release_sweep_lock(self, name: str) -> None:
         try:
-            self.api.post("/locks/release", json={"name": name})
+            # Always name the holder: releasing by name alone would free
+            # another worker's lock after our own had expired.
+            self.api.post("/locks/release",
+                          json={"name": name, "holder": self._sweep_holder})
         except Exception:  # noqa: BLE001 — the lock expires on its own
             pass
 
@@ -448,6 +474,13 @@ class Publisher:
                 break
             if not self._automation_allowed():
                 break
+            # Re-assert exclusivity before each upload: a sweep can outlive any
+            # fixed TTL (uploads run 600s+). Losing the lock mid-sweep means a
+            # second publisher may have joined — abort fail-closed.
+            if not self._renew_sweep_lock("publishing"):
+                log.error("sweep lock lost after %d post(s) — aborting the rest "
+                          "of this sweep", published)
+                break
             try:
                 if self._publish(post, adapters):
                     published += 1
@@ -591,7 +624,10 @@ class Publisher:
         return requeued
 
     def _publish(self, post: dict, adapters: dict) -> bool:
-        platform = post["platform"]
+        platform = post.get("platform")
+        if not platform:
+            raise ValueError("schedule is missing its platform pin — re-schedule")
+
         adapter = self._adapter_for(post, adapters)
         if adapter is None:
             # A pinned account with no credentials must never fall back to a
@@ -712,7 +748,11 @@ class Publisher:
 
         meta = post.get("metadata")
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-        if _canonical_hash(meta) != post["metadata_hash"]:
+        pinned_metadata_hash = post.get("metadata_hash")
+        if not pinned_metadata_hash:
+            raise ValueError("schedule is missing its metadata_hash pin — re-approve the "
+                             "packaging and re-schedule")
+        if _canonical_hash(meta) != pinned_metadata_hash:
             self._block(
                 post["id"],
                 "metadata changed after scheduling — re-approve the exact "
@@ -809,7 +849,11 @@ class Publisher:
                                 "(set MTK_STORAGE_BACKEND or run on the render host)")
             return False
         actual_video_hash = _sha256_file(video_file)
-        if actual_video_hash != post["render_sha256"]:
+        pinned_render_sha = post.get("render_sha256")
+        if not pinned_render_sha:
+            raise ValueError("schedule is missing its render_sha256 pin — re-render and "
+                             "re-approve the package")
+        if actual_video_hash != pinned_render_sha:
             self._block(
                 post["id"],
                 "render bytes no longer match the pinned sha256 — the file "
@@ -940,9 +984,12 @@ class Publisher:
             )
             log.info("published %s → %s (%s)", post["id"], platform, remote_id)
             return True
-        except TokenExpiredError as exc:
-            log.error("ALERT token expiry on %s: %s — account marked expired, post paused",
-                      platform, exc)
+        except (TokenExpiredError, TransportUnauthorized) as exc:
+            # A 401 late in the package finalize (thumbnail/captions/playlist)
+            # is the same dead session — without this, the account stays
+            # 'active' and every later post repeats the upload-then-hold cycle.
+            log.error("ALERT credentials rejected on %s: %s — account marked expired, "
+                      "post paused", platform, exc)
             account_id = getattr(adapter, "account_id", None) or post.get("platform_account_id")
             if account_id:
                 self.api.post(f"/platform-accounts/{account_id}/mark-expired",
@@ -975,7 +1022,7 @@ class Publisher:
             return None
         if str(render.get("id")) != str(render_id):
             return None
-        if str(render.get("offer_id")) != str(post["offer_id"]):
+        if str(render.get("offer_id")) != str(post.get("offer_id") or ""):
             log.error("pinned render %s belongs to a different offer — refusing", render_id)
             return None
         return render
@@ -1004,6 +1051,14 @@ class Publisher:
             self._report(post["id"], ok=False, hold=True,
                          detail=f"{label} bytes do not match the pinned sha256 — re-schedule "
                                 "the reviewed package")
+            return False
+        if not expected_sha:
+            # The video is always digest-pinned; covers and captions must be
+            # too. Uploading whatever bytes currently sit at the ref would
+            # break the approval hash chain silently.
+            self._report(post["id"], ok=False, hold=True,
+                         detail=f"{label} has no pinned sha256 — re-approve the package so "
+                                "the upload is bound to reviewed bytes")
             return False
         return local
 
@@ -1051,8 +1106,8 @@ class Publisher:
             log.error("could not claim upload attempt for %s: %s", schedule_id, exc)
             return None
         if getattr(res, "status_code", 200) >= 300:
-            log.error("upload attempt refused for %s (%s): %s", schedule_id,
-                      getattr(res, "status_code", "?"), getattr(res, "text", "")[:300])
+            log.error("upload attempt refused for %s (%s)", schedule_id,
+                      getattr(res, "status_code", "?"))
             return None
         token = (res.json() or {}).get("attempt_token")
         if not token:
@@ -1092,8 +1147,8 @@ class Publisher:
                       "remote_metadata": remote_metadata or {}},
             )
             if getattr(res, "status_code", 200) >= 300:
-                log.error("result for %s refused (%s): %s", schedule_id,
-                          getattr(res, "status_code", "?"), getattr(res, "text", "")[:300])
+                log.error("result for %s refused (%s)", schedule_id,
+                          getattr(res, "status_code", "?"))
         except httpx.HTTPError as exc:
             log.error("failed to report result for %s: %s", schedule_id, exc)
 

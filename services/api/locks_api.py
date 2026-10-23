@@ -73,15 +73,23 @@ async def acquire_lock(body: LockIn) -> dict:
 
 @router.post("/release")
 async def release_lock(body: ReleaseIn) -> dict:
-    """Release a lock we hold (best effort — an expired lock needs no release)."""
+    """Release a lock we hold (best effort — an expired lock needs no release).
+
+    The holder is mandatory: releasing by name alone would let any caller free
+    another worker's lock and break sweep exclusivity. Expired locks need no
+    release at all — re-acquire replaces them.
+    """
     pool = db.get()
-    if body.holder:
-        await pool.execute(
-            "DELETE FROM worker_locks WHERE name = $1 AND holder = $2", body.name, body.holder
+    if not body.holder:
+        raise HTTPException(
+            status_code=422,
+            detail="lock release requires the holder that acquired it",
         )
-    else:
-        await pool.execute("DELETE FROM worker_locks WHERE name = $1", body.name)
-    return {"released": True, "name": body.name}
+    deleted = await pool.fetchval(
+        "DELETE FROM worker_locks WHERE name = $1 AND holder = $2 RETURNING name",
+        body.name, body.holder,
+    )
+    return {"released": bool(deleted), "name": body.name, "holder": body.holder}
 
 
 @router.get("")

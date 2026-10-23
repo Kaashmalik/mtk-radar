@@ -12,8 +12,10 @@ master plan §17). Gates enforced server-side:
   idempotency key; remote post IDs are stored for tracking.
 """
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -38,6 +40,8 @@ from api_hardening import (
     effective_reviewer,
 )
 from offer_freshness import freshness_problem
+
+_logger = logging.getLogger("mtk.schedules")
 from release_gate import describe as describe_problems
 from release_gate import offer_problems, release_problems
 from automation import (
@@ -332,9 +336,13 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
 
     account_id = await _pin_platform_account(pool, body.platform, body.platform_account_id)
 
-    render_sha256 = render.get("video_sha256") or _hash_local(render.get("video_path"))
-    cover_sha256 = render.get("cover_sha256") or _hash_local(cover_path)
-    captions_sha256 = render.get("captions_sha256") or _hash_local(render.get("captions_path"))
+    # Hashing can read large media files — keep it off the event loop.
+    render_sha256 = render.get("video_sha256") or await asyncio.to_thread(
+        _hash_local, render.get("video_path"))
+    cover_sha256 = render.get("cover_sha256") or await asyncio.to_thread(
+        _hash_local, cover_path)
+    captions_sha256 = render.get("captions_sha256") or await asyncio.to_thread(
+        _hash_local, render.get("captions_path"))
     metadata_hash = _canonical_hash(metadata)
     package_hash = _canonical_hash({
         "offer_id": str(offer_id),
@@ -381,7 +389,12 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             metadata_hash, cover_sha256, captions_sha256, body.youtube_playlist_id,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"schedule insert failed: {exc}") from exc
+        # Never echo database error text to the caller; log it server-side.
+        _logger.exception("schedule insert failed for offer %s", offer_id)
+        raise HTTPException(
+            status_code=500,
+            detail="schedule could not be created — check server logs",
+        ) from exc
 
     if not row:  # identical schedule already exists — idempotent re-submit
         existing = await pool.fetchrow(
@@ -398,22 +411,11 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
                                               "language": body.language,
                                               "metadata_variant": scheduled_variant_key})
 
-    # Durable owed-work record (§8.A): the queue is now also written to the out
-    # box-style job table, so a restart (or an operator reading the attention
-    # view) can see exactly what publishing work is owed and what wedged —
-    # instead of only polling row state.
-    await pool.execute(
-        """
-        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts, run_after)
-        VALUES ('publish_schedule', $1, $2::jsonb, $3, 3, $4::timestamptz)
-        ON CONFLICT (dedupe_key) DO NOTHING
-        """,
-        row["id"],
-        json.dumps({"platform": body.platform, "language": body.language,
-                    "package_hash": package_hash}),
-        f"publish:{row['id']}:{package_hash}",
-        body.local_time,
-    )
+    # Durable owed-work record (§8.A): the queue gains a row when the post
+    # actually enters the queue (the 'scheduled' transition, see
+    # _enqueue_publish_job). A draft is not owed publishing work — a
+    # create-time job would be claimed against a draft, fail its gates, retry
+    # and dead-letter into attention as noise.
     return {"id": row["id"], "state": row["state"], "created": True,
             "idempotency_key": idempotency_key, "language": body.language,
             "metadata_language": metadata.get("language", language_policy["metadata_language"]),
@@ -497,6 +499,45 @@ async def get_schedule(schedule_id: uuid.UUID) -> dict:
 @router.post("/schedules/{schedule_id}/transition")
 async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request: Request) -> dict:
     pool = db.get()
+    # One transaction for validate + write: concurrent transitions lock the
+    # same row (FOR UPDATE below) instead of check-then-acting on a stale read
+    # and silently overwriting each other's state/pins.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _transition(conn, schedule_id, body, request)
+
+
+async def _enqueue_publish_job(pool, schedule_id: uuid.UUID) -> None:
+    """Durable owed-work record (§8.A) — armed when a post ENTERS the queue.
+
+    The outbox-style job row is what makes owed publishing work visible after a
+    restart (or an operator reading the attention view), instead of only
+    polling row state. Idempotent per (schedule, package).
+    """
+    await pool.execute(
+        """
+        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts, run_after)
+        SELECT 'publish_schedule', s.id,
+               json_build_object('platform', s.platform, 'language', s.language,
+                                 'package_hash', s.package_hash),
+               'publish:' || s.id::text || ':' || COALESCE(s.package_hash, ''),
+               3, COALESCE(s.local_time, now())
+        FROM schedules s
+        WHERE s.id = $1
+        ON CONFLICT (dedupe_key) DO NOTHING
+        """,
+        schedule_id,
+    )
+
+
+async def _transition(pool, schedule_id: uuid.UUID, body: ScheduleTransitionIn,
+                      request: Request) -> dict:
+    # Lock the row first: validation below runs against the committed state,
+    # and a concurrent transition blocks here until this transaction finishes.
+    locked_state = await pool.fetchval(
+        "SELECT state::text FROM schedules WHERE id = $1 FOR UPDATE", schedule_id)
+    if locked_state is None:
+        raise HTTPException(status_code=404, detail="schedule not found")
     schedule = await _load(pool, schedule_id)
     reviewer_on_record = effective_reviewer(request, body.reviewer)
     policy = await load_policy()
@@ -538,7 +579,19 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         limits = automation_guardrails(policy)
         if body.to == "approved":
-            used = await _budget_used(pool)
+            # The daily budget is "non-negotiable, enforced server-side" — so
+            # count it inside this transaction behind an advisory lock.
+            # Check-then-act with a separate count let N concurrent automation
+            # approvals all read `used < limit` and exceed the cap (TOCTOU).
+            await pool.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('mtk-automation-approved-budget'))")
+            used = int(await pool.fetchval(
+                """
+                SELECT COUNT(*) FROM schedules
+                WHERE approved_by LIKE 'automation:%'
+                  AND updated_at >= date_trunc('day', now())
+                """
+            ) or 0)
             if used >= int(limits["auto_publish_max_per_day"]):
                 raise HTTPException(
                     status_code=429,
@@ -649,6 +702,7 @@ async def transition(schedule_id: uuid.UUID, body: ScheduleTransitionIn, request
         *params,
     )
     if body.to == "scheduled":
+        await _enqueue_publish_job(pool, schedule_id)
         await _rearm_publish_job(pool, schedule_id)
     await _audit(pool, actor=reviewer_on_record or "operator",
                  action=f"schedule:{schedule['state']}->{body.to}",

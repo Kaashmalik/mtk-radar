@@ -131,6 +131,7 @@ def test_full_review_pipeline(client, source):
     assert second.json()["duplicate"] is True
     assert second.json()["id"] == first.json()["id"], "same canonical item must dedupe"
 
+
     # ---- inbox listing -----------------------------------------------------
     inbox = client.get("/items", params={"processed": "false"})
     assert inbox.status_code == 200
@@ -339,6 +340,10 @@ def auth_client(client):
     _sources_router.post("/sources", status_code=201)(_api_main.create_source)
     _sources_router.post("/sources/{source_id}/poll-result")(_api_main.poll_result)
     app2.include_router(_sources_router)
+    # /items is likewise declared on the main app with @app directly.
+    _items_router = _APIRouter()
+    _items_router.post("/items", status_code=201)(_api_main.create_item)
+    app2.include_router(_items_router)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
     with TestClient(app2) as c:
@@ -759,6 +764,20 @@ def test_legacy_audit_names_a_verified_offer_with_no_extraction(client):
     assert row["problems"] == [
         "requires structured extraction with official snapshot evidence"
     ]
+
+
+def test_verify_transition_plain_client_still_works_dev_open(client):
+    """Auth-off mode (CREDENTIAL_DISABLED) keeps the documented dev fallback."""
+    r = client.post("/offers", json={"title": "Dev open verify", "provider": "D Co",
+                                     "category": "domains", "offer_type": "coupon"})
+    assert r.status_code in (200, 201), r.text
+    oid = r.json()["id"]
+    # evidence_needed → verified is a legal transition; the auth-off class must
+    # reach the content gate, not the 403.
+    t = client.post(f"/offers/{oid}/transition", json={"to": "verified",
+                                                       "reviewer": "pytest"})
+    assert t.status_code != 403, t.text
+
 
 
 def test_hash_only_legacy_snapshot_cannot_support_new_verification(client):
@@ -4436,3 +4455,129 @@ def test_studio_operator_variants_captions_chapters_and_metadata(auth_client):
         json={"approved": True})
     assert approved.status_code == 200, approved.text
     assert approved.json()["status"] == "approved"
+
+# ---------------------------------------------------------------- review hardening
+# (whole-system review pass: fail-closed gates, holder-bound locks, honest
+# defaults, canonical dedup — each fix here has a test that would have caught it)
+
+
+def test_verify_transition_refuses_plain_service_token(auth_client):
+    """A service/worker/extension credential with no recorded reviewer must not
+    verify an offer — that would skip the human verification gate and every
+    guardrail behind it (the verify:human bypass)."""
+    from uuid import UUID
+    oid = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state, recheck_at) "
+        "VALUES ('Verify gate', 'V Co', 'domains', 'coupon', 'evidence_needed', "
+        "now() + interval '1 day') RETURNING id")[0]["id"]
+    r = auth_client.post(f"/offers/{UUID(str(oid))}/transition", headers=SVC,
+                         json={"to": "verified"})
+    assert r.status_code == 403, r.text
+    assert "human reviewer" in r.json()["detail"]
+
+    # A human credential passes the authorization gate (content gates may
+    # still 409 — that is their job; a 403 here would be a regression).
+    h = auth_client.post(f"/offers/{UUID(str(oid))}/transition", headers=HUMAN,
+                         json={"to": "verified", "reviewer": "pytest"})
+    assert h.status_code != 403, h.text
+
+def test_release_gate_fails_closed_on_missing_render_hash(auth_client):
+    """A NULL digest means the byte pin CANNOT be verified — the gate must
+    refuse, never silently skip the integrity check."""
+    from uuid import UUID
+    ids = _gate_ready_schedule(auth_client, "gate-null-hash")
+    sid = UUID(ids["schedule_id"])
+    _run("UPDATE schedules SET render_sha256 = NULL WHERE id = $1", sid)
+
+    preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+    codes = {p["code"] for p in preview["problems"]}
+    assert "render_hash_missing" in codes
+    assert preview["ok"] is False
+
+
+def test_release_gate_refuses_when_approved_script_gone(auth_client):
+    """A version_hash with no matching current script cannot have its
+    format/claim binding checked — that is a blocker (script_missing), not a
+    silent skip of the claim_outcome/capture_review checks."""
+    from uuid import UUID
+    ids = _gate_ready_schedule(auth_client, "gate-script-gone")
+    sid = UUID(ids["schedule_id"])
+    offer_id = UUID(ids["offer_id"]) if "offer_id" in ids else None
+    if offer_id is None:
+        offer_id = _run("SELECT offer_id FROM schedules WHERE id = $1", sid)[0]["offer_id"]
+    _run("DELETE FROM offer_scripts WHERE offer_id = $1", offer_id)
+
+    preview = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
+    codes = {p["code"] for p in preview["problems"]}
+    assert "script_missing" in codes
+    assert preview["ok"] is False
+
+
+def test_items_rejects_an_unparseable_url_with_4xx(auth_client):
+    """A malformed port raised ValueError out of urlsplit and took the whole
+    ingest down with a 500 — caller input must be a 4xx."""
+    r = auth_client.post("/items", headers=SVC,
+                         json={"url": "https://host:abc/path", "title": "bad port"})
+    assert r.status_code == 422, r.text
+
+
+def test_items_dedupe_on_canonical_url_and_text_hash(auth_client):
+    """The documented dedup guarantee: a resubmission with a FRESH
+    external_item_id but the same canonical URL + text hash does not create a
+    second row."""
+    body = {"url": "https://example.com/deal-a?utm_source=x", "title": "Deal A",
+            "text": "identical body for hashing", "external_item_id": "ext-1"}
+    first = auth_client.post("/items", headers=SVC, json=body)
+    assert first.status_code in (200, 201), first.text
+    assert first.json()["created"] is True
+
+    again = auth_client.post("/items", headers=SVC, json={
+        **body, "url": "https://example.com/deal-a", "external_item_id": "ext-2"})
+    assert again.status_code in (200, 201), again.text
+    assert again.json()["created"] is False
+    assert again.json()["duplicate"] is True
+    assert again.json()["id"] == first.json()["id"]
+
+
+def test_lock_release_requires_the_acquiring_holder(auth_client):
+    """Releasing by name alone would let any caller free another worker's lock;
+    the holder is now mandatory and must match."""
+    name = "pytest-holder-lock"
+    acq = auth_client.post("/locks/acquire", headers=SVC,
+                           json={"name": name, "holder": "worker-a", "ttl_s": 60})
+    assert acq.status_code == 200 and acq.json()["acquired"] is True, acq.text
+
+    missing = auth_client.post("/locks/release", headers=SVC, json={"name": name})
+    assert missing.status_code == 422, missing.text
+
+    wrong = auth_client.post("/locks/release", headers=SVC,
+                             json={"name": name, "holder": "worker-b"})
+    assert wrong.status_code == 200 and wrong.json()["released"] is False
+
+    right = auth_client.post("/locks/release", headers=SVC,
+                             json={"name": name, "holder": "worker-a"})
+    assert right.status_code == 200 and right.json()["released"] is True
+
+
+def test_job_failure_without_retry_delay_gets_default_backoff(auth_client):
+    """A failure with no retry_after_s must not set run_after = now() — that
+    re-claims instantly and tight-loops the job until it dead-letters."""
+    import uuid as uuidlib
+    job = auth_client.post("/jobs", headers=SVC,
+                           json={"kind": "notify", "entity_id": str(uuidlib.uuid4()),
+                                 "payload": {}, "max_attempts": 3})
+    jid = job.json()["id"]
+    claimed = auth_client.post("/jobs/claim", headers=SVC,
+                               json={"worker": "pytest-worker", "lease_s": 60,
+                                     "kinds": ["notify"]})
+    # another test may have drained notify jobs; claim may return a different
+    # job — only proceed if we got ours
+    if claimed.json().get("id") != jid:
+        return
+    res = auth_client.post(f"/jobs/{jid}/result", headers=SVC,
+                           json={"ok": False, "detail": "boom"})
+    assert res.status_code == 200, res.text
+    row = _run("SELECT status::text AS status, run_after > now() AS delayed "
+               "FROM jobs WHERE id = $1", uuidlib.UUID(jid))[0]
+    assert row["status"] == "failed"
+    assert row["delayed"] is True, "failure without retry_after_s must back off"

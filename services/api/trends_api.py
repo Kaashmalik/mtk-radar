@@ -59,7 +59,7 @@ def _decode(row) -> dict:
 async def list_trends(
     response: Response,
     status: Optional[str] = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     cursor: Optional[str] = Query(default=None),
 ) -> dict:
     pool = db.get()
@@ -112,7 +112,7 @@ async def list_trends(
 
 
 @router.post("/scan", status_code=201)
-async def scan_trends(limit: int = Query(default=100, le=500)) -> dict:
+async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     """Score inbox items into the radar (idempotent on canonical URL)."""
     pool = db.get()
     rows = await pool.fetch(

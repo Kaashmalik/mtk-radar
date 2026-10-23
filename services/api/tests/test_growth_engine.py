@@ -187,3 +187,18 @@ def test_avd_below_forty_percent_recommends_a_retention_cut():
     # Missing AVD is "unavailable", not a 0% measurement.
     assert [r for r in recommendations([row(avg_view_percentage=None)])
             if r["metric"] == "avd"] == []
+
+def test_avg_view_percentage_stored_as_percent_is_normalized():
+    """YouTube reports averageViewPercentage on a 0..100 scale (e.g. 48.25);
+    reading it as a 0..1 fraction multiplied it back by 100 and pinned the
+    retention component at the 100 ceiling."""
+    from_percent = growth_score([{"views": 1_000, "avg_view_percentage": 30.0}])
+    from_fraction = growth_score([{"views": 1_000, "retention_3s": 0.30}])
+    assert from_percent == from_fraction
+    assert from_percent < 100.0, "a 30% retention row must not hit the ceiling"
+
+
+def test_retention_fraction_ignores_seconds_shaped_keys():
+    rows = [{"views": 1_000, "avg_view_duration_s": 42}]
+    assert growth_score(rows) == growth_score([{"views": 1_000}]), \
+        "duration seconds are not a retention fraction — retention is unavailable"

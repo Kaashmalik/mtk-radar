@@ -73,10 +73,23 @@ _CATEGORY_TAGS: Final[dict[str, str]] = {
     "startup_perks": "startup",
 }
 
-_TITLE_SUFFIX = {
-    "en": "real claim walkthrough",
-    "ur": "اصلی کلیم گائیڈ",
+#: Title suffix is generated copy — it must match what the script format is
+#: allowed to assert. Only `claim_walkthrough` may claim a performed, real
+#: walkthrough; explainers/tutorials get wording that does not asset a result.
+#: Unknown formats fall back to a neutral label, never a performed claim.
+_TITLE_SUFFIX_BY_FORMAT = {
+    "claim_walkthrough": {"en": "real claim walkthrough", "ur": "اصلی کلیم گائیڈ"},
+    "official_explainer": {"en": "official terms explained", "ur": "آفیشل شرائط کی وضاحت"},
+    "tested_tutorial": {"en": "tested tutorial", "ur": "آزمائش شدہ ٹیوٹوریل"},
 }
+_TITLE_SUFFIX_NEUTRAL = {"en": "walkthrough", "ur": "واک تھرو"}
+
+
+def _title_suffix(language: str, format_hint: str | None) -> str:
+    suffixes = (_TITLE_SUFFIX_BY_FORMAT.get(format_hint)
+                if format_hint else None) or _TITLE_SUFFIX_NEUTRAL
+    return suffixes.get(language, suffixes["en"])
+
 
 _CTA = {
     "en": "Full guide, eligibility and source links are in the description.",
@@ -299,6 +312,7 @@ def build_metadata(
     variant: str = "default",
     hashtags: list[str] | None = None,
     channel_name: str | None = None,
+    *, format_hint: str | None = None,
 ) -> dict[str, Any]:
     """Build one platform/language metadata payload with hard limits."""
     if platform not in PLATFORMS:
@@ -307,8 +321,7 @@ def build_metadata(
     limits = PLATFORM_LIMITS[platform]
     disclosure = disclosure or {}
     title_base = _clean(offer.get("title") or "Offer walkthrough")
-    suffix_en = f" — {_TITLE_SUFFIX.get(language, _TITLE_SUFFIX['en'])}" \
-        if _TITLE_SUFFIX.get(language) else ""
+    suffix_en = f" — {_title_suffix(language, format_hint)}"
     title = f"{title_base}{suffix_en}"
     if variant == "b":
         title = ("Verified walkthrough: " if language == "en"
@@ -410,15 +423,16 @@ def build_variants(platform: str, offer: dict[str, Any], *,
                    correction_url: str | None = None,
                    website_url: str | None = None,
                    language: str = "en",
+                   format_hint: str | None = None,
                    channel_name: str | None = None) -> list[dict[str, Any]]:
     """Two reviewable packaging options (A/B) for experimentation."""
     return [
         build_metadata(platform, offer, evidence_urls, disclosure, correction_url,
                        website_url, language, variant="default",
-                       channel_name=channel_name),
+                       format_hint=format_hint, channel_name=channel_name),
         build_metadata(platform, offer, evidence_urls, disclosure, correction_url,
                        website_url, language, variant="b",
-                       channel_name=channel_name),
+                       format_hint=format_hint, channel_name=channel_name),
     ]
 
 

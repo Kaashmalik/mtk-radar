@@ -31,7 +31,8 @@ from pagination import (
     encode_cursor,
     set_next_cursor,
 )
-from api_hardening import effective_reviewer
+from api_hardening import (CREDENTIAL_DISABLED, CREDENTIAL_REVIEWER,
+                           credential_class, effective_reviewer)
 import tos_review
 from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
 from fetch_attestation import verify_provenance
@@ -194,6 +195,7 @@ async def stale_offers() -> list[dict]:
         WHERE state IN ('verified', 'approved_for_video', 'published')
           AND (expires_at <= now() OR recheck_at <= now())
         ORDER BY recheck_at
+        LIMIT 500
         """
     )
     return [dict(r) for r in rows]
@@ -304,6 +306,7 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
                s.provider AS source_provider, s.trust_tier::text AS trust_tier
         FROM evidence e LEFT JOIN sources s ON s.id = e.source_id
         WHERE e.offer_id = $1 ORDER BY e.captured_at DESC
+        LIMIT 200
         """,
         offer_id,
     )
@@ -801,6 +804,20 @@ async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Reque
             detail=f"transition to '{target}' requires a recorded reviewer",
         )
 
+    # §3: verification is a human-gated decision (the automation stage gates
+    # run above when an explicit automation:verify actor is authorized). A
+    # plain service/worker/extension credential with no recorded reviewer must
+    # not be able to verify an offer and skip those guardrails.
+    if (target == "verified" and not reviewer_on_record
+            and credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED)):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "transition to 'verified' requires a human reviewer credential "
+                "(or an authorized automation:verify actor)"
+            ),
+        )
+
     if target == "verified":
         await _gate_verified(pool, offer_id)
 
@@ -897,6 +914,7 @@ async def list_corrections(offer_id: uuid.UUID) -> list[dict]:
         SELECT id, offer_id, note, corrected_by, version_hash, created_at
         FROM offer_corrections WHERE offer_id = $1
         ORDER BY created_at DESC
+        LIMIT 200
         """,
         offer_id,
     )
@@ -921,6 +939,7 @@ async def offer_impact(offer_id: uuid.UUID) -> dict:
                r.script_version, r.status, r.created_at
         FROM renders r WHERE r.offer_id = $1
         ORDER BY r.created_at DESC
+        LIMIT 200
         """,
         offer_id,
     )
@@ -929,6 +948,7 @@ async def offer_impact(offer_id: uuid.UUID) -> dict:
         SELECT id, redaction_reviewed, created_at
         FROM capture_sessions WHERE offer_id = $1
         ORDER BY created_at DESC
+        LIMIT 200
         """,
         offer_id,
     )
@@ -938,6 +958,7 @@ async def offer_impact(offer_id: uuid.UUID) -> dict:
                s.remote_post_id, s.outcome_detail::text AS outcome_detail
         FROM schedules s WHERE s.offer_id = $1
         ORDER BY s.local_time
+        LIMIT 500
         """,
         offer_id,
     )
@@ -1095,6 +1116,7 @@ async def list_scripts(offer_id: uuid.UUID) -> list[dict]:
                metadata::text AS metadata, created_by, created_at
         FROM offer_scripts WHERE offer_id = $1
         ORDER BY language, version DESC
+        LIMIT 200
         """,
         offer_id,
     )

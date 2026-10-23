@@ -69,3 +69,15 @@ def test_an_endless_cursor_is_bounded():
 def test_an_empty_page_terminates_even_with_a_cursor():
     client = FakeClient([FakeResponse([], cursor="should-not-matter")])
     assert fetch_all(client, "/offers") == []
+
+def test_a_full_page_without_a_cursor_raises_instead_of_truncating():
+    """A dropped/missing X-Next-Cursor on a FULL page used to look like the
+    end of the collection — silently truncating retries/corrections/sweeps."""
+    client = FakeClient([FakeResponse([{"id": 1}, {"id": 2}])])
+    with pytest.raises(RuntimeError):
+        list(iter_pages(client, "/schedules", {"state": "scheduled"}, limit=2))
+
+
+def test_a_short_page_without_a_cursor_is_still_the_end():
+    client = FakeClient([FakeResponse([{"id": 1}])])
+    assert [row["id"] for row in iter_pages(client, "/schedules", limit=5)] == [1]

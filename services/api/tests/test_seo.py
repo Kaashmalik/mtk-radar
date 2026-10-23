@@ -129,3 +129,22 @@ def test_metadata_summary_carries_the_plain_tags():
     meta = build_metadata("youtube", OFFER, channel_name="MTK Codex")
     summary = metadata_summary(meta)
     assert summary["tags"] == meta["tags"]
+
+def test_title_suffix_matches_what_the_script_format_may_claim():
+    explainer = build_metadata("youtube", OFFER, format_hint="official_explainer")
+    assert "official terms explained" in explainer["title"]
+    assert "real claim walkthrough" not in explainer["title"], \
+        "an explainer script makes no performed claim — the title must not either"
+
+    claim = build_metadata("youtube", OFFER, format_hint="claim_walkthrough")
+    assert "real claim walkthrough" in claim["title"]
+
+    unknown = build_metadata("youtube", OFFER)
+    assert "real claim" not in unknown["title"], \
+        "without a format the suffix stays neutral, never a performed claim"
+
+
+def test_variants_thread_the_format_hint():
+    a, b = build_variants("youtube", OFFER, format_hint="official_explainer")
+    assert "official terms explained" in a["title"]
+    assert "real claim walkthrough" not in b["title"]

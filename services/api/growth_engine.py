@@ -63,11 +63,19 @@ def _retention_fraction(row: dict[str, Any]) -> float | None:
     `avg_view_duration_s` is seconds and cannot share a percentage scale with
     `retention_3s`. If a provider reports only seconds, retention is genuinely
     unavailable for the score rather than silently normalised as a percentage.
+
+    The two fraction-shaped keys use DIFFERENT units as stored:
+    `retention_3s` is a 0..1 fraction, but `avg_view_percentage` is YouTube's
+    averageViewPercentage on a 0..100 scale (e.g. 48.25). A raw percentage
+    multiplied back by 100 in growth_score pinned the retention component at
+    100 and produced wording like "4825%" — so values > 1 are normalized to a
+    fraction. A fraction can never exceed 1, so the heuristic is unambiguous.
     """
     for key in ("retention_3s", "avg_view_percentage"):
         value = _value(row, key)
         if value is not None:
-            return _num(value)
+            frac = _num(value)
+            return frac / 100 if frac > 1 else frac
     return None
 
 

@@ -147,9 +147,11 @@ class MetricsWorker:
         same platform numbers twice. Fails CLOSED: if the lock service is
         unreachable we cannot prove exclusivity, so this sweep is skipped and
         retried on the next interval."""
+        if not getattr(self, "_sweep_holder", None):
+            self._sweep_holder = f"{name}-worker-{os.getpid()}"
         try:
             res = self.api.post("/locks/acquire",
-                                 json={"name": name, "holder": f"{name}-worker", "ttl_s": ttl_s})
+                                 json={"name": name, "holder": self._sweep_holder, "ttl_s": ttl_s})
         except Exception as exc:  # noqa: BLE001 — no proof of exclusivity
             log.warning("sweep lock unavailable (%s) — skipping this sweep", exc)
             return False
@@ -163,7 +165,10 @@ class MetricsWorker:
 
     def _release_sweep_lock(self, name: str) -> None:
         try:
-            self.api.post("/locks/release", json={"name": name})
+            # Always name the holder — a name-only release could free another
+            # worker's lock after ours expired (the API now refuses it anyway).
+            self.api.post("/locks/release",
+                          json={"name": name, "holder": self._sweep_holder})
         except Exception:  # noqa: BLE001 — the lock expires on its own
             pass
 
@@ -211,6 +216,11 @@ class MetricsWorker:
                 continue
             except (httpx.HTTPError, ValueError, RuntimeError) as exc:
                 log.warning("schedule %s: metrics pull failed: %s", post["id"], exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 — one malformed provider
+                # payload (e.g. a Graph error body that is a JSON list) must
+                # never abort the whole sweep; later posts still get measured.
+                log.exception("schedule %s: unexpected metrics failure", post["id"])
                 continue
             if snapshot is None:
                 continue
