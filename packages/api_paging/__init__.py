@@ -40,7 +40,17 @@ def iter_pages(client, path: str, params: dict[str, Any] | None = None,
         yield from rows
         headers = getattr(response, "headers", None) or {}
         cursor = headers.get(CURSOR_HEADER)
-        if not cursor or not rows:
+        if not rows:
+            return
+        if not cursor:
+            # A FULL page without a cursor is an API regression, not the end
+            # of the collection: callers here drive retries/corrections/sweeps
+            # and a silently truncated set means owed work is never seen.
+            # (The API guarantees a cursor whenever it returned >= limit rows.)
+            if limit is None or len(rows) >= limit:
+                raise RuntimeError(
+                    f"{path} returned a full page without {CURSOR_HEADER} — "
+                    "refusing to treat a truncated collection as complete")
             return
     raise RuntimeError(f"{path}: exceeded {max_pages} pages — cursor never ended")
 

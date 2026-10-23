@@ -90,7 +90,9 @@ def cover_key(offer_id: str, preset: str, language: str | None = None,
 
 
 def capture_key(offer_id: str, session_id: str, filename: str) -> str:
-    safe_name = Path(filename).name  # never trust caller-provided separators
+    # Every key component obeys ONE rule: separators and odd characters are
+    # rejected, so keys sign/URL-encode identically across S3 implementations.
+    safe_name = _safe_part(Path(filename).name, "filename")
     return (f"captures/{_safe_part(offer_id, 'offer id')}/"
             f"{_safe_part(session_id, 'session id')}/{safe_name}")
 
@@ -156,12 +158,21 @@ def materialize(ref: str, cache_dir: Path, storage: Optional[Storage] = None) ->
         driver = storage or _driver_for_scheme(ref)
         if driver is None:
             return None
-        # stable cache path: filename under cache dir, keyed by prefix folders
+        # stable cache path: filename under cache dir, keyed by prefix folders.
+        # Traversal segments (`..`) are refused and the final dest is verified
+        # to stay INSIDE cache_dir — refs reach us from DB rows/filenames, not
+        # only from our own key builders.
         parts = [p for p in ref.split("://", 1)[1].split("/") if p]
+        if any(p in ("..", ".") for p in parts):
+            return None
         dest = cache_dir.joinpath(*parts[-3:]) if len(parts) >= 3 else cache_dir / parts[-1]
         try:
+            dest.resolve().relative_to(cache_dir.resolve())
+        except ValueError:
+            return None
+        try:
             return driver.get(ref, dest)
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, ValueError):
             return None
     path = Path(ref)
     return path if path.is_file() else None

@@ -144,7 +144,10 @@ class InstagramAdapter(PublishAdapter):
             raise TokenExpiredError(f"graph insights rejected ({resp.status_code})")
         resp.raise_for_status()
         out: dict[str, int] = {}
-        for entry in resp.json().get("data", []):
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Graph insights returned a non-object payload")
+        for entry in payload.get("data", []):
             values = entry.get("values") or [{}]
             try:
                 out[entry["name"]] = int(values[0].get("value", 0))

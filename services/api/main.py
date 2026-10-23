@@ -68,12 +68,15 @@ def _cors_origins() -> list[str]:
     """
     raw = os.environ.get("MTK_CORS_ORIGINS", "").strip()
     origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
-    for default in ("http://localhost:3000", "http://127.0.0.1:3000"):
-        if default not in origins:
-            origins.append(default)
     public = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
     if public and public not in origins:
         origins.append(public)
+    if not origins:
+        # Dev fallback ONLY: an unconfigured deployment still needs the local
+        # dashboard. Once any origin is configured, localhost is NOT silently
+        # trusted alongside it — with allow_credentials=True a leftover dev
+        # origin on a deployed host is a real exposure.
+        origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
     return origins
 
 
@@ -353,7 +356,13 @@ async def create_item(item: ItemIn) -> dict:
     source_id = item.source_id
 
     external_item_id = item.external_item_id or str(uuid.uuid4())
-    canonical = canonicalize_url(str(item.url))
+    try:
+        canonical = canonicalize_url(str(item.url))
+    except ValueError as exc:
+        # a malformed port (e.g. https://host:abc/) raised out of urlsplit —
+        # caller input, so a 4xx, never a 500
+        raise HTTPException(status_code=422,
+                            detail=f"unparseable item url: {exc}") from exc
     dupe_group = canonical
     text_hash = hash_parts(canonical, item.title, item.selection or item.text)
 
@@ -363,7 +372,7 @@ async def create_item(item: ItemIn) -> dict:
                            observed_at, published_at, text_hash, duplicate_group)
         VALUES ($1, $2, $3, $4, $5,
                 COALESCE($6, now()), $7, $8, $9)
-        ON CONFLICT (source_id, external_item_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         RETURNING id
         """,
         source_id,
@@ -380,12 +389,23 @@ async def create_item(item: ItemIn) -> dict:
     if row:
         return {"id": row["id"], "created": True, "duplicate": False, "canonical_url": canonical}
 
-    # Conflict → fetch the existing candidate; canonical-URL collision still
-    # counts as a duplicate for the inbox dedup view.
+    # Conflict → fetch the existing candidate. `ON CONFLICT DO NOTHING` (no
+    # target) covers BOTH documented keys: (source_id, external_item_id) and
+    # the canonical-URL + text-hash pair enforced by the unique partial index
+    # added in migration 031 — a resubmission with a fresh external_item_id no
+    # longer creates a second row.
     existing = await pool.fetchrow(
-        "SELECT id FROM items WHERE source_id = $1 AND external_item_id = $2",
+        """
+        SELECT id FROM items
+        WHERE (source_id = $1 AND external_item_id = $2)
+           OR (canonical_url = $3 AND text_hash = $4)
+        ORDER BY observed_at
+        LIMIT 1
+        """,
         source_id,
         external_item_id,
+        canonical,
+        text_hash,
     )
     return {
         "id": existing["id"] if existing else None,

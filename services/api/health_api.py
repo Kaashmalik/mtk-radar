@@ -23,8 +23,9 @@ async def health() -> dict:
     pool = db.get()
     try:
         await pool.fetchval("SELECT 1")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+    except Exception:
+        # /health is reachable without credentials — never echo DB error text.
+        raise HTTPException(status_code=503, detail="database unavailable") from None
 
     applied = total = None
     try:

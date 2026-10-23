@@ -122,15 +122,27 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
                 "the pinned render was made from a different script version than "
                 "the one approved — re-render the current script",
             ))
-        if (schedule["language"] and render["language"]
-                and render["language"] != schedule["language"]):
+        if schedule["language"]:
+            if not render["language"]:
+                problems.append(_problem(
+                    "language_mismatch",
+                    "the pinned render has no recorded language — re-render so "
+                    "the language pin is verifiable",
+                ))
+            elif render["language"] != schedule["language"]:
+                problems.append(_problem(
+                    "language_mismatch",
+                    f"pinned render language '{render['language']}' does not match "
+                    f"the schedule language '{schedule['language']}'",
+                ))
+        if not schedule["render_sha256"] or not render["video_sha256"]:
             problems.append(_problem(
-                "language_mismatch",
-                f"pinned render language '{render['language']}' does not match "
-                f"the schedule language '{schedule['language']}'",
+                "render_hash_missing",
+                "the approved package or export has no recorded sha256 — the "
+                "byte pin cannot be verified, so this release is refused. "
+                "Re-render and re-approve.",
             ))
-        if (schedule["render_sha256"] and render["video_sha256"]
-                and str(schedule["render_sha256"]) != str(render["video_sha256"])):
+        elif str(schedule["render_sha256"]) != str(render["video_sha256"]):
             problems.append(_problem(
                 "render_bytes_changed",
                 "the pinned render file's hash no longer matches the approved "
@@ -154,6 +166,14 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
                         == schedule["version_hash"]):
                     script_row = row
                     break
+            if script_row is None:
+                problems.append(_problem(
+                    "script_missing",
+                    "the approved script version is not among the offer's "
+                    "current scripts — the format/claim binding cannot be "
+                    "verified, so this release is refused. Re-approve the "
+                    "current script and re-render.",
+                ))
         capture = None
         if render["capture_id"]:
             capture = await pool.fetchrow(
@@ -292,7 +312,10 @@ async def _release_policy(pool) -> dict:
     from settings_store import get_value
     stored = await get_value(pool, "release_policy")
     value = stored["value"] if stored else None
-    value = value or {}
+    if not isinstance(value, dict):
+        # A corrupted/legacy non-dict value must fail closed to the strict
+        # defaults, not crash every release check with a 500.
+        value = {}
     return {
         "require_package_assets": bool(value.get("require_package_assets", True)),
         "require_playback_review": bool(value.get("require_playback_review", True)),

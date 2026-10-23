@@ -80,6 +80,23 @@ async def _offer(pool, offer_id: uuid.UUID) -> dict[str, Any]:
                 offer[key] = json.loads(offer[key])
             except ValueError:
                 offer[key] = {} if key in ("eligibility", "value", "renewal") else []
+    # The fact pack is derived server-side per claim field. Generation must
+    # use it so a contradicted/unknown fact is written as such — never as
+    # "open eligibility" / "never expires" (§6 step 7, A13). Mirrors the
+    # offers_api script-generation path; without it the studio (the default
+    # content action) rendered supported wording for contested facts.
+    fact_pack = await pool.fetchrow(
+        """
+        SELECT fact_pack::text AS fact_pack FROM extractions
+        WHERE offer_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        offer_id,
+    )
+    if fact_pack and fact_pack["fact_pack"]:
+        try:
+            offer["fact_pack"] = json.loads(fact_pack["fact_pack"])
+        except ValueError:
+            offer["fact_pack"] = {}
     return offer
 
 
@@ -270,6 +287,8 @@ async def generate_content(offer_id: uuid.UUID, body: StudioGenerateIn,
                 website_url=website,
                 # English-first package even for an Urdu voiceover video.
                 language=language_policy["metadata_language"],
+                # The title may only assert what the script format allows.
+                format_hint=body.format,
             )
             for index, meta in enumerate(variants):
                 key = "a" if index == 0 else "b"

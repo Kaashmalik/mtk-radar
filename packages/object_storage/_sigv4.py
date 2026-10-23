@@ -139,12 +139,18 @@ def sign_request(
 
 def parse_s3_ref(ref: str) -> tuple[str, str]:
     """'s3://bucket/some/key.mp4' → (bucket, 'some/key.mp4')."""
+    from pathlib import Path as _Path
     if not ref.startswith("s3://"):
         raise ValueError(f"not an s3 ref: {ref!r}")
     rest = ref[5:]
     bucket, _, key = rest.partition("/")
     if not bucket or not key:
         raise ValueError(f"malformed s3 ref (want s3://bucket/key): {ref!r}")
+    if ".." in _Path(key).parts or key.startswith("/"):
+        # Same rule as LocalStorage.parse_ref — the two drivers must agree on
+        # what a safe key is (a traversal key would also escape the cache dir
+        # on download).
+        raise ValueError(f"unsafe s3 storage key: {ref!r}")
     return bucket, key
 
 

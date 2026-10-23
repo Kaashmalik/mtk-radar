@@ -492,12 +492,32 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
     lines.append(f"- آفیشل شرائط پڑھیں: {offer.get('redemption_url') or 'نیچے ذرائع میں لنک'}۔")
     if expires:
         lines.append(f"- ⏰ آخری تاریخ: **{expires}** — کوشش سے پہلے تصدیق کریں کہ آفر ابھی فعال ہے۔")
-    if renewal.get("autoRenew") or renewal.get("regularPrice"):
+    else:
+        # §6 قدم 7: 'آخری تاریخ درج نہیں' کا مطلب 'کبھی ختم نہیں ہوتی' نہیں —
+        # اردو سطر انگریزی وارننگ کا ہم آہنگ ہے۔
+        expiry_status = _fact("expiry", offer).get("status")
+        if expiry_status == SUPPORTED:
+            lines.append("- ⏰ چیک شدہ شرائط میں آخری تاریخ درج نہیں، مگر آفر فی الحال "
+                         "تصدیق شدہ ہے — فلم بنانے سے پہلے دوبارہ چیک کریں۔")
+        else:
+            lines.append("- ⏰ آخری تاریخ درج نہیں — یہ اس بات کا ثبوت نہیں کہ آفر کبھی "
+                         "ختم نہیں ہوتی۔ آفیشل صفحے پر آخری تاریخ ضرور تصدیق کریں۔")
+    if renewal.get("regularPrice"):
         lines.append(
-            f"- ⚠️ مفت مدت کے بعد قیمت **{renewal.get('regularPrice', 'عام قیمت')}** ہوگی "
-            f"(خودکار تجدید: {'آن' if renewal.get('autoRenew') else 'آف'})۔ "
+            f"- ⚠️ مفت مدت کے بعد قیمت **{renewal.get('regularPrice')}** ہوگی "
+            f"(خودکار تجدید: {'آن' if renewal.get('autoRenew') else 'آف (ڈیفالٹ)'})۔ "
             "فائنل کرنے سے پہلے قیمت اور خودکار تجدید اسکرین پر دکھائیں۔"
         )
+    else:
+        # انگریزی برانچ کا ہم آہنگ: کوئی قیمت درج نہ ہو تو کوئی قیمت مت گھڑیں —
+        # 'عام قیمت' بھی ایک قیمت کا دعویٰ ہے۔
+        renewal_status = _fact("renewal", offer).get("status")
+        if renewal_status == CONTRADICTED:
+            lines.append("- ⚠️ نقل شدہ آفیشل شرائط اس آفر کی تجدید کے دعوے کے خلاف ہیں — "
+                         "فلم بنانے یا سفارش سے پہلے دستی ریویو ضروری ہے۔")
+        else:
+            lines.append("- ⚠️ جاری قیمت چیک شدہ شرائط میں درج نہیں۔ نامعلوم تجدید مفت "
+                         "نہیں ہوتی — کیمرے پر قیمت بتائیں یا شرائط کی تصدیق کریں۔")
     lines.append("")
     if script_format == "official_explainer":
         lines.append("## آفیشل شرائط میں بیان کردہ مراحل")
@@ -536,8 +556,13 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
                  "ٹریک شدہ ویب سائٹ لنک استعمال کریں، ملتا جلتا ڈومین نہیں۔")
     lines.append("")
     lines.append("## اختتامی خلاصہ")
+    if renewal.get("autoRenew") is None:
+        auto_renew_ur = "درج نہیں"
+    else:
+        auto_renew_ur = "آن" if renewal.get("autoRenew") else "آف"
     lines.append(f"- مراحل: اوپر {len(checklist)} چیک؛ آخری تاریخ {expires or '— شرائط دیکھیں'}؛ "
-                 f"جاری قیمت: {renewal.get('regularPrice', 'درج نہیں')} (خودکار تجدید)۔")
+                 f"جاری قیمت: {renewal.get('regularPrice') or 'درج نہیں'}؛ "
+                 f"خودکار تجدید: {auto_renew_ur}۔")
     lines.append("- ذرائع (ویڈیو ڈسکرپشن میں بھی):")
     for ev in evidence:
         lines.append(f"  - {ev.get('url')} — ریکارڈ شدہ {_fmt_date(ev.get('captured_at'))}")
@@ -554,7 +579,13 @@ def _eligibility_line(offer: dict) -> str:
     if eligibility.get("studentStatus"):
         parts.append("students only (verification required)" if eligibility.get("verificationRequired") else "students")
     if eligibility.get("startupStatus"):
-        parts.append("startups (application-based)" if eligibility.get("newCustomerOnly") is None else "startups")
+        # "(application-based)" claims a specific application process — it must
+        # come from a real application signal (the benefit_type fact), never
+        # from an unrelated field like newCustomerOnly.
+        application_based = (str(_fact("benefit_type", offer).get("value") or "")
+                             .strip().lower() == "application_based"
+                             or bool(eligibility.get("requiresApplication")))
+        parts.append("startups (application-based)" if application_based else "startups")
     if eligibility.get("newCustomerOnly"):
         parts.append("new customers only")
     if not parts:
@@ -578,11 +609,26 @@ def _eligibility_line_ur(offer: dict) -> str:
     if eligibility.get("studentStatus"):
         parts.append("صرف طلبہ (تصدیق ضروری)" if eligibility.get("verificationRequired") else "طلبہ")
     if eligibility.get("startupStatus"):
-        parts.append("اسٹارٹ اپس (درخواست کے ذریعے)")
+        # اردو سطر انگریزی کے ساتھ ہم آہنگ ہونی چاہیے: '(درخواست کے ذریعے)' صرف
+        # اسی وقت جب اصل درخواستی سگنل موجود ہو۔
+        application_based = (str(_fact("benefit_type", offer).get("value") or "")
+                             .strip().lower() == "application_based"
+                             or bool(eligibility.get("requiresApplication")))
+        parts.append("اسٹارٹ اپس (درخواست کے ذریعے)" if application_based else "اسٹارٹ اپس")
     if eligibility.get("newCustomerOnly"):
         parts.append("صرف نئے صارفین")
     if not parts:
-        return "کھلی اہلیت — لیکن کلیم سے پہلے آفیشل صفحے پر موجودہ شرائط ضرور دیکھیں۔"
+        # A13/ur: ایک نامعلوم یا متنازع اہلیت کبھی 'کھلی اہلیت' نہیں لکھی جا سکتی —
+        # انگریزی برانچ کی طرح حیثیت کے مطابق لکھیں۔
+        status = _fact("eligibility", offer).get("status")
+        if status == CONTRADICTED:
+            return ("نقل شدہ آفیشل شرائط اس آفر کی اہلیت کے خلاف جاتی ہیں — فلم بنانے "
+                    "یا سفارش سے پہلے دستی ریویو ضروری ہے۔")
+        if status == SUPPORTED:
+            return ("آفیشل شواہد میں سامعین کی کوئی حد درج نہیں (یہ اس بات کا ثبوت "
+                    "نہیں کہ آفر سب کے لیے کھلی ہے) — موجودہ شرائط کی تصدیق کریں۔")
+        return ("اہلیت چیک شدہ شرائط میں درج نہیں — آفیشل صفحے پر موجودہ شرائط "
+                "ضرور دیکھیں۔ اس آفر کو ہر کسی کے لیے کھلی نہ بتائیں۔")
     return " · ".join(parts) + "۔"
 
 

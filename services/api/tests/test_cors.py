@@ -46,3 +46,13 @@ def test_origins_are_deduplicated_and_normalized(monkeypatch):
     origins = api_main._cors_origins()
     assert origins.count("https://a.example.com") == 1
     assert "https://a.example.com/" not in origins
+
+def test_localhost_fallback_applies_only_when_nothing_is_configured(monkeypatch):
+    """Once an operator configures ANY origin, localhost is not silently kept
+    alongside it: with allow_credentials=True a leftover dev origin on a
+    deployed host is a real cross-origin exposure."""
+    monkeypatch.setenv("MTK_CORS_ORIGINS", "https://radar.example.com")
+    monkeypatch.delenv("MTK_PUBLIC_BASE_URL", raising=False)
+    origins = api_main._cors_origins()
+    assert origins == ["https://radar.example.com"]
+    assert "http://localhost:3000" not in origins

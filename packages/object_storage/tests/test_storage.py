@@ -281,3 +281,38 @@ def test_s3_list_also_accepts_json_stores():
 
     st, _ = _s3_with(handler)
     assert st.list("backups") == ["s3://mtk-bucket/backups/x.dump"]
+
+def test_parse_s3_ref_rejects_traversal_keys():
+    import pytest as _pytest
+    from object_storage._sigv4 import parse_s3_ref
+    with _pytest.raises(ValueError):
+        parse_s3_ref("s3://bucket/../../etc/cron.d/evil")
+    with _pytest.raises(ValueError):
+        parse_s3_ref("s3://bucket//leading-slash")
+
+
+def test_materialize_never_downloads_outside_the_cache_dir(tmp_path: Path):
+    """A poisoned ref must not produce a driver call with a dest that escapes
+    the cache dir — traversal is refused before the driver is consulted."""
+
+    class TripwireStorage:
+        def get(self, ref, dest):
+            raise AssertionError(f"driver was handed an unsafe dest: {dest}")
+
+    import pytest as _pytest
+    from object_storage import materialize
+    for ref in ("s3://bucket/a/../../evil.mp4", "local://../escape.mp4"):
+        assert materialize(ref, tmp_path, storage=TripwireStorage()) is None, ref
+
+
+def test_capture_key_applies_one_rule_to_every_component():
+    """All key components — including the filename — go through _safe_part:
+    unsafe names are REFUSED (fail closed), never sanitized silently."""
+    import pytest as _pytest
+    from object_storage import capture_key
+    key = capture_key("offer-1", "sess-1", "capture-2026-10-23.txt")
+    assert key.count("/") == 3, key
+    with _pytest.raises(ValueError):
+        capture_key("offer-1", "sess-1", "my capture file.txt")
+    # separators never survive: a traversal-looking name reduces to its base
+    assert capture_key("offer-1", "sess-1", "../../escape.txt").endswith("escape.txt")
