@@ -87,10 +87,21 @@ restore or deployment proof.
 Still **not implemented / not demonstrated** (do not read the checked-or-not
 list in §9 as complete):
 
-- **Workers have not migrated onto the durable job queue.** The `jobs` outbox
-  records owed publishing work and surfaces wedged jobs, but the render and
-  publishing workers still poll their lists; claiming work from `/jobs` is the
-  next migration step. Collector cadence also remains in memory.
+- **Publishing worker is now job-queue-driven (day-2 pass).** The worker
+  claims `publish_schedule` jobs (`/jobs/claim`, SKIP LOCKED + lease +
+  reported result) before its classic sweep, INSIDE the sweep lock, so one
+  worker can never double-attempt a post. Schedule creation sets
+  `run_after` to the publish time; retries (auto-retry transition) and human
+  resume **re-arm** the job with a fresh attempt budget; migration 029
+  backfills owed jobs for posts that predate the queue and is idempotent.
+  The queue degrades fail-open (queue unreachable / older API ⇒ sweep-only;
+  the sweep remains the authoritative fallback), while safety stays
+  fail-closed at the release gate/attempt layer. `MTK_PUBLISH_JOB_QUEUE=0`
+  disables the drain. Integration tests pin the lifecycle, re-arm and 029
+  backfill semantics; they also caught and fixed a real 500 in
+  `POST /jobs/{id}/result` (int into a text-concat interval). **Render and
+  collector workers are still list-pollers** — their kinds (`render_package`,
+  `collect`) exist but no worker drains them yet.
 - **Dashboard workflows remain partial.** This pass added inbox
   search/filter/pagination, the release-readiness card, playback sign-off,
   cancel, connection tests and the release-policy card. Still missing:
@@ -106,9 +117,19 @@ list in §9 as complete):
   formats.
 - **Attention truncation is by design but bounded:** counts are global;
   per-kind item lists cap at 50 rows.
+- **Security/observability hardening added (day-2 pass):** per-IP sliding
+  window over auth failures (429 + Retry-After after 15 failures/60s,
+  bounded memory, honors `MTK_TRUST_PROXY` for X-Forwarded-For); Prometheus
+  text-format `GET /metrics` (request counters by route template, jobs by
+  status/kind, schedules/offers by state, render totals, auth-failure IPs —
+  under the same bearer gate as every route); dashboard security headers via
+  `next.config.ts` (X-Frame-Options DENY, CSP `frame-ancestors 'none';
+  base-uri 'self'`, nosniff, Referrer-Policy, Permissions-Policy, HSTS in
+  production). A full `script-src` CSP remains future work (Next inline
+  hydration scripts need nonce/hash plumbing first).
 - **Live-provider and operational proof** remains outstanding: credentials,
-  accounts, domain/TLS, S3/R2, real YouTube upload/metrics, image deployment on
-  a private network, and database/media restore in a separate environment.
+  accounts, domain/TLS, S3/R2, real YouTube upload/metrics, image deployment
+  on a private network, and database/media restore in a separate environment.
   These cannot be proven from the audit machine; they need an operator with
   real infrastructure.
 

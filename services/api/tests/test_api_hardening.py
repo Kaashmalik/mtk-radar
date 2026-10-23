@@ -8,6 +8,7 @@
 
 import asyncio
 import logging
+import re
 import sys
 import types
 from datetime import datetime, timezone
@@ -186,3 +187,102 @@ def test_analytics_passes_pool_to_every_query(fake_pool):
     assert result["verification"]["live_offers"] == 3
     assert result["publishing"]["published"] == 1
     assert result["generated_at"] is not None
+
+
+# ------------------------------------------------- brute-force rate limit (v0.33)
+
+
+def test_auth_failures_trigger_429_then_reset(hardened_app, monkeypatch):
+    """A per-IP sliding window over auth failures: past the failure budget the
+    gate serves 429 — reviewer tokens cannot be brute-forced at line rate.
+    A valid credential resets the budget immediately."""
+    monkeypatch.setattr(api_hardening, "AUTH_FAILURE_LIMIT", 3)
+    monkeypatch.setattr(api_hardening, "AUTH_FAILURE_WINDOW_S", 60.0)
+    api_hardening.reset_auth_failures()  # isolation: other tests' 401s linger
+    api_hardening.register(hardened_app, token="s3cret")
+    with TestClient(hardened_app) as client:
+        for _ in range(3):
+            assert client.get("/ping").status_code == 401
+        # budget exhausted → 429 even BEFORE the token is read
+        blocked = client.get("/ping")
+        assert blocked.status_code == 429
+        assert "Retry-After" in blocked.headers
+
+        # correct token is blocked too (same IP) — that is the point: stop
+        # guessing by making everything 429 until the window cools down
+        assert client.get(
+            "/ping", headers={"Authorization": "Bearer s3cret"}).status_code == 429
+
+    api_hardening.reset_auth_failures()
+    with TestClient(hardened_app) as client:
+        assert client.get(
+            "/ping", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+        # a success cleared the (single) failure record: failures still allowed
+        assert client.get("/ping").status_code == 401
+        assert client.get("/ping").status_code == 401
+        assert client.get("/ping").status_code != 429  # only 2 since reset+success
+
+
+def test_rate_limit_counts_failures_not_successes(hardened_app, monkeypatch):
+    monkeypatch.setattr(api_hardening, "AUTH_FAILURE_LIMIT", 5)
+    api_hardening.reset_auth_failures()
+    api_hardening.register(hardened_app, token="s3cret")
+    with TestClient(hardened_app) as client:
+        # 50 successful requests never trip the limiter
+        for _ in range(50):
+            assert client.get(
+                "/ping", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+        # 4 failures stay under the budget of 5
+        for _ in range(4):
+            client.get("/ping")
+        assert client.get(
+            "/ping", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+# ------------------------------------------------------------- metrics (v0.33)
+
+
+def test_metrics_endpoint_renders_prometheus_format(hardened_app, monkeypatch):
+    """GET /metrics parses as Prometheus text format: HELP/TYPE lines,
+    counter/gauge samples, request counters from the middleware."""
+    from fastapi import FastAPI
+
+    class FakePool:
+        async def fetch(self, query, *args):
+            if "FROM jobs" in query:
+                return [("pending", "publish_schedule", 2)]
+            if "FROM schedules" in query:
+                return [("scheduled", 1)]
+            return [("verified", 4)]
+
+        async def fetchval(self, query, *args):
+            return 7
+
+    import metrics_api
+    monkeypatch.setattr(metrics_api.db, "get", lambda: FakePool())
+    app = hardened_app
+    api_hardening.register(app, token="s3cret")
+    app.include_router(metrics_api.router)
+    with TestClient(app) as client:
+        client.get("/ping", headers={"Authorization": "Bearer s3cret"})
+        res = client.get("/metrics", headers={"Authorization": "Bearer s3cret"})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/plain")
+    body = res.text
+    assert "# TYPE mtk_api_requests_total counter" in body
+    assert "# TYPE mtk_jobs gauge" in body
+    assert 'mtk_jobs{status="pending",kind="publish_schedule"} 2' in body
+    assert 'mtk_schedules{state="scheduled"} 1' in body
+    assert "mtk_renders_total 7" in body
+    # the /ping request above was counted by the middleware
+    # (count may exceed 1 — earlier tests in this process hit /ping too)
+    assert re.search(
+        r'mtk_api_requests_total\{method="GET",path="/ping",status="2xx"\} [1-9]\d*', body)
+
+
+def test_metrics_requires_auth_when_token_configured(hardened_app):
+    import metrics_api
+    api_hardening.register(hardened_app, token="s3cret")
+    hardened_app.include_router(metrics_api.router)
+    with TestClient(hardened_app) as client:
+        assert client.get("/metrics").status_code == 401

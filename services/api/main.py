@@ -33,6 +33,7 @@ from health_api import router as health_router
 from jobs_api import router as jobs_router
 from locks_api import router as locks_router
 from media_api import router as media_router
+from metrics_api import router as metrics_router
 from jsonb import decode_mapping
 import tos_review
 from normalize import canonicalize_url, hash_parts
@@ -104,6 +105,7 @@ app.include_router(attention_router)
 app.include_router(workers_router)
 app.include_router(upload_sessions_router)
 app.include_router(media_router)
+app.include_router(metrics_router)
 
 # Optional bearer-token auth (MTK_API_TOKEN, v0.13) + reviewer-token identity
 # (v0.16) + structured request logging. Unset token = open local dev; set it
