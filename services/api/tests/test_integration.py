@@ -329,6 +329,15 @@ def auth_client(client):
               _workers_router, _upload_sessions_router, _jobs_router,
               _metrics_router):
         app2.include_router(r)
+    # /sources + poll-result are declared on the main app with @app directly,
+    # not on any router — mount the SAME handlers here so the collect-job
+    # tests can drive them on one event loop (asyncpg pools are loop-bound).
+    _api_main = _import_api_main()
+    from fastapi import APIRouter as _APIRouter
+    _sources_router = _APIRouter()
+    _sources_router.post("/sources", status_code=201)(_api_main.create_source)
+    _sources_router.post("/sources/{source_id}/poll-result")(_api_main.poll_result)
+    app2.include_router(_sources_router)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
     with TestClient(app2) as c:
@@ -3729,3 +3738,275 @@ def test_migration_029_backfills_owed_publish_jobs(auth_client):
         "AND kind = 'publish_schedule'", __import__("uuid").UUID(sid))
     assert rows[0]["n"] == 1
 
+
+
+# ------------------------------------------------- collect jobs (v0.33)
+
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+
+def _apply_migration_file(name: str) -> None:
+    """Apply a migration file exactly as the runner does (simple protocol →
+    multi-statement SQL works; direct _run() would PREPARE and fail)."""
+    migration = (Path(__file__).resolve().parent.parent
+                 / "db" / "migrations" / name).read_text()
+
+    async def go():
+        import asyncpg as _apg
+        conn = await _apg.connect(DSN)
+        try:
+            await conn.execute(migration)
+        finally:
+            await conn.close()
+    asyncio.run(go())
+
+
+def _clear_other_collect_jobs(sid):
+    _run("DELETE FROM jobs WHERE kind = 'collect' AND entity_id <> $1", sid)
+
+
+def _new_enabled_source(client, provider):
+    res = client.post("/sources", headers=SVC, json={
+        "provider": provider,
+        "canonical_domain": f"{provider.replace(' ', '').lower()}.example.com",
+        "category": "student_programs", "adapter": "manual",
+        "polling_cadence": "6 hours",
+    })
+    assert res.status_code == 201, res.text
+    sid = __import__("uuid").UUID(res.json()["id"])
+    # creation-time enqueue: the durable "this source owes a poll" record
+    rows = _run(
+        "SELECT id::text AS jid, status::text AS status, max_attempts, "
+        "run_after::text AS run_after FROM jobs WHERE entity_id = $1 "
+        "AND kind = 'collect'", sid)
+    assert len(rows) == 1, "source creation must enqueue exactly one collect job"
+    assert rows[0]["status"] == "pending" and rows[0]["max_attempts"] == 5
+    _clear_other_collect_jobs(sid)
+    return sid, __import__("uuid").UUID(rows[0]["jid"])
+
+
+def _claim_collect(client):
+    claimed = client.post("/jobs/claim", headers=SVC,
+                          json={"worker": "collector", "lease_s": 600,
+                                "kinds": ["collect"]})
+    assert claimed.status_code == 200, claimed.text
+    return claimed.json()
+
+
+def test_source_creation_enqueues_collect_job(auth_client):
+    sid, _jid = _new_enabled_source(auth_client, "CollectPro Example")
+    # idempotent re-create must NOT add a second job
+    res = auth_client.post("/sources", headers=SVC, json={
+        "provider": "CollectPro Example",
+        "canonical_domain": "collectproexample.example.com",
+        "category": "student_programs", "adapter": "manual",
+    })
+    assert res.status_code == 201 and res.json()["created"] is False
+    rows = _run("SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+                "AND kind = 'collect'", sid)
+    assert rows[0]["n"] == 1
+
+
+def test_collect_job_rearm_on_poll_result(auth_client):
+    sid, jid = _new_enabled_source(auth_client, "CollectRearm Example")
+
+    # claim leases the job (attempts 1)...
+    claimed = _claim_collect(auth_client)
+    assert claimed.get("claimed") and claimed["id"] == str(jid)
+
+    # ...healthy poll re-arms with the cadence: pending, attempts reset to 0,
+    # due in ~6 hours, lease released
+    res = auth_client.post(f"/sources/{sid}/poll-result", headers=SVC,
+                           json={"ok": True, "created": 2})
+    assert res.status_code == 200, res.text
+    row = _run(
+        "SELECT status::text AS status, attempts, lease_holder, "
+        "run_after::text AS run_after FROM jobs WHERE id = $1", jid)[0]
+    assert row["status"] == "pending" and row["attempts"] == 0
+    assert row["lease_holder"] is None
+    run_after = _dt.fromisoformat(row["run_after"])
+    now = _dt.now(_tz.utc)
+    assert now + _td(seconds=3600 * 6 - 60) <= run_after <= now + _td(seconds=3600 * 6 + 60), \
+        "healthy poll must schedule the next collection at the source cadence"
+
+    # failed poll: retry sooner (300 s), attempts preserved toward dead-letter
+    _run("UPDATE jobs SET run_after = now() - interval '1 s' WHERE id = $1", jid)
+    _clear_other_collect_jobs(sid)
+    claimed = auth_client.post("/jobs/claim", headers=SVC,
+                               json={"worker": "collector", "lease_s": 600,
+                                     "kinds": ["collect"]})
+    assert claimed.json().get("claimed") and claimed.json()["id"] == str(jid)
+    auth_client.post(f"/sources/{sid}/poll-result", headers=SVC,
+                     json={"ok": False, "detail": "adapter timeout"})
+    row = _run(
+        "SELECT status::text AS status, attempts, run_after::text AS run_after "
+        "FROM jobs WHERE id = $1", jid)[0]
+    assert row["status"] == "pending" and row["attempts"] == 1
+    run_after = _dt.fromisoformat(row["run_after"])
+    now = _dt.now(_tz.utc)
+    assert now + _td(seconds=270) <= run_after <= now + _td(seconds=330), \
+        "failed poll must retry sooner than the cadence"
+
+
+def test_collect_job_dead_letters_after_repeated_failures(auth_client):
+    """5 claims without a healthy poll-result must dead-letter the job into
+    operator attention — the failure. The boundary sits at the 5th claim."""
+    sid, jid = _new_enabled_source(auth_client, "CollectDead Example")
+    # 5 claims without a healthy poll-result: the claim bumps attempts, the
+    # failed poll-result keeps them → the 5th failure dead-letters the job
+    for cycle in range(5):
+        _run("UPDATE jobs SET run_after = now() - interval '1 s' WHERE id = $1", jid)
+        claimed = _claim_collect(auth_client)
+        assert claimed.get("claimed"), f"cycle {cycle + 1} must be claimable"
+        auth_client.post(f"/sources/{sid}/poll-result", headers=SVC,
+                         json={"ok": False, "detail": "still failing"})
+    row = _run("SELECT status::text AS status, attempts FROM jobs WHERE id = $1",
+               jid)[0]
+    assert row["status"] == "dead" and row["attempts"] == 5, \
+        "repeated failures must dead-letter, not retry forever"
+
+    # the operator's un-wedge action: POST /jobs/{id}/retry revives it
+    res = auth_client.post(f"/jobs/{jid}/retry", headers=HUMAN)
+    assert res.status_code == 200, res.text
+    row = _run("SELECT status::text AS status, attempts, lease_holder, last_error, "
+               "run_after::text AS run_after, now()::text AS n FROM jobs "
+               "WHERE id = $1", jid)[0]
+    assert row["status"] == "pending" and row["attempts"] == 0
+    assert row["lease_holder"] is None and row["last_error"] is None
+    assert _dt.fromisoformat(row["run_after"]) <= _dt.fromisoformat(row["n"]) + _td(seconds=5)
+
+
+def test_job_retry_endpoint_guards(auth_client):
+    _, jid = _new_enabled_source(auth_client, "RetryGuards Example")
+    # a live (pending) job cannot be "retried" — it is already queued
+    res = auth_client.post(f"/jobs/{jid}/retry", headers=HUMAN)
+    assert res.status_code == 409, res.text
+    # unknown job
+    res = auth_client.post(f"/jobs/{__import__('uuid').uuid4()}/retry", headers=HUMAN)
+    assert res.status_code == 404
+
+
+def test_disabled_source_no_backfill_job(auth_client):
+    """A disabled source owes nothing — 030 must not invent work for it."""
+    res = auth_client.post("/sources", headers=SVC, json={
+        "provider": "DisabledSrc Example",
+        "canonical_domain": "disabledsrc.example.com",
+        "category": "student_programs", "adapter": "manual", "enabled": False,
+    })
+    assert res.status_code == 201, res.text
+    sid = __import__("uuid").UUID(res.json()["id"])
+    rows = _run("SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+                "AND kind = 'collect'", sid)
+    assert rows[0]["n"] == 0, "disabled source creation must not enqueue"
+
+    # and the 030 backfill must not either
+    _apply_migration_file("030_collect_job_backfill.sql")
+    rows = _run("SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+                "AND kind = 'collect'", sid)
+    assert rows[0]["n"] == 0
+
+
+def test_migration_030_backfills_collect_jobs(auth_client):
+    """Sources predating the collect-job contract get a durable owed-poll
+    record; re-application must never double-record (dedupe keyed like the
+    creation-time enqueue)."""
+    sid, jid = _new_enabled_source(auth_client, "BackfillCollect Example")
+
+    # simulate a pre-030 source: no collect job row yet
+    _run("DELETE FROM jobs WHERE id = $1", jid)
+    rows = _run("SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+                "AND kind = 'collect'", sid)
+    assert rows[0]["n"] == 0
+
+    _apply_migration_file("030_collect_job_backfill.sql")
+    rows = _run(
+        "SELECT dedupe_key, run_after <= now() AS due, max_attempts "
+        "FROM jobs WHERE entity_id = $1 AND kind = 'collect'", sid)
+    assert len(rows) == 1 and rows[0]["dedupe_key"] == f"collect:{sid}"
+    assert rows[0]["due"], "backfilled job is due at the next collector sweep"
+    assert rows[0]["max_attempts"] == 5
+
+    # idempotent: a second application must not duplicate
+    _apply_migration_file("030_collect_job_backfill.sql")
+    rows = _run("SELECT count(*)::int AS n FROM jobs WHERE entity_id = $1 "
+                "AND kind = 'collect'", sid)
+    assert rows[0]["n"] == 1
+
+
+# ------------------------------------------------- reschedule (v0.33)
+
+
+def test_reschedule_endpoint(auth_client):
+    ids = _gate_ready_schedule(auth_client, "reschedule")
+    sid = __import__("uuid").UUID(ids["schedule_id"])
+    # the gate helper creates the post without a job row (job enqueues live at
+    # transition time); 029 backfills one so reschedule has a job to move
+    _apply_migration_file("029_publish_job_backfill.sql")
+
+    # -- automation may not reschedule: a moved slot is a human decision
+    res = auth_client.post(f"/schedules/{sid}/reschedule", headers=SVC,
+                           json={"local_time": (_dt.now(_tz.utc) + _td(hours=2))
+                                 .isoformat()})
+    assert res.status_code == 403, res.text
+
+    # -- a post in the past is a cancel, not a reschedule
+    res = auth_client.post(f"/schedules/{sid}/reschedule", headers=HUMAN,
+                           json={"local_time": "2020-01-01T10:00:00Z"})
+    assert res.status_code == 422, res.text
+
+    # -- happy path: future time, human, keeps state and moves the job
+    new_time = _dt.now(_tz.utc) + _td(hours=3, minutes=7)
+    res = auth_client.post(f"/schedules/{sid}/reschedule", headers=HUMAN,
+                           json={"local_time": new_time.isoformat(),
+                                 "note": "slot moved for the premiere window"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["state"] == "scheduled" and body["rescheduled_by"] == REVIEWER
+    local_time = _run("SELECT local_time::text AS t FROM schedules WHERE id = $1",
+                      sid)[0]["t"]
+    assert _dt.fromisoformat(local_time) == new_time
+    row = _run("SELECT run_after::text AS r FROM jobs WHERE entity_id = $1 "
+               "AND kind = 'publish_schedule' AND status <> 'done'", sid)[0]
+    assert row["r"] == local_time, "the durable publish job must follow the new slot"
+
+    # -- terminal states are not actionable
+    res = auth_client.post(f"/schedules/{sid}/transition", headers=HUMAN,
+                           json={"to": "cancelled", "note": "done"})
+    assert res.status_code == 200, res.text
+    res = auth_client.post(f"/schedules/{sid}/reschedule", headers=HUMAN,
+                           json={"local_time": new_time.isoformat()})
+    assert res.status_code == 409, res.text
+
+    # -- unknown schedule
+    res = auth_client.post(f"/schedules/{__import__('uuid').uuid4()}/reschedule",
+                           headers=HUMAN,
+                           json={"local_time": new_time.isoformat()})
+    assert res.status_code == 404
+
+
+# ------------------------------------------------- notification probe (v0.33)
+
+
+def test_notification_probe_requires_human(auth_client):
+    res = auth_client.post("/settings/test-notification", headers=SVC, json={})
+    assert res.status_code == 403, res.text
+
+
+def test_notification_probe_honest_unconfigured(auth_client, monkeypatch):
+    monkeypatch.delenv("MTK_NOTIFY_WEBHOOK_URL", raising=False)
+    res = auth_client.post("/settings/test-notification", headers=HUMAN, json={})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["configured"] is False and body["ok"] is False
+    assert "MTK_NOTIFY_WEBHOOK_URL" in body["detail"]
+
+
+def test_notification_probe_reports_unreachable_webhook(auth_client, monkeypatch):
+    monkeypatch.setenv("MTK_NOTIFY_WEBHOOK_URL", "http://127.0.0.1:9/hook")
+    monkeypatch.delenv("MTK_NOTIFY_WEBHOOK_TOKEN", raising=False)
+    res = auth_client.post("/settings/test-notification", headers=HUMAN,
+                           json={"message": "integration probe"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["configured"] is True and body["ok"] is False
+    assert body["status"] is None and "unreachable" in body["detail"]

@@ -904,6 +904,66 @@ async def cancel_schedule(schedule_id: uuid.UUID, body: ScheduleCancelIn,
     return {"id": str(schedule_id), "state": "cancelled", "by": actor}
 
 
+class ScheduleRescheduleIn(BaseModel):
+    local_time: datetime
+    timezone: Optional[str] = None
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/schedules/{schedule_id}/reschedule")
+async def reschedule_schedule(schedule_id: uuid.UUID, body: ScheduleRescheduleIn,
+                              request: Request) -> dict:
+    """Move a queued post to a new publish time (human editorial decision).
+
+    Keeps the review package and all pins intact — only the slot changes —
+    and re-arms the durable publish job so the queue wakes the worker at the
+    new time, not the old one. Works from scheduled/paused/failed; a published
+    or cancelled post is not actionable. Automation may not reschedule: a
+    moved slot is an operator decision about audiences, not a retry.
+    """
+    actor = effective_reviewer(request, None, require=True)
+    pool = db.get()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state::text AS state, local_time FROM schedules "
+            "WHERE id = $1 FOR UPDATE",
+            schedule_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="schedule not found")
+        if row["state"] not in ("scheduled", "paused", "failed"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"a {row['state']} post cannot be rescheduled",
+            )
+        if body.local_time <= datetime.now(timezone.utc) - timedelta(minutes=1):
+            raise HTTPException(
+                status_code=422,
+                detail="reschedule target must be in the future — cancel instead "
+                       "of queuing a post in the past",
+            )
+        updated = await conn.fetchrow(
+            """
+            UPDATE schedules
+            SET local_time = $2,
+                timezone = COALESCE($3, timezone),
+                updated_at = now()
+            WHERE id = $1
+            RETURNING state::text AS state, local_time
+            """,
+            schedule_id, body.local_time, body.timezone,
+        )
+        # keep the durable publish job in lockstep with the new slot
+        await _rearm_publish_job(pool, schedule_id)
+    await audit_actor_note(pool, schedule_id, actor, body.note)
+    return {
+        "id": str(schedule_id),
+        "state": updated["state"],
+        "local_time": updated["local_time"].isoformat(),
+        "rescheduled_by": actor,
+    }
+
+
 async def audit_actor_note(pool, schedule_id: uuid.UUID, actor: str, note: str) -> None:
     from settings_store import audit
     await audit(pool, actor=actor, action="schedule:cancel", entity="schedules",

@@ -246,14 +246,61 @@ def render_script_md(offer: dict, checklist: list[dict], command_cards: list[dic
 
 
 def assert_format_wording(markdown: str, script_format: str) -> None:
-    """Belt and braces: a renderer change cannot smuggle an outcome claim in."""
+    """Belt and braces: a renderer change cannot smuggle an outcome claim in.
+
+    v0.33: the guard now covers every language (English, Urdu script AND the
+    Roman-Urdu transliteration real scripts use) and every format so a
+    language swap can never become a wording-guard bypass:
+    - official_explainer: NO first-person result wording — it explains
+      published terms and never claims an outcome, in any language.
+    - tested_tutorial: may say what was TESTED, never that a claim was
+      APPROVED or a reward received — that requires the demonstrated-capture
+      binding (assert_format_allowed), not just wording.
+    - claim_walkthrough: documents a reviewer-attested demonstrated claim, so
+      first-person wording is the point; the capture binding is the gate and
+      nothing is forbidden here.
+    """
     lowered = markdown.lower()
-    if script_format == "official_explainer":
-        for phrase in ("i claimed", "i tested", "i completed", "my result"):
+
+    def _forbid(phrases: list[str], reason: str) -> None:
+        for phrase in phrases:
             if phrase in lowered:
-                raise ScriptGateError(
-                    f"official_explainer must not use first-person result wording ('{phrase}')"
-                )
+                raise ScriptGateError(f"{script_format} must not use {reason} ('{phrase}')")
+
+    if script_format == "official_explainer":
+        # English + Urdu script + Roman-Urdu transliteration: a language swap
+        # must not become a wording-guard bypass.
+        _forbid(
+            [
+                # English
+                "i claimed", "i tested", "i completed", "my result",
+                # Urdu script (checked against the lowercased original; Urdu has
+                # no case, .lower() is a no-op there)
+                "میں نے کلیم کیا", "میں نے ٹیسٹ کیا", "میں نے مکمل کیا",
+                "میرا نتیجہ",
+                # Roman Urdu
+                "maine claim kiya", "maine test kiya", "maine mukammal kiya",
+                "mera nateeja", "mera result",
+            ],
+            "first-person result wording",
+        )
+    elif script_format == "tested_tutorial":
+        _forbid(
+            [
+                # outcome/entitlement claims — a tutorial may describe testing,
+                # never an approved claim or received benefit
+                "claim approved", "claim was approved", "offer approved",
+                "i received", "i got paid", "money arrived", "reward received",
+                # Urdu script
+                "کلیم منظور", "درخواست منظور", "رقم موصول", "انعام موصول",
+                "پیسے مل گئے",
+                # Roman Urdu
+                "claim approve ho gaya", "claim manzoor ho gaya",
+                "paisay mil gaye", "paise mil gaye",
+            ],
+            "unproven outcome wording (tested tutorials describe testing, "
+            "not an approved claim)",
+        )
 
 
 def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],

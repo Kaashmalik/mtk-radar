@@ -134,6 +134,80 @@ class Collector:
                 log.error("API unreachable, retrying in %ss: %s", HOUSEKEEPING_INTERVAL, exc)
                 time.sleep(HOUSEKEEPING_INTERVAL)
 
+    # -------------------------------------- durable collect jobs (v0.33)
+    # Sources created since 028/030 carry a recurring `collect` job; healthy
+    # polls re-arm it with the source's cadence (API poll-result), failures
+    # retry sooner and dead-letter into operator attention. The classic
+    # cadence sweep below REMAINS the authoritative fallback — a queue outage
+    # degrades to polling, never to lost sources.
+    def _collect_jobs_enabled(self) -> bool:
+        return os.environ.get("MTK_COLLECT_JOB_QUEUE", "1").strip().lower() \
+            not in {"0", "false", "no"}
+
+    def _job_result(self, job_id: str, *, ok: bool, detail: str | None = None,
+                    retry_after_s: int | None = None) -> None:
+        payload: dict = {"ok": ok}
+        if detail:
+            payload["detail"] = detail[:1900]
+        if retry_after_s is not None:
+            payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+        try:
+            self.client.post(f"{self.api_url}/jobs/{job_id}/result", json=payload)
+        except httpx.HTTPError as exc:
+            log.warning("could not report result for collect job %s: %s", job_id, exc)
+
+    async def _drain_collect_jobs(self, sources: list[dict]) -> int:
+        """Claim due collect jobs until the queue is dry and poll those
+        sources through the SAME _poll path as the sweep. Fail-open: any
+        queue problem (unreachable, older API) falls back to sweep-only."""
+        if not self._collect_jobs_enabled():
+            return 0
+        by_id = {s["id"]: s for s in sources}
+        polled = 0
+        for _ in range(100):  # bounded per sweep; poll-results re-arm claimed jobs
+            if _STOP:
+                break
+            try:
+                resp = self.client.post(
+                    f"{self.api_url}/jobs/claim",
+                    json={"worker": "collector", "lease_s": 900,
+                          "kinds": ["collect"]},
+                )
+            except httpx.HTTPError as exc:
+                log.warning("collect job queue unreachable (%s) — sweep-only mode", exc)
+                return polled
+            if resp.status_code == 404:
+                log.info("collect job queue not available on this API — sweep-only mode")
+                return polled
+            if resp.status_code >= 300:
+                log.warning("collect job claim refused (%s) — sweep-only this run",
+                            resp.status_code)
+                return polled
+            try:
+                body = resp.json()
+            except ValueError:
+                return polled
+            if not body.get("claimed"):
+                return polled
+            job_id = body["id"]
+            source = by_id.get(body.get("entity_id"))
+            if source is None:
+                # disabled or removed after the job was queued: nothing owed
+                self._job_result(job_id, ok=True,
+                                 detail="source disabled or removed — nothing owed")
+                continue
+            try:
+                await self._poll(source)
+            except Exception:  # noqa: BLE001 — one bad source never stops the drain
+                log.exception("claimed source %s (%s) failed", body.get("entity_id"),
+                              source.get("provider"))
+                # poll-result(False) re-arms the job with a short retry and
+                # keeps the attempt count; no separate job result is needed.
+                self._report(str(source["id"]), ok=False,
+                             detail="poll failed; see collector logs")
+            polled += 1
+        return polled
+
     def _collect_stage_allowed(self) -> bool:
         try:
             resp = self.client.get(f"{self.api_url}/automation/policy")
@@ -154,6 +228,10 @@ class Collector:
         resp.raise_for_status()
         sources = resp.json()
         now = time.time()
+
+        # Job-driven first (durable owed work), then the cadence sweep as the
+        # fallback for everything the queue does not cover.
+        await self._drain_collect_jobs(sources)
 
         for source in sources:
             sid = source["id"]

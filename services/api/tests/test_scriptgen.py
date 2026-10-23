@@ -5,6 +5,7 @@ import pytest
 from scriptgen import (
     ScriptGateError,
     assert_format_allowed,
+    assert_format_wording,
     assert_video_allowed,
     build_checklist,
     build_command_cards,
@@ -214,3 +215,61 @@ class TestChecklist:
         checklist = build_checklist(OFFER)
         md = render_script_md(OFFER, checklist, [], EVIDENCE)
         assert "Steps described in the official terms" in md
+
+
+# ------------------------------------------------- wording guard (v0.33)
+
+
+class TestFormatWordingGuard:
+    """assert_format_wording covers EVERY format and language now: a language
+    swap (English → Urdu → Roman Urdu) can no longer bypass the outcome-claim
+    guard."""
+
+    IMPORT_OK = True
+
+    def test_official_explainer_still_blocks_english(self):
+        with pytest.raises(ScriptGateError, match="first-person"):
+            assert_format_wording("So yesterday I CLAIMED the offer and it worked.",
+                                  "official_explainer")
+
+    def test_official_explainer_blocks_urdu_script(self):
+        with pytest.raises(ScriptGateError, match="first-person"):
+            assert_format_wording("میں نے کلیم کیا اور یہ کام کر گیا۔",
+                                  "official_explainer")
+
+    def test_official_explainer_blocks_roman_urdu(self):
+        with pytest.raises(ScriptGateError, match="first-person"):
+            assert_format_wording("Maine claim kiya aur yeh kaam kar gaya.",
+                                  "official_explainer")
+
+    def test_official_explainer_allows_neutral_explainer(self):
+        assert_format_wording(
+            "The provider's official terms state the eligibility rules. "
+            "This video explains the published terms.", "official_explainer")
+
+    def test_tested_tutorial_allows_testing_wording(self):
+        assert_format_wording(
+            "I tested the setup steps for this offer on a real account; "
+            "here is where the setup can fail.", "tested_tutorial")
+
+    def test_tested_tutorial_blocks_approved_claim_english(self):
+        with pytest.raises(ScriptGateError, match="unproven outcome"):
+            assert_format_wording("My claim approved within minutes and "
+                                  "I received the reward.", "tested_tutorial")
+
+    def test_tested_tutorial_blocks_approved_claim_roman_urdu(self):
+        with pytest.raises(ScriptGateError, match="unproven outcome"):
+            assert_format_wording("Claim approve ho gaya aur paisay mil gaye.",
+                                  "tested_tutorial")
+
+    def test_tested_tutorial_blocks_approved_claim_urdu(self):
+        with pytest.raises(ScriptGateError, match="unproven outcome"):
+            assert_format_wording("کلیم منظور ہو گیا اور رقم موصول ہو گئی۔",
+                                  "tested_tutorial")
+
+    def test_claim_walkthrough_first_person_is_the_point(self):
+        """A demonstrated-claim walkthrough documents a reviewer-attested
+        claim — first-person wording is expected; the CAPTURE binds the
+        evidence, not the wording."""
+        assert_format_wording("I claimed this offer — here is the real proof.",
+                              "claim_walkthrough")

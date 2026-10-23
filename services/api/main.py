@@ -208,6 +208,19 @@ async def create_source(source: SourceIn) -> dict:
         source.trust_tier,
         source.enabled,
     )
+    # Durable owed-work record: every enabled source owes recurring collection.
+    # The collector claims these (v0.33); the list sweep remains the fallback.
+    if source.enabled:
+        await pool.execute(
+            """
+            INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts, run_after)
+            VALUES ('collect', $1, $2::jsonb, $3, 5, now())
+            ON CONFLICT (dedupe_key) DO NOTHING
+            """,
+            row["id"],
+            _json({"provider": source.provider, "adapter": source.adapter}),
+            f"collect:{row['id']}",
+        )
     return {"id": row["id"], "created": True}
 
 
@@ -275,7 +288,11 @@ async def revoke_tos_review(source_id: uuid.UUID, request: Request,
 
 @app.post("/sources/{source_id}/poll-result")
 async def poll_result(source_id: uuid.UUID, result: PollResult) -> dict:
-    """Collectors report back after each poll → updates last_checked_at and health."""
+    """Collectors report back after each poll → updates last_checked_at and health.
+
+    A healthy poll also RE-ARMS the durable `collect` job with the source's
+    cadence (the queue only wakes the collector when the next poll is due);
+    a failed poll retries sooner. The cadence sweep stays as the fallback."""
     pool = db.get()
     row = await pool.fetchrow(
         """
@@ -283,13 +300,38 @@ async def poll_result(source_id: uuid.UUID, result: PollResult) -> dict:
         SET last_checked_at = now(),
             config = config || $2::jsonb
         WHERE id = $1
-        RETURNING id
+        RETURNING id, enabled,
+                  COALESCE(EXTRACT(epoch FROM polling_cadence)::int, 21600) AS cadence_s
         """,
         source_id,
         _json({"health": {"ok": result.ok, "detail": result.detail}}),
     )
     if not row:
         raise HTTPException(status_code=404, detail="source not found")
+    if row["enabled"]:
+        # Recurring job contract: healthy poll → pending with the source's
+        # cadence and a fresh attempt budget; failed poll → pending sooner,
+        # keeping the attempt count so 5 consecutive failures dead-letter the
+        # job into operator attention. The success path also clears any stale
+        # claim lease, so a worker lost mid-poll cannot wedge the source.
+        delay_s = row["cadence_s"] if result.ok else 300
+        await pool.execute(
+            """
+            INSERT INTO jobs (kind, entity_id, payload, dedupe_key, max_attempts, run_after)
+            VALUES ('collect', $1, '{}'::jsonb, $2, 5, now() + make_interval(secs => $3::int))
+            ON CONFLICT (dedupe_key) DO UPDATE
+            SET status = CASE
+                    WHEN $4 THEN 'pending'
+                    WHEN jobs.attempts >= 5 THEN 'dead'
+                    ELSE 'pending' END,
+                run_after = now() + make_interval(secs => $3::int),
+                attempts = CASE WHEN $4 THEN 0 ELSE jobs.attempts END,
+                last_error = $5,
+                lease_holder = NULL, lease_expires_at = NULL, updated_at = now()
+            """,
+            source_id, f"collect:{source_id}", delay_s, result.ok,
+            (result.detail or None),
+        )
     return {"id": row["id"], "last_checked_at": datetime.now(timezone.utc).isoformat()}
 
 

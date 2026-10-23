@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
@@ -215,6 +215,34 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
                 job_id, body.detail, body.retry_after_s,
             )
             return {"id": str(job_id), "status": "pending"}
+
+
+@router.post("/jobs/{job_id}/retry")
+async def retry(job_id: uuid.UUID, request: Request) -> dict:
+    """Revive a dead or stuck job: fresh attempt budget, due immediately.
+
+    Dead jobs surface in /attention (kind `job`); this is the operator's
+    un-wedge action. Available to humans and service identities (recurring
+    collect jobs also self-revive via a healthy poll-result re-arm)."""
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        UPDATE jobs SET status = 'pending', attempts = 0, last_error = NULL,
+               lease_holder = NULL, lease_expires_at = NULL,
+               run_after = now(), updated_at = now()
+        WHERE id = $1 AND status IN ('dead', 'failed')
+        RETURNING id, status::text AS status
+        """,
+        job_id,
+    )
+    if not row:
+        existing = await pool.fetchval("SELECT status::text FROM jobs WHERE id = $1", job_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="job not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"job is '{existing}' — only dead or failed jobs can be retried")
+    return {"id": str(row["id"]), "status": row["status"]}
 
 
 @router.get("/jobs/stuck")

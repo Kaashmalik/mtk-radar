@@ -4,6 +4,7 @@ tiny keyed JSONB store:
 
   GET  /settings/{key}          → {key, value} (null when unset)
   PUT  /settings/{key}          → upsert {key, value, updated_by} (audited)
+  POST /settings/test-notification → human-only webhook delivery probe
 
 Known keys (validated on write):
   publish_windows   → {"windows": ["18:00", "20:30"]}
@@ -15,8 +16,13 @@ Known keys (validated on write):
 
 from typing import Any
 
+import json
+import os
+import urllib.error
+import urllib.request
+
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import db
 from api_hardening import effective_reviewer
@@ -254,6 +260,55 @@ async def put_setting(key: str, body: SettingIn, request: Request) -> dict:
     await audit(pool, actor=updated_by, action="settings:update", entity="settings",
                 detail={"key": key, "value": normalized})
     return {"key": key, "value": normalized, "updated_by": updated_by}
+
+
+class TestNotificationRequest(BaseModel):
+    message: str = Field(default="Test notification from the MTK RADAR dashboard.",
+                         max_length=300)
+
+
+@router.post("/test-notification")
+async def test_notification(request: Request, body: TestNotificationRequest) -> dict:
+    """Fire one test webhook using the monitor worker's env configuration.
+
+    A notification probe sends an OUTWARD message, so it is human-only (a
+    machine credential can never use the API to spam the webhook). Honest
+    result contract: `configured: false` means no webhook is configured in
+    this environment — it never pretends delivery succeeded. The SMTP email
+    path is testable with `python workers/monitor/main.py --test-notification`
+    (the API image intentionally has no SMTP credentials)."""
+    effective_reviewer(request, None, require=True)
+
+    url = os.environ.get("MTK_NOTIFY_WEBHOOK_URL", "").strip()
+    if not url:
+        return {
+            "configured": False,
+            "ok": False,
+            "detail": "MTK_NOTIFY_WEBHOOK_URL is not set in this environment — "
+                      "set it in infra/.env and restart the API/monitor to test delivery",
+        }
+    token = os.environ.get("MTK_NOTIFY_WEBHOOK_TOKEN", "").strip()
+    payload = json.dumps({
+        "severity": "info",
+        "event": "settings.test",
+        "message": body.message,
+        "details": {"service": "settings", "note": "human-triggered delivery test"},
+    }).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        return {"configured": True, "ok": False,
+                "status": exc.code, "detail": f"webhook returned HTTP {exc.code}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"configured": True, "ok": False, "status": None,
+                "detail": f"webhook unreachable: {exc}"}
+    return {"configured": True, "ok": 200 <= status < 300, "status": status,
+            "detail": "test alert delivered to the configured webhook"}
 
 
 @router.get("", include_in_schema=False)
