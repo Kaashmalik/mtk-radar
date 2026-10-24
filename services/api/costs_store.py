@@ -383,16 +383,23 @@ _MEM_CACHE: dict[str, tuple[float, str]] = {}
 _MEM_MAX = 256
 
 
-async def _pg_cache_get(pool, key: str) -> Optional[Any]:
+async def _pg_cache_get(pool, key: str) -> tuple[Optional[Any], Optional[int]]:
+    """(value, remaining TTL seconds); ``(None, None)`` on a miss (G11: the
+    remaining expiry travels with the value so a promoted memory hit cannot
+    outlive its source row)."""
     row = await pool.fetchrow(
-        "SELECT value::text AS value FROM cache_entries "
-        "WHERE key = $1 AND expires_at > now()",
+        """
+        SELECT value::text AS value,
+               GREATEST(1, CEIL(EXTRACT(EPOCH FROM (expires_at - now()))))::int AS ttl_s
+        FROM cache_entries
+        WHERE key = $1 AND expires_at > now()
+        """,
         key,
     )
     if not row:
-        return None
+        return None, None
     import json as _json
-    return _json.loads(row["value"])
+    return _json.loads(row["value"]), int(row["ttl_s"])
 
 
 async def _pg_cache_put(pool, key: str, value: Any, ttl_s: int) -> None:
@@ -409,39 +416,57 @@ async def _pg_cache_put(pool, key: str, value: Any, ttl_s: int) -> None:
     )
 
 
+#: G11: a hit promoted from Redis/Postgres whose remaining TTL cannot be
+#: determined still gets a bounded memory lifetime (never the old bug where
+#: `_mem_put(key, value)` was called without its required ttl at all and the
+#: cache layer 500'd).
+_MEM_PROMOTED_TTL_S = 30
+
+
 async def cache_get(pool, key: str) -> Optional[Any]:
-    """Per-process memory → Redis → Postgres. Any failure → miss (fail-open)."""
+    """Per-process memory → Redis → Postgres. Any failure → miss (fail-open).
+
+    G11: every layer hit is promoted into the memory layer WITH its original
+    remaining expiry — a Redis hit carries `TTL`, a Postgres hit the
+    `expires_at` distance — so the cache both works and expires correctly.
+    """
     now = time.time()
     entry = _MEM_CACHE.get(key)
     if entry and entry[0] > now:
         import json as _json
         return _json.loads(entry[1])
 
-    from cache import cache_get_json
+    from cache import cache_get_json_with_ttl
     try:
-        value = await cache_get_json(key)
+        value, ttl_s = await cache_get_json_with_ttl(key)
     except Exception:  # noqa: BLE001
-        value = None
+        value, ttl_s = None, None
     if value is not None:
-        _mem_put(key, value)
+        _mem_put(key, value, ttl_s or _MEM_PROMOTED_TTL_S)
         return value
 
     try:
         if pool is not None:
-            value = await _pg_cache_get(pool, key)
+            value, pg_ttl = await _pg_cache_get(pool, key)
+        else:
+            value, pg_ttl = None, None
     except Exception:  # noqa: BLE001
-        value = None
+        value, pg_ttl = None, None
     if value is not None:
-        _mem_put(key, value)
+        _mem_put(key, value, pg_ttl or _MEM_PROMOTED_TTL_S)
     return value
 
 
-def _mem_put(key: str, value: Any, ttl_s: int) -> None:
+def _mem_put(key: str, value: Any, ttl_s: Optional[int] = None) -> None:
     import json as _json
+    try:
+        ttl = max(1, int(ttl_s or _MEM_PROMOTED_TTL_S))
+    except (TypeError, ValueError):
+        ttl = _MEM_PROMOTED_TTL_S
     if len(_MEM_CACHE) >= _MEM_MAX:
         oldest = min(_MEM_CACHE.items(), key=lambda kv: kv[1][0])[0]
         _MEM_CACHE.pop(oldest, None)
-    _MEM_CACHE[key] = (time.time() + max(1, int(ttl_s)),
+    _MEM_CACHE[key] = (time.time() + ttl,
                        _json.dumps(value, default=str))
 
 
