@@ -9,9 +9,27 @@ from the evidence it ranks:
     trend      live trend-candidate score when the row was promoted from a
                trend (0 for offer-only rows; the trend snapshot keeps the
                promotion-time score for the record)
-    evidence   min(100, 25 × evidence snapshots attached to the offer)
+    evidence   G15: support that is CURRENT and INDEPENDENT — snapshot VOLUME
+               counts for nothing. 0–100:
+                 support       40 when fresh evidence comes from the
+                               provider's own domain (`official`), 25 for
+                               fresh third-party evidence, 0 when a row's
+                               only support is stale snapshots
+                 claims        30 × (declared required claims covered by
+                               fresh evidence); if the offer declares no
+                               claims, nothing is demonstrated → 0
+                 independence  30 × min(1, distinct fresh-evidence sources / 2)
+               "Fresh" = captured within EVIDENCE_FRESH_DAYS, robots-permitted
+               and (when recorded) a 200 fetch — older snapshots are history,
+               not support.
     freshness  the trend's freshness score; neutral 50 when unknown
     fit        preset fit set by the operator (0–100); neutral 50 when unset
+
+SAFETY IS A HARD ELIGIBILITY GATE, not a rank input: a row whose offer is
+`expired`, `corrected` or back in `evidence_needed` never appears as ready,
+whatever its rank would be — only `candidate`, `verified`,
+`approved_for_video` and `published` offers stay listed, so ordering can
+never substitute for verification.
 
 Every weight is visible here and in the dashboard legend. A queue row is a
 proposal: verification (official evidence), capture recording, redaction
@@ -35,12 +53,33 @@ router = APIRouter(tags=["queue"])
 
 RANK_WEIGHTS = {"trend": 0.35, "evidence": 0.30, "freshness": 0.20, "fit": 0.15}
 
+#: Evidence older than this is history, not current support (G15).
+EVIDENCE_FRESH_DAYS = 14
+
+#: Offers in these states are eligible to sit on the ready queue; anything
+#: else (expired/corrected/demoted to evidence_needed) is a hard exclusion.
+ELIGIBLE_OFFER_STATES = ("candidate", "verified", "approved_for_video", "published")
+
+#: The offer fields a reviewer must be able to support with evidence (G15):
+#: exactly the claims the offer DECLARES. Computed in SQL for recomputability.
+_REQUIRED_CLAIMS_SQL = """
+    array_remove(ARRAY[
+        CASE WHEN o.promo_code IS NOT NULL THEN 'promo_code' END,
+        CASE WHEN o.redemption_url IS NOT NULL THEN 'redemption_url' END,
+        CASE WHEN o.eligibility <> '{}'::jsonb AND o.eligibility IS NOT NULL
+             THEN 'eligibility' END,
+        CASE WHEN o.value <> '{}'::jsonb AND o.value IS NOT NULL
+             THEN 'value' END,
+        CASE WHEN jsonb_array_length(o.claim_steps) > 0 THEN 'claim_steps' END
+    ], NULL)
+"""
+
 #: Expression shared by every list query so the documented formula lives in
 #: exactly one place. Aliases must match the returned column names.
 _RANK_SQL = """
     ROUND(
         {trend:.2f} * COALESCE(t.score, 0)
-      + {evidence:.2f} * LEAST(100, 25 * COUNT(e.id))
+      + {evidence:.2f} * COALESCE(ev.component, 0)
       + {freshness:.2f} * COALESCE(t.freshness_score, 50)
       + {fit:.2f} * COALESCE(q.preset_fit, 50)
     , 2)
@@ -95,15 +134,55 @@ async def list_production_queue(
                    (SELECT COUNT(*)::int FROM evidence e
                      WHERE e.offer_id = q.offer_id)
                      AS evidence_count,
+                   CASE WHEN COALESCE(ev.fresh_count, 0) > 0 THEN true
+                        ELSE false END AS has_current_evidence,
+                   COALESCE(ev.component, 0) AS evidence_score,
                    ({_RANK_SQL}) AS rank,
                    ({_ORDER_SQL}) AS order_val
             FROM production_queue q
             LEFT JOIN offers o ON o.id = q.offer_id
             LEFT JOIN trend_candidates t ON t.id = q.trend_id
-            LEFT JOIN evidence e ON e.offer_id = q.offer_id
+            LEFT JOIN LATERAL (
+                SELECT {_REQUIRED_CLAIMS_SQL} AS required
+            ) req ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::int AS fresh_count,
+                    BOOL_OR(e.official) AS has_official,
+                    COUNT(DISTINCT e.source_id)::int AS independent,
+                    CASE WHEN COUNT(*) = 0 THEN 0::numeric
+                    ELSE ROUND(
+                          (CASE WHEN BOOL_OR(e.official) THEN 40.0 ELSE 25.0 END)
+                        + 30.0 * CASE WHEN cardinality(req.required) = 0
+                                 THEN 0.0
+                                 ELSE LEAST(1.0,
+                                      (SELECT COUNT(DISTINCT fld)::numeric
+                                       FROM evidence e2
+                                       CROSS JOIN LATERAL jsonb_array_elements_text(
+                                           COALESCE(e2.supported_fields, '[]'::jsonb)
+                                       ) AS fld
+                                       WHERE e2.offer_id = q.offer_id
+                                         AND e2.captured_at
+                                             > now() - make_interval(
+                                                   days => {EVIDENCE_FRESH_DAYS})
+                                         AND COALESCE(e2.robots_allowed, TRUE)
+                                         AND (e2.fetch_status IS NULL
+                                              OR e2.fetch_status = 200)
+                                         AND fld = ANY (req.required))
+                                      / cardinality(req.required))
+                                 END
+                        + 30.0 * LEAST(1.0,
+                              COUNT(DISTINCT e.source_id)::numeric / 2.0)
+                    , 2) END AS component
+                FROM evidence e
+                WHERE e.offer_id = q.offer_id
+                  AND e.captured_at > now() - make_interval(days => {EVIDENCE_FRESH_DAYS})
+                  AND COALESCE(e.robots_allowed, TRUE)
+                  AND (e.fetch_status IS NULL OR e.fetch_status = 200)
+            ) ev ON TRUE
             WHERE q.status = 'ready'
-            GROUP BY q.id, o.state, o.expires_at, t.score, t.freshness_score,
-                     t.velocity, t.corroboration
+              -- G15: safety is a hard eligibility gate, not a rank input.
+              AND (o.id IS NULL OR o.state::text IN {ELIGIBLE_OFFER_STATES!r})
         )
         SELECT * FROM ranked
         WHERE ($2::float8 IS NULL OR (order_val, id) < ($2::float8, $3::uuid))
@@ -138,6 +217,8 @@ async def list_production_queue(
                 "velocity": row["velocity"],
                 "corroboration": row["corroboration"],
                 "evidence_count": row["evidence_count"] or 0,
+                "evidence_score": float(row["evidence_score"] or 0),
+                "has_current_evidence": row["has_current_evidence"],
                 "preset_fit": row["preset_fit"],
                 "rank_pinned": row["rank_pinned"],
                 "rank": float(row["rank"]),
@@ -274,19 +355,43 @@ async def expire_production_queue(request: Request) -> dict:
             )
             trend_cooled = await conn.fetch(
                 """
+                -- G16: cooling duration is measured from the last MEANINGFUL
+                -- growth, never from the last observation — a rescan cadence
+                -- keeps observations fresh but cannot reset a cooling trend.
                 WITH latest AS (
-                    SELECT DISTINCT ON (o1.candidate_id)
-                        o1.candidate_id, o1.velocity, o1.observed_at
-                    FROM trend_observations o1
-                    ORDER BY o1.candidate_id, o1.observed_at DESC
+                    SELECT DISTINCT ON (candidate_id)
+                        candidate_id, velocity
+                    FROM trend_observations
+                    ORDER BY candidate_id, observed_at DESC
+                ),
+                last_growth AS (
+                    SELECT DISTINCT ON (candidate_id)
+                        candidate_id, observed_at AS last_growth_at
+                    FROM trend_observations
+                    WHERE velocity > 0
+                    ORDER BY candidate_id, observed_at DESC
+                ),
+                first_seen AS (
+                    SELECT candidate_id, MIN(observed_at) AS first_at
+                    FROM trend_observations
+                    GROUP BY candidate_id
+                ),
+                cooling AS (
+                    SELECT l.candidate_id,
+                           COALESCE(g.last_growth_at, f.first_at)
+                               AS cooling_since,
+                           l.velocity AS latest_velocity
+                    FROM latest l
+                    LEFT JOIN last_growth g ON g.candidate_id = l.candidate_id
+                    LEFT JOIN first_seen f ON f.candidate_id = l.candidate_id
                 ),
                 dead AS (
                     SELECT q.id
                     FROM production_queue q
-                    JOIN latest l ON l.candidate_id = q.trend_id
+                    JOIN cooling c ON c.candidate_id = q.trend_id
                     WHERE q.status = 'ready'
-                      AND l.velocity <= 0
-                      AND l.observed_at < now() - interval '7 days'
+                      AND c.latest_velocity <= 0
+                      AND c.cooling_since < now() - interval '7 days'
                     FOR UPDATE OF q SKIP LOCKED
                 )
                 UPDATE production_queue q

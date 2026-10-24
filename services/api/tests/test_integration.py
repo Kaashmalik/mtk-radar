@@ -5507,3 +5507,178 @@ def test_corroboration_counts_independent_sources_across_urls(client, source):
     for c in cands:
         assert c["corroboration"] == 2, \
             f"{c['url']}: both independent providers must be counted"
+
+
+# ------------- EP-02 G16: cooling duration measured from last real growth
+
+def test_trend_cooling_measured_from_last_growth_not_last_observation(client):
+    """G16 acceptance: a trend observed EVERY day stays 'fresh' under the old
+    last-observation rule even while it has been cooling for a week — the
+    rescan cadence itself kept resetting the clock. Cooling must run from the
+    last MEANINGFUL growth:
+
+    - growth 8 days ago, then daily flat/negative rescans (latest FRESH) →
+      archived as trend_cooled;
+    - same cadence but the last growth was only 3 days ago → stays ready.
+    """
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+
+    def _fixture(tag, growth_age_days):
+        trend_id = _mk_trend(f"{marker}-{tag}")
+        # One meaningful growth observation, `growth_age_days` ago...
+        _run(
+            "INSERT INTO trend_observations (candidate_id, score, velocity, sources, "
+            "observed_at) VALUES ($1, 60, 2.0, 1, "
+            "now() - ($2 || ' days')::interval)",
+            trend_id, str(growth_age_days),
+        )
+        # ...then a DAILY non-positive rescan cadence up to RIGHT NOW (the
+        # latest observation is fresh — it must not reset the cooling clock).
+        for day in range(growth_age_days - 1, -1, -1):
+            _run(
+                "INSERT INTO trend_observations (candidate_id, score, velocity, "
+                "sources, observed_at) VALUES ($1, 55, -0.25, 1, "
+                "now() - ($2 || ' days')::interval)",
+                trend_id, str(day),
+            )
+        _run("INSERT INTO production_queue (trend_id, title) VALUES ($1, $2)",
+             trend_id, f"row-{tag} {marker}")
+        return trend_id
+
+    _fixture("cool8", growth_age_days=8)   # cooling for over a week
+    _fixture("cool3", growth_age_days=3)   # recently still growing
+
+    expiry = client.post("/production-queue/expire", headers=SVC)
+    assert expiry.status_code == 200, expiry.text
+
+    rows = _run(
+        """
+        SELECT title, status, archived_reason
+        FROM production_queue WHERE title LIKE '%' || $1
+        """,
+        marker,
+    )
+    states = {r["title"].split()[0]: (r["status"], r["archived_reason"]) for r in rows}
+    assert states["row-cool8"] == ("archived", "trend_cooled"), \
+        "8 days of cooling with FRESH observations must still archive"
+    assert states["row-cool3"][0] == "ready", \
+        "a trend cooling for only 3 days must stay ready"
+
+
+# ------------- EP-02 G15: evidence score = current, independent, claim-covering
+
+def test_queue_evidence_component_claims_independence_and_safety_gate(client):
+    """G15 acceptance: snapshot VOLUME counts for nothing — support must be
+    CURRENT (fresh window), INDEPENDENT (distinct sources), and COVER the
+    claims the offer declares. And the safety gate is hard: an offer outside
+    the eligible states never appears on the ready list, whatever its rank.
+
+      official fresh support            → 40
+      + 30 × declared-claims covered    → 0–30
+      + 30 × min(1, distinct sources/2) → 0–30
+    """
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+
+    src_a = _run(
+        "INSERT INTO sources (provider, canonical_domain, category, adapter, "
+        "config, trust_tier) VALUES ($1, 'official.example', 'domains_hosting', "
+        "'page_watch', '{}'::jsonb, 'A_provider_owned') RETURNING id",
+        f"Official Press {marker}",
+    )[0]["id"]
+    src_b = _run(
+        "INSERT INTO sources (provider, canonical_domain, category, adapter, "
+        "config, trust_tier) VALUES ($1, 'blog.example', 'domains_hosting', "
+        "'rss', '{}'::jsonb, 'B_discovery_lead') RETURNING id",
+        f"Indie Blog {marker}",
+    )[0]["id"]
+
+    # --- fully supported row: official fresh evidence + BOTH sources cover
+    # the one claim the offer declares (promo_code) → component 100.
+    good_offer = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state, "
+        "promo_code) VALUES ($1, 'Acme', 'domains_hosting', 'free_trial', "
+        "'verified', $2) RETURNING id",
+        f"Supported offer {marker}", "SAVE10",
+    )[0]["id"]
+    _run("INSERT INTO production_queue (offer_id, title) VALUES ($1, $2)",
+         good_offer, f"row-supported {marker}")
+    _run(
+        "INSERT INTO evidence (offer_id, source_id, url, content_hash, official, "
+        "supported_fields, robots_url, robots_checked_at, robots_allowed, "
+        "fetch_status) VALUES ($1, $2, 'https://official.example/x', $3, TRUE, "
+        "'[\"promo_code\"]'::jsonb, 'https://official.example/robots.txt', now(), "
+        "TRUE, 200)",
+        good_offer, src_a, f"hash-a-{marker}",
+    )
+    _run(
+        "INSERT INTO evidence (offer_id, source_id, url, content_hash, official, "
+        "supported_fields, robots_url, robots_checked_at, robots_allowed, "
+        "fetch_status) VALUES ($1, $2, 'https://blog.example/x', $3, FALSE, "
+        "'[\"promo_code\"]'::jsonb, 'https://blog.example/robots.txt', now(), "
+        "TRUE, 200)",
+        good_offer, src_b, f"hash-b-{marker}",
+    )
+
+    # --- stale-only row: one snapshot, but outside the 14-day fresh window →
+    # recorded history, zero CURRENT support.
+    stale_offer = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state) "
+        "VALUES ($1, 'Acme', 'domains_hosting', 'free_trial', 'verified') "
+        "RETURNING id",
+        f"Stale offer {marker}",
+    )[0]["id"]
+    _run("INSERT INTO production_queue (offer_id, title) VALUES ($1, $2)",
+         stale_offer, f"row-stale {marker}")
+    _run(
+        "INSERT INTO evidence (offer_id, url, content_hash, official, "
+        "captured_at, robots_url, robots_checked_at, robots_allowed, "
+        "fetch_status) VALUES ($1, 'https://official.example/old', $2, TRUE, "
+        "now() - interval '30 days', 'https://official.example/robots.txt', "
+        "now() - interval '30 days', TRUE, 200)",
+        stale_offer, f"hash-old-{marker}",
+    )
+
+    # --- unsafe row: expired offer WITH fresh official evidence — the safety
+    # gate must exclude it from the ready list regardless of its evidence.
+    dead_offer = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state, "
+        "promo_code) VALUES ($1, 'Acme', 'domains_hosting', 'free_trial', "
+        "'expired', 'SAVE99') RETURNING id",
+        f"Expired offer {marker}",
+    )[0]["id"]
+    _run("INSERT INTO production_queue (offer_id, title) VALUES ($1, $2)",
+         dead_offer, f"row-dead {marker}")
+    _run(
+        "INSERT INTO evidence (offer_id, url, content_hash, official, "
+        "supported_fields, robots_url, robots_checked_at, robots_allowed, "
+        "fetch_status) VALUES ($1, 'https://official.example/expired', $2, TRUE, "
+        "'[\"promo_code\"]'::jsonb, 'https://official.example/robots.txt', now(), "
+        "TRUE, 200)",
+        dead_offer, f"hash-dead-{marker}",
+    )
+
+    listed = client.get("/production-queue").json()["queue"]
+    by_title = {q["title"]: q for q in listed}
+    titles = set(by_title)
+
+    assert f"row-dead {marker}" not in titles, \
+        "expired offers are a HARD exclusion — rank cannot buy them back"
+
+    supported = by_title[f"row-supported {marker}"]
+    # 40 (official) + 30 (1/1 claims) + 30 (2 distinct sources) = 100.
+    assert float(supported["evidence_score"]) == 100.0, supported["evidence_score"]
+    assert supported["has_current_evidence"] is True
+
+    stale = by_title[f"row-stale {marker}"]
+    assert int(stale["evidence_count"]) == 1, "history is still counted/reportable"
+    assert float(stale["evidence_score"]) == 0.0, \
+        "stale-only support demonstrates nothing CURRENT"
+    assert stale["has_current_evidence"] is False
+
+    # Ordering follows the evidence: the supported row outranks the stale one.
+    order = [q["title"] for q in listed]
+    assert order.index(f"row-supported {marker}") < order.index(f"row-stale {marker}")
