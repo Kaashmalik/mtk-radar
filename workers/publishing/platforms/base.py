@@ -21,6 +21,17 @@ class NotConfiguredError(RuntimeError):
     """Platform credentials missing — skip the post without a failure state."""
 
 
+class UnsupportedPrivacyError(RuntimeError):
+    """The adapter cannot honor the requested privacy mode (G01).
+
+    Raised BEFORE any publishing side effect: platform capabilities differ
+    (Instagram's Content Publishing has no per-post private/unpublished mode;
+    TikTok unaudited visibility is rejected outright). Callers must treat this
+    as a scheduling mistake to fix, never retry it, and never work around it
+    by publishing anyway.
+    """
+
+
 class TransportUnauthorized(Exception):
     """HTTP 401/invalid-token inside one attempt; adapters translate + retry."""
 

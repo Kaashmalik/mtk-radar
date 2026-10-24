@@ -181,6 +181,45 @@ def _pause_calls(api):
 # ---------------------------------------------------------------- gates
 
 
+def test_unsupported_privacy_blocks_before_attempt_claim():
+    """G01 (evidence-to-video plan): an adapter that cannot honor the
+    requested privacy mode must be refused before the attempt claim and any
+    side effect — held+paused like a hash mismatch, upload never attempted."""
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+
+    class NoPrivateAdapter(FakeAdapter):
+        @staticmethod
+        def supports_privacy(privacy):
+            return privacy == "public"
+
+    adapter = NoPrivateAdapter()
+    post = _post(render)  # fixture privacy is 'private'
+    assert p._publish(post, {"youtube": adapter}) is False
+    assert adapter.uploads == [], "upload must never be attempted for unsupported privacy"
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False and result["hold"] is True
+    assert "cannot publish with privacy='private'" in result["detail"]
+    assert _pause_calls(p.api), "the post must be paused for an operator decision"
+    # no attempt token may be claimed — a refusal is not an upload attempt
+    assert not [c for c in p.api.calls if c[0] == "POST" and c[1].endswith("/attempt")]
+
+
+def test_supported_privacy_passes_the_pre_flight_check():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+
+    class PublicOnlyAdapter(FakeAdapter):
+        @staticmethod
+        def supports_privacy(privacy):
+            return True  # capability covers the requested mode
+
+    adapter = PublicOnlyAdapter()
+    post = _post(render)  # still 'private' here — the capability check itself passes
+    assert p._publish(post, {"youtube": adapter}) is True
+    assert len(adapter.uploads) == 1
+
+
 def test_happy_path_publishes_when_hash_pins_and_offer_valid():
     render = _render("APPROVED")
     p = _publisher(_healthy_offer(), [render])
