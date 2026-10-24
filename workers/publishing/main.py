@@ -58,12 +58,27 @@ from platforms import (  # noqa: E402
     InstagramAdapter,
     NotConfiguredError,
     OAuthConfig,
+    RateLimited,
     TikTokAdapter,
     TikTokConfig,
     TokenExpiredError,
     TransportUnauthorized,
     YouTubeAdapter,
 )
+
+def _facebook_exchange(token: str, app_id: str, secret: str) -> dict:
+    """Long-lived Page token exchange (WP-G §5.6.1) — thin module bridge."""
+    from platforms.facebook import exchange_long_lived_token
+    return exchange_long_lived_token(token, app_id, secret)
+
+
+def _instagram_exchange(token: str, app_id: str, secret: str) -> dict:
+    """Long-lived Instagram token exchange (WP-G §5.6.1) — same Graph grant.
+    The IG professional account inherits the Page's FB token mechanics."""
+    from platforms.base import exchange_long_lived_token
+    from platforms.instagram import GRAPH_ENDPOINT
+    return exchange_long_lived_token(GRAPH_ENDPOINT, token, app_id, secret)
+
 
 API_URL_DEFAULT = "http://localhost:8000"
 SWEEP_INTERVAL_S = 60
@@ -307,9 +322,136 @@ class Publisher:
             return 0
         try:
             drained = self._drain_publish_jobs(now)
+            self.token_maintenance(now)
             return drained + self._sweep(now)
         finally:
             self._release_sweep_lock("publishing")
+
+    # ------------------------------------------- token lifecycle (WP-G §5.6.1)
+
+    #: Meta long-lived tokens last ~60 days; renew well before the cliff so a
+    #: two-week outage never leaves a dead token nobody noticed.
+    TOKEN_REFRESH_CADENCE_D = int(os.environ.get("MTK_TOKEN_REFRESH_CADENCE_D", "45"))
+    TOKEN_REFRESH_MARGIN_D = int(os.environ.get("MTK_TOKEN_REFRESH_MARGIN_D", "14"))
+    #: At most one maintenance attempt per account per day (a refusal must
+    #: not become a per-sweep hammering loop against the OAuth endpoint).
+    TOKEN_RETRY_AFTER_FAIL_S = 86400
+
+    def token_maintenance(self, now: datetime) -> int:
+        """Renew Facebook/Instagram long-lived tokens on a ~45-day cadence.
+
+        Meta's `fb_exchange_token` grant extends the token WITHOUT re-auth
+        while the app id/secret are configured (TikTok/YouTube refresh
+        themselves in-flight already). On success the new expiry goes to
+        /platform-accounts/{id}/refreshed; on refusal the account is marked
+        expired — which surfaces in Needs-You — never a silent stall.
+        """
+        self._token_next_try: dict[str, float] = getattr(self, "_token_next_try", {})
+        try:
+            accounts = self.api.get("/platform-accounts").json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.debug("token maintenance skipped (accounts unreachable): %s", exc)
+            return 0
+        if not isinstance(accounts, list):
+            return 0
+        refreshed = 0
+        for account in accounts:
+            if account.get("platform") not in ("facebook", "instagram"):
+                continue  # youtube/tiktok refresh in-flight (on_refresh hooks)
+            if account.get("status") not in (None, "active"):
+                continue
+            account_id = str(account.get("id") or "")
+            if not account_id:
+                continue
+            due_at = self._token_next_try.get(account_id, 0)
+            if now.timestamp() < due_at:
+                continue
+            if not self._token_due(account, now):
+                continue
+            self._token_next_try[account_id] = now.timestamp() + self.TOKEN_RETRY_AFTER_FAIL_S
+            if self._refresh_account(account):
+                refreshed += 1
+        if refreshed:
+            log.info("token maintenance: %d long-lived token(s) renewed", refreshed)
+        return refreshed
+
+    def _token_due(self, account: dict, now: datetime) -> bool:
+        """Inside the refresh window? Missing expiry = due after the cadence
+        since the last refresh (or immediately when never refreshed)."""
+        margin = timedelta(days=self.TOKEN_REFRESH_MARGIN_D)
+        expires_at = account.get("expires_at")
+        if expires_at:
+            try:
+                when = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                return now + margin >= when
+            except ValueError:
+                return True  # unparseable expiry — check rather than trust
+        last = account.get("last_refreshed_at") or account.get("created_at")
+        if not last:
+            return True
+        try:
+            when = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return now - when >= timedelta(days=self.TOKEN_REFRESH_CADENCE_D)
+
+    def _refresh_account(self, account: dict) -> bool:
+        """Exchange one account's long-lived token; report success/failure."""
+        account_id = str(account["id"])
+        platform = account.get("platform")
+        prefix = str(account.get("credential_source") or "").split(":", 1)[-1].rstrip("_*") + "_"
+        if platform == "facebook":
+            token = os.environ.get(f"{prefix}PAGE_ACCESS_TOKEN", "")
+            app_id = (os.environ.get(f"{prefix}APP_ID")
+                      or os.environ.get("FACEBOOK_APP_ID") or "")
+            secret = (os.environ.get(f"{prefix}APP_SECRET")
+                      or os.environ.get("FACEBOOK_APP_SECRET") or "")
+        else:
+            token = os.environ.get(f"{prefix}ACCESS_TOKEN", "")
+            app_id = (os.environ.get(f"{prefix}APP_ID")
+                      or os.environ.get("INSTAGRAM_APP_ID")
+                      or os.environ.get("FACEBOOK_APP_ID") or "")
+            secret = (os.environ.get(f"{prefix}APP_SECRET")
+                      or os.environ.get("INSTAGRAM_APP_SECRET")
+                      or os.environ.get("FACEBOOK_APP_SECRET") or "")
+        if not (token and app_id and secret):
+            log.info("account %s (%s): token maintenance skipped — APP_ID/APP_SECRET "
+                     "not configured; the monitor stays the expiry fallback",
+                     account_id, platform)
+            return False
+        try:
+            from platforms.base import exchange_long_lived_token
+            if platform == "instagram":
+                result = _instagram_exchange(token, app_id, secret)
+            else:
+                result = _facebook_exchange(token, app_id, secret)
+        except (TokenExpiredError, httpx.HTTPError) as exc:
+            log.error("ALERT: token maintenance refused for %s account %s (%s) — "
+                      "account marked expired for operator attention", platform,
+                      account_id, exc)
+            try:
+                self.api.post(f"/platform-accounts/{account_id}/mark-expired",
+                              json={"detail": f"token maintenance failed: {exc}"})
+            except httpx.HTTPError:
+                pass
+            return False
+        expires_at = result.get("expires_at")
+        try:
+            self.api.post(
+                f"/platform-accounts/{account_id}/refreshed",
+                json={"expires_at": expires_at.isoformat()
+                      if hasattr(expires_at, "isoformat") else str(expires_at or "")},
+            )
+        except httpx.HTTPError as exc:
+            log.warning("account %s: could not report renewed expiry: %s", account_id, exc)
+        log.info("account %s (%s): long-lived token renewed; expires %s",
+                 account_id, platform,
+                 expires_at.date().isoformat() if hasattr(expires_at, "date") else expires_at)
+        return True
 
     # ------------------------------------ durable jobs queue drain (v0.33)
     # "Owed work" is recorded in the jobs table (028) and enqueued at
@@ -597,6 +739,12 @@ class Publisher:
                          post["id"], attempts)
                 continue
             delay = retry_base * (2 ** attempts)
+            # WP-G: the last failure may carry the platform's own retry-after
+            # (RateLimited). Never requeue sooner than the server said, even
+            # when our exponential backoff is already shorter.
+            server_after = self._server_retry_after(post)
+            if server_after is not None:
+                delay = max(delay, server_after)
             updated = post.get("updated_at")
             if updated:
                 tried = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
@@ -1003,6 +1151,19 @@ class Publisher:
             self._report(post["id"], ok=False, hold=True, attempt_token=attempt_token,
                          detail=str(exc))
             return False
+        except RateLimited as exc:
+            # WP-G: the platform refused the call with a rate limit — the
+            # post is NOT published (no duplicate risk) and auto-retry may
+            # requeue it, but only after the server-shaped delay. Recorded in
+            # outcome_detail so `retry_failed` waits max(backoff, retry_after).
+            log.warning("schedule %s: %s rate limited (retry after %ss) — failed, "
+                        "auto-retry honors the server delay", post["id"], platform,
+                        exc.retry_after_s or "its own backoff")
+            self._report(post["id"], ok=False, attempt_token=attempt_token,
+                         remote_post_id=remote_id,
+                         detail=f"platform rate limit: {exc}",
+                         retry_after_s=exc.retry_after_s)
+            return False
         except Exception as exc:  # noqa: BLE001
             # The upload/confirmation may have reached the platform. Hold for
             # a human instead of risking a duplicate auto-retry.
@@ -1061,6 +1222,23 @@ class Publisher:
                                 "the upload is bound to reviewed bytes")
             return False
         return local
+
+    @staticmethod
+    def _server_retry_after(post: dict) -> int | None:
+        """The platform-provided delay recorded with the last failure (WP-G)."""
+        detail = post.get("outcome_detail")
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(detail, dict):
+            return None
+        try:
+            value = int(detail.get("retry_after_s"))
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
 
     @staticmethod
     def _is_held(post: dict) -> bool:
@@ -1135,16 +1313,19 @@ class Publisher:
                 remote_url: str | None = None,
                 remote_processing_state: str | None = None,
                 remote_privacy: str | None = None,
-                remote_metadata: dict | None = None) -> None:
-        try:
-            res = self.api.post(
-                f"/schedules/{schedule_id}/result",
-                json={"ok": ok, "remote_post_id": remote_post_id, "detail": detail,
+                remote_metadata: dict | None = None,
+                retry_after_s: int | None = None) -> None:
+        body: dict = {"ok": ok, "remote_post_id": remote_post_id, "detail": detail,
                       "hold": hold, "attempt_token": attempt_token,
                       "confirmed": confirmed, "remote_url": remote_url,
                       "remote_processing_state": remote_processing_state,
                       "remote_privacy": remote_privacy,
-                      "remote_metadata": remote_metadata or {}},
+                      "remote_metadata": remote_metadata or {}}
+        if retry_after_s is not None:
+            body["retry_after_s"] = max(0, min(int(retry_after_s), 7 * 86400))
+        try:
+            res = self.api.post(
+                f"/schedules/{schedule_id}/result", json=body,
             )
             if getattr(res, "status_code", 200) >= 300:
                 log.error("result for %s refused (%s)", schedule_id,

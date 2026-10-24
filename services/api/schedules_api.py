@@ -130,6 +130,10 @@ class ScheduleResultIn(BaseModel):
     remote_processing_state: Optional[str] = None
     remote_privacy: Optional[str] = None
     remote_metadata: dict = Field(default_factory=dict)
+    # WP-G: when the platform throttled the upload, the worker reports the
+    # server-provided delay here; it lands in outcome_detail so the retry
+    # sweep waits max(its own backoff, this) before requeueing.
+    retry_after_s: Optional[int] = Field(default=None, ge=0, le=7 * 86400)
 
 
 # ---------------------------------------------------------------- create
@@ -1427,6 +1431,8 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
     # from clearing another worker's in-flight claim.
     outcome = {"detail": body.detail, "reported_at": datetime.now(timezone.utc).isoformat(),
                "attempt": None, "hold": bool(body.hold)}
+    if body.retry_after_s is not None:
+        outcome["retry_after_s"] = body.retry_after_s
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", str(schedule_id))

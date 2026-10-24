@@ -20,8 +20,10 @@ import httpx
 
 from .base import (
     PublishAdapter,
+    RateLimited,
     TokenExpiredError,
     TransportUnauthorized,
+    retry_after_from_response,
 )
 
 TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
@@ -156,11 +158,19 @@ class TikTokAdapter(PublishAdapter):
         )
         if init.status_code == 401:
             raise TransportUnauthorized("init rejected: token invalid")
+        if init.status_code == 429:
+            # WP-G: server-shaped retry — TikTok's rate-limit error carries
+            # no delay, so honor Retry-After when the gateway provides one.
+            raise RateLimited("tiktok init throttled (HTTP 429)",
+                              retry_after_from_response(init))
         init.raise_for_status()
         payload = init.json()
         err = payload.get("error") or {}
         if err.get("code") in ("invalid_token", "access_token_invalid", "auth_link_invalid"):
             raise TransportUnauthorized(err.get("message", "tiktok token invalid"))
+        if err.get("code") == "rate_limit_exceeded":
+            raise RateLimited(err.get("message") or "tiktok rate limit exceeded",
+                              retry_after_from_response(init))
         if err.get("code") not in (None, "ok"):
             raise RuntimeError(f"init error {err.get('code')}: {err.get('message')}")
 

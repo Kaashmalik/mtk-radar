@@ -17,6 +17,10 @@ import db
 from cache import ANALYTICS_KEY, cache_get_json, cache_set_json
 from growth_engine import summarize as growth_summarize
 
+#: Bump when the payload shape changes; a cached payload from an older shape
+#: (missing keys the dashboard now reads) is discarded instead of served.
+ANALYTICS_PAYLOAD_VERSION = 2
+
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
@@ -33,9 +37,11 @@ async def analytics() -> dict:
     # A cache miss, an unreachable Redis or a disabled cache all fall through
     # to a fresh computation.
     cached = await cache_get_json(ANALYTICS_KEY)
-    if cached is not None:
+    if isinstance(cached, dict) \
+            and cached.get("payload_version") == ANALYTICS_PAYLOAD_VERSION:
         cached["cached"] = True
         return cached
+    # older/foreign cached shape → recompute fresh (payload normalization)
 
     funnel = await _rows(pool, "SELECT COUNT(*) AS n FROM items")
     offers_by_state = await _rows(
@@ -277,6 +283,7 @@ async def analytics() -> dict:
         "cost_per_published_video_usd_30d":
             costs["cost_per_published_video_usd_30d"],
         "generated_at": generated_at,
+        "payload_version": ANALYTICS_PAYLOAD_VERSION,
         "cached": False,
     }
     await cache_set_json(ANALYTICS_KEY, body)

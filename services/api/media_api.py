@@ -15,14 +15,17 @@ used to probe arbitrary paths or buckets.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 import db
 
@@ -43,6 +46,10 @@ router = APIRouter(tags=["media"])
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
 _CHUNK = 256 * 1024
 _S3: S3Storage | None = None
+
+# WP-G (§5.6.4): documented retention for non-pinned media artifacts; the
+# media_gc endpoint's default cutoff (dry run first — a real run is audited).
+MEDIA_RETENTION_DAYS = int(os.environ.get("MTK_MEDIA_RETENTION_DAYS", "90"))
 
 
 def _s3() -> S3Storage | None:
@@ -211,3 +218,144 @@ async def capture_video(capture_id: uuid.UUID, request: Request):
     if not row or not row["video_path"]:
         raise HTTPException(status_code=404, detail="capture has no recorded video")
     return _serve_ref(str(row["video_path"]), request)
+
+
+# ------------------------------------------------------- media GC (WP-G §5.6.4)
+
+#: Documented retention policy (docs): media artifacts older than this that
+#: are NOT pinned may be reclaimed. `media_gc` never decides on its own —
+#: a dry run lists candidates first, a real run is audited.
+class MediaGcIn(BaseModel):
+    dry_run: bool = True
+    retention_days: int = Field(default=MEDIA_RETENTION_DAYS, ge=1, le=3650)
+
+
+async def _gc_candidates(pool, cutoff_days: int) -> list[dict[str, Any]]:
+    """Artifacts past retention that are NOT pinned.
+
+    Pinned (exempt) = referenced by a schedule whose state is NOT cancelled
+    or failed — every state that can still publish or is live pins its exact
+    package. Renders keep their own columns; a capture's video does too.
+    Legacy plain paths are returned as-is; managed refs (local://, s3://)
+    carry their scheme.
+    """
+    rows = await pool.fetch(
+        """
+        WITH pinned_renders AS (
+            SELECT DISTINCT s.render_id AS id
+            FROM schedules s
+            WHERE s.render_id IS NOT NULL
+              AND s.state::text NOT IN ('cancelled', 'failed')
+        ),
+        pinned_captures AS (
+            SELECT DISTINCT r.capture_id AS id
+            FROM renders r
+            WHERE r.capture_id IS NOT NULL
+              AND r.id IN (SELECT id FROM pinned_renders)
+        )
+        SELECT 'render_video' AS artifact, r.id::text AS ref_id,
+               r.video_path AS ref, r.created_at
+        FROM renders r
+        WHERE r.created_at < now() - make_interval(days => $1)
+          AND r.id NOT IN (SELECT id FROM pinned_renders)
+        UNION ALL
+        SELECT 'render_captions', r.id::text, r.captions_path, r.created_at
+        FROM renders r
+        WHERE r.created_at < now() - make_interval(days => $1)
+          AND r.id NOT IN (SELECT id FROM pinned_renders)
+          AND r.captions_path IS NOT NULL
+        UNION ALL
+        SELECT 'capture_video', c.id::text, c.video_path, c.created_at
+        FROM capture_sessions c
+        WHERE c.created_at < now() - make_interval(days => $1)
+          AND c.id NOT IN (SELECT id FROM pinned_captures)
+          AND c.video_path IS NOT NULL
+        ORDER BY created_at ASC
+        """,
+        cutoff_days,
+    )
+    return [dict(r) for r in rows]
+
+
+def _delete_ref(ref: str) -> bool:
+    """Delete ONE artifact ref (managed or host-local legacy path).
+
+    Legacy paths are only deleted when they resolve to a file INSIDE this
+    repository checkout — the endpoint must never become an arbitrary file
+    deletion primitive. Returns True when something was deleted.
+    """
+    from object_storage import make_local_from_env, make_s3_from_env
+    if ref.startswith("local://"):
+        local = make_local_from_env()
+        path = local.root / local.parse_ref(ref)
+        existed = path.is_file()
+        path.unlink(missing_ok=True)
+        return existed
+    if ref.startswith("s3://"):
+        driver = make_s3_from_env()
+        if driver is None:
+            return False
+        try:
+            driver.delete(ref)
+            return True
+        except Exception:  # noqa: BLE001 — per-object failures are recorded, not fatal
+            raise
+    # Legacy host path — only within the repo checkout.
+    candidate = Path(ref)
+    options = [candidate] if candidate.is_absolute() else [
+        Path.cwd() / candidate, REPO_ROOT / candidate]
+    for option in options:
+        resolved = option.resolve()
+        if REPO_ROOT.resolve() not in resolved.parents:
+            continue
+        if resolved.is_file():
+            resolved.unlink(missing_ok=True)
+            return True
+    return False
+
+
+@router.post("/media/gc")
+async def media_gc(body: MediaGcIn) -> dict:
+    """Retain non-pinned media for the documented 90-day policy, then offer
+    reclamation (WP-G §5.6.4). Pinned artifacts — anything a live schedule
+    (state not cancelled/failed) still references — are ALWAYS exempt.
+
+    Dry run first (default): returns the exact candidate list; nothing is
+    touched. `dry_run=false` deletes and writes an audit entry with every
+    removed ref so the reclamation is reviewable afterwards.
+    """
+    pool = db.get()
+    candidates = await _gc_candidates(pool, body.retention_days)
+    if body.dry_run:
+        return {
+            "mode": "dry_run", "retention_days": body.retention_days,
+            "candidates": len(candidates),
+            "items": [
+                {"artifact": c["artifact"], "ref_id": c["ref_id"],
+                 "ref": c["ref"], "created_at": str(c["created_at"])}
+                for c in candidates
+            ],
+        }
+    deleted, failed = 0, []
+    removed_refs: list[str] = []
+    for c in candidates:
+        ref = str(c["ref"])
+        try:
+            if _delete_ref(ref):
+                deleted += 1
+                removed_refs.append(ref)
+        except Exception as exc:  # noqa: BLE001 — one bad object never stops a GC run
+            failed.append({"ref": ref, "error": str(exc)[:300]})
+    await pool.execute(
+        "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
+        "VALUES ($1, $2, $3, NULL, $4::jsonb)",
+        "system:media_gc", "media:gc", "media",
+        json.dumps({
+            "mode": "apply", "retention_days": body.retention_days,
+            "deleted": deleted, "failed": failed, "removed_refs": removed_refs,
+        }, default=str),
+    )
+    return {
+        "mode": "apply", "retention_days": body.retention_days,
+        "deleted": deleted, "failed": failed,
+    }

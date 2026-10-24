@@ -121,16 +121,30 @@ async def list_trends(
         response, candidates, limit,
         lambda row: encode_cursor(row["score"], row["updated_at"], row["id"]),
     )
+    # P2 carry-over (system-review 2026-10-23): the summary counts used to be
+    # page-local while reading as totals — a filtered first page undercounted
+    # everything. The summary is now GLOBAL (one COUNT FILTER query);
+    # `page_total` names what the page itself holds.
+    global_summary = await pool.fetchrow(
+        """
+        SELECT COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE score >= 78)::int AS hot,
+               COUNT(*) FILTER (WHERE status = 'shortlisted')::int AS shortlisted,
+               COALESCE(AVG(score), 0)::float8 AS average_score
+        FROM trend_candidates
+        """
+    )
     return {
         "candidates": candidates,
         "bands": radar_bands(candidates),
+        "page_total": len(candidates),
         "summary": {
-            "total": len(candidates),
-            "hot": sum(1 for c in candidates if float(c["score"]) >= 78),
-            "shortlisted": sum(1 for c in candidates if c["status"] == "shortlisted"),
+            "total": int(global_summary["total"]) if global_summary else len(candidates),
+            "hot": int(global_summary["hot"]) if global_summary else 0,
+            "shortlisted": int(global_summary["shortlisted"]) if global_summary else 0,
             "average_score": round(
-                sum(float(c["score"]) for c in candidates) / len(candidates), 1
-            ) if candidates else 0,
+                float(global_summary["average_score"]), 1
+            ) if global_summary else 0.0,
         },
     }
 

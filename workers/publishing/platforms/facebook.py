@@ -11,10 +11,31 @@ from typing import Any, Optional
 
 import httpx
 
-from .base import PublishAdapter, TokenExpiredError, TransportUnauthorized, raise_on_graph_error
+from .base import (
+    PublishAdapter,
+    RateLimited,
+    TokenExpiredError,
+    TransportUnauthorized,
+    exchange_long_lived_token as _base_exchange,
+    raise_on_graph_error,
+    retry_after_from_response,
+)
 
 GRAPH_VERSION = "v21.0"
+OAUTH_ENDPOINT = f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token"
 VIDEO_ENDPOINT = f"https://graph.facebook.com/{GRAPH_VERSION}/"
+
+
+def exchange_long_lived_token(page_token: str, app_id: str, app_secret: str,
+                              http: Optional[httpx.Client] = None) -> dict:
+    """Meta long-lived token exchange for a Facebook Page token (WP-G §5.6.1).
+
+    Thin wrapper over the shared Graph helper in platforms/base.py: the
+    documented `fb_exchange_token` grant renews a long-lived Page token
+    WITHOUT re-auth. Raises TokenExpiredError on any refusal so the account
+    is marked expired and the operator sees it — never a silent stall.
+    """
+    return _base_exchange(VIDEO_ENDPOINT, page_token, app_id, app_secret, http)
 
 
 class FacebookAdapter(PublishAdapter):
@@ -31,6 +52,27 @@ class FacebookAdapter(PublishAdapter):
     def ensure_ready(self) -> None:
         if not self.page_id or not self.page_access_token:
             raise TokenExpiredError("Facebook Page credentials missing (FACEBOOK_* env)")
+
+    def refresh_long_lived_token(self, http: Optional[httpx.Client] = None) -> dict:
+        """Renew the long-lived Page token without re-auth (WP-G §5.6.1).
+
+        Meta's `fb_exchange_token` grant renews a long-lived Page token while
+        the app id + secret are configured. On success the in-memory token is
+        replaced AND `on_refresh` fires (the publisher reports the new expiry
+        to /platform-accounts). On refusal TokenExpiredError surfaces so the
+        account is marked expired — never a silent stall.
+        """
+        import os
+        result = exchange_long_lived_token(
+            self.page_access_token,
+            os.environ.get("FACEBOOK_APP_ID") or "",
+            os.environ.get("FACEBOOK_APP_SECRET") or "",
+            http=http,
+        )
+        self.page_access_token = result["access_token"]
+        if result.get("expires_at") and self.on_refresh is not None:
+            self.on_refresh(result["expires_at"])
+        return result
 
     def upload(self, video_path: Path, meta: dict[str, Any],
                privacy: str = "private", idempotency_key: str | None = None) -> str:
@@ -59,9 +101,13 @@ class FacebookAdapter(PublishAdapter):
 
         if resp.status_code == 401:
             raise TokenExpiredError("graph rejected the page token — re-authentication required")
+        if resp.status_code == 429:
+            raise RateLimited(
+                "graph upload throttled (HTTP 429)",
+                retry_after_from_response(resp))
         if resp.status_code >= 400:
             try:
-                raise_on_graph_error(payload)
+                raise_on_graph_error(payload, response=resp)
             except TransportUnauthorized as exc:
                 # FB has no in-flight refresh: a dead session needs re-auth (§6)
                 raise TokenExpiredError(str(exc)) from exc

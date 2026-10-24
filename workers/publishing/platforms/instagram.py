@@ -23,9 +23,12 @@ import httpx
 
 from .base import (
     PublishAdapter,
+    RateLimited,
     TokenExpiredError,
     TransportUnauthorized,
+    exchange_long_lived_token as _base_exchange,
     raise_on_graph_error,
+    retry_after_from_response,
 )
 
 GRAPH_VERSION = "v21.0"
@@ -86,9 +89,12 @@ class InstagramAdapter(PublishAdapter):
         payload = self._payload(resp)
         if resp.status_code == 401:
             raise TokenExpiredError("graph rejected the Instagram token — re-authentication required")
+        if resp.status_code == 429:
+            raise RateLimited("graph creation throttled (HTTP 429)",
+                              retry_after_from_response(resp))
         if resp.status_code >= 400:
             try:
-                raise_on_graph_error(payload)
+                raise_on_graph_error(payload, response=resp)
             except TransportUnauthorized as exc:
                 raise TokenExpiredError(str(exc)) from exc
             resp.raise_for_status()
@@ -121,9 +127,12 @@ class InstagramAdapter(PublishAdapter):
         payload = self._payload(resp)
         if resp.status_code == 401:
             raise TokenExpiredError("graph rejected the Instagram token on publish")
+        if resp.status_code == 429:
+            raise RateLimited("graph publish throttled (HTTP 429)",
+                              retry_after_from_response(resp))
         if resp.status_code >= 400:
             try:
-                raise_on_graph_error(payload)
+                raise_on_graph_error(payload, response=resp)
             except TransportUnauthorized as exc:
                 raise TokenExpiredError(str(exc)) from exc
             resp.raise_for_status()
@@ -154,6 +163,27 @@ class InstagramAdapter(PublishAdapter):
             except (TypeError, ValueError):
                 out[entry["name"]] = 0
         return out
+
+    def exchange_long_lived_token(self, http: Optional[httpx.Client] = None) -> dict:
+        """Renew the long-lived token without re-auth (WP-G §5.6.1).
+
+        Meta's `fb_exchange_token` grant also covers Instagram professional
+        accounts bound to a Page. On success the in-memory token is replaced
+        AND `on_refresh` fires (the publisher then reports the new expiry to
+        /platform-accounts). On refusal TokenExpiredError surfaces so the
+        account is marked expired — never a silent stall.
+        """
+        import os
+        result = _base_exchange(
+            GRAPH_ENDPOINT, self.access_token,
+            os.environ.get("INSTAGRAM_APP_ID") or os.environ.get("FACEBOOK_APP_ID") or "",
+            os.environ.get("INSTAGRAM_APP_SECRET") or os.environ.get("FACEBOOK_APP_SECRET") or "",
+            http=http,
+        )
+        self.access_token = result["access_token"]
+        if result.get("expires_at") and self.on_refresh is not None:
+            self.on_refresh(result["expires_at"])
+        return result
 
     @staticmethod
     def _payload(resp: httpx.Response) -> dict:
