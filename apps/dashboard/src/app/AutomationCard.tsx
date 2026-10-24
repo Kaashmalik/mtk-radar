@@ -105,6 +105,35 @@ export default function AutomationCard() {
     void load();
   }, [load]);
 
+  async function runNow() {
+    setBusy("run-now");
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await clientFetch("/automation/run-now", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(body.detail ?? `HTTP ${res.status}`);
+        return;
+      }
+      const armed = (body.armed ?? {}) as Record<string, number>;
+      const summary = Object.entries(armed)
+        .filter(([, n]) => n > 0)
+        .map(([stage, n]) => `${stage} ${n}`)
+        .join(" · ");
+      setMessage(
+        summary
+          ? `Owed work armed now: ${summary}. Human gates untouched.`
+          : "Nothing owed right now — every unattended stage is already current.",
+      );
+      router.refresh();
+    } catch {
+      setError("API unreachable");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function start(mode: string) {
     if (mode === "autopilot_public") {
       const ok = window.confirm(
@@ -255,6 +284,15 @@ export default function AutomationCard() {
             {busy === "stop" ? "Stopping…" : "⏸ Stop automation"}
           </button>
         )}
+        <button
+          type="button"
+          className="btn btn-ghost"
+          title="Collect, trend-scan, script and render the owed backlog immediately. Never touches the human stages."
+          disabled={busy !== null}
+          onClick={runNow}
+        >
+          {busy === "run-now" ? "Arming…" : "▶ Run now"}
+        </button>
         <Link href="/settings" className="btn btn-ghost">Guardrails &amp; budget</Link>
       </div>
 

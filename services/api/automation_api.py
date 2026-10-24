@@ -39,7 +39,7 @@ from automation import (
 )
 from preflight import VALID_MODES, build_preflight
 from schedules_state import default_publish_window, parse_publish_windows
-from settings_store import audit, get_value, put_value
+from settings_store import audit, get_language_policy, get_value, put_value
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
@@ -355,3 +355,179 @@ async def status() -> dict[str, Any]:
 
 
 __all__ = ["router", "load_policy", "save_policy"]
+
+
+# ---------------------------------------------------------------- run-now (WP-D)
+
+#: Stages run-now may ever touch. The human stages (verify/redaction review/
+#: approve/schedule) are deliberately absent — no flag, no body field, no
+#: "just this once": run-now ENQUEUES unattended work, it never performs a
+#: human decision.
+RUN_NOW_STAGES = ("collect", "scan", "script", "render")
+
+_RUN_NOW_REARM = """
+    ON CONFLICT (dedupe_key) DO UPDATE
+    SET status = 'pending', run_after = now(), updated_at = now()
+    WHERE jobs.status NOT IN ('leased', 'dead')
+"""
+
+
+@router.post("/run-now")
+async def run_now(
+    request: Request,
+    stages: str = Query(
+        default=",".join(RUN_NOW_STAGES),
+        description="Comma-separated subset of: " + ", ".join(RUN_NOW_STAGES),
+    ),
+) -> dict:
+    """"Run the pipeline now": make every unattended stage work its owed
+    backlog DUE IMMEDIATELY (§ gap 15) — never the human gates.
+
+    For each requested stage this (re)arms the durable owed-work records the
+    workers already consume, so run-now is just "the worker sweep happens
+    now": collect jobs for enabled sources, the trend-scan job, one script
+    job per offer that earned a script, one render job per missing preset.
+    Wedged (leased) and dead-lettered jobs are left alone — an operator
+    resolves those explicitly, never by blind re-arm. Audited.
+    """
+    pool = db.get()
+    requested = [s.strip() for s in stages.split(",") if s.strip()]
+    unknown = [s for s in requested if s not in RUN_NOW_STAGES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "unknown stage(s): " + ", ".join(unknown) + " — run-now never "
+                "touches human stages; allowed: " + ", ".join(RUN_NOW_STAGES)
+            ),
+        )
+    armed: dict[str, int] = {}
+
+    if "collect" in requested:
+        armed["collect"] = await pool.fetchval(
+            """
+            WITH due AS (
+                INSERT INTO jobs (kind, entity_id, payload, dedupe_key,
+                                  max_attempts, run_after)
+                SELECT 'collect', s.id, json_build_object('provider', s.provider,
+                                                          'adapter', s.adapter),
+                       'collect:' || s.id::text, 5, now()
+                FROM sources s WHERE s.enabled
+                ON CONFLICT (dedupe_key) DO UPDATE
+                SET status = 'pending', run_after = now(), updated_at = now()
+                WHERE jobs.status NOT IN ('leased', 'dead')
+                RETURNING 1
+            )
+            SELECT COUNT(*) FROM due
+            """,
+        ) or 0
+
+    if "scan" in requested:
+        armed["scan"] = await pool.fetchval(
+            """
+            WITH due AS (
+                INSERT INTO jobs (kind, payload, dedupe_key, max_attempts, run_after)
+                VALUES ('trend_scan', '{}'::jsonb, 'trend_scan', 5, now())
+                ON CONFLICT (dedupe_key) DO UPDATE
+                SET status = 'pending', run_after = now(), updated_at = now()
+                WHERE jobs.status NOT IN ('leased', 'dead')
+                RETURNING 1
+            )
+            SELECT COUNT(*) FROM due
+            """,
+        ) or 0
+
+    if "script" in requested:
+        # Same "earned it" gate as the batch worker: verified (or already
+        # approved) + official evidence on a matching domain + no script yet.
+        armed["script"] = await pool.fetchval(
+            """
+            WITH due AS (
+                INSERT INTO jobs (kind, entity_id, payload, dedupe_key,
+                                  max_attempts, run_after)
+                SELECT 'script', o.id,
+                       json_build_object('offer_id', o.id::text),
+                       'script:' || o.id::text, 5, now()
+                FROM offers o
+                WHERE o.state IN ('verified', 'approved_for_video')
+                  AND (o.expires_at IS NULL OR o.expires_at > now())
+                  AND EXISTS (
+                      SELECT 1 FROM evidence e
+                      WHERE e.offer_id = o.id AND e.official AND e.domain_ok)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM offer_scripts s WHERE s.offer_id = o.id)
+                ON CONFLICT (dedupe_key) DO UPDATE
+                SET status = 'pending', run_after = now(), updated_at = now()
+                WHERE jobs.status NOT IN ('leased', 'dead')
+                RETURNING 1
+            )
+            SELECT COUNT(*) FROM due
+            """,
+        ) or 0
+
+    if "render" in requested:
+        # Same candidate contract as GET /render-candidates, boundary-free:
+        # one job per (offer, language) whose latest script still misses a
+        # QC-passed render. `sha256(convert_to(markdown,'UTF8'))` matches
+        # script_version_hash used everywhere else (no content round-trip).
+        narration = (await get_language_policy(pool))["narration_languages"]
+        armed["render"] = await pool.fetchval(
+            """
+            WITH latest_script AS (
+                SELECT DISTINCT ON (offer_id, language)
+                       offer_id, language, version, markdown
+                FROM offer_scripts ORDER BY offer_id, language, version DESC
+            ),
+            ready AS (
+                SELECT o.id AS offer_id, ls.language, ls.version,
+                       encode(sha256(convert_to(ls.markdown, 'UTF8')), 'hex')
+                           AS script_hash,
+                       (SELECT MAX(c.created_at) FROM capture_sessions c
+                         WHERE c.offer_id = o.id AND c.redaction_reviewed)
+                           AS reviewed_at
+                FROM offers o
+                JOIN latest_script ls ON ls.offer_id = o.id
+                JOIN LATERAL (
+                    SELECT 1 FROM capture_sessions c
+                    WHERE c.offer_id = o.id AND c.redaction_reviewed
+                    LIMIT 1
+                ) rev ON TRUE
+                WHERE o.state IN ('verified', 'approved_for_video')
+                  AND ls.language = ANY($1::text[])
+                  AND (SELECT COUNT(*) FROM renders r
+                        WHERE r.offer_id = o.id AND r.language = ls.language
+                          AND r.status = 'rendered' AND r.qc_status = 'passed'
+                          AND r.script_version_hash =
+                              encode(sha256(convert_to(ls.markdown, 'UTF8')), 'hex')) = 0
+            ),
+            due AS (
+                INSERT INTO jobs (kind, entity_id, payload, dedupe_key,
+                                  max_attempts, run_after)
+                SELECT 'render_package', offer_id,
+                       json_build_object('offer_id', offer_id::text,
+                                         'language', language,
+                                         'script_version', version),
+                       'render:' || offer_id::text || ':' || language || ':'
+                           || script_hash,
+                       5, now()
+                FROM ready
+                ON CONFLICT (dedupe_key) DO UPDATE
+                SET status = 'pending', run_after = now(), updated_at = now()
+                WHERE jobs.status NOT IN ('leased', 'dead')
+                RETURNING 1
+            )
+            SELECT COUNT(*) FROM due
+            """,
+            narration,
+        ) or 0
+
+    await audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+                action="automation:run-now", entity="jobs", detail=armed)
+    return {
+        "stages": requested,
+        "armed": armed,
+        "total": sum(armed.values()),
+        "note": ("owed unattended work armed now — verify/redaction review/"
+                 "approve/schedule stay human"),
+    }
+

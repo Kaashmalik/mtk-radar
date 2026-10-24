@@ -135,9 +135,11 @@ class ScheduleResultIn(BaseModel):
 # ---------------------------------------------------------------- create
 
 
-@router.post("/offers/{offer_id}/schedules", status_code=201)
-async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Request) -> dict:
-    pool = db.get()
+async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
+                               actor: str) -> dict:
+    """Create ONE platform schedule. Every release gate lives here and is
+    identical for single and batch creation (WP-D): the batch path is this
+    function called once per platform — never a copy of the checks."""
     offer = await pool.fetchrow(
         """
         SELECT id, title, provider, category, offer_type, state::text AS state,
@@ -404,7 +406,7 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
         return {"id": existing["id"], "state": existing["state"], "created": False,
                 "idempotency_key": idempotency_key}
 
-    await _audit(pool, actor=effective_reviewer(request, None, default="reviewer"),
+    await _audit(pool, actor=actor or "reviewer",
                  action="create_schedule", entity="schedules",
                  entity_id=row["id"], detail={"platform": body.platform,
                                               "privacy": body.privacy,
@@ -426,6 +428,169 @@ async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Reques
             "render_sha256": render_sha256, "metadata_hash": metadata_hash,
             "cover_sha256": cover_sha256, "captions_sha256": captions_sha256,
             "platform_account_id": str(account_id) if account_id else None}
+
+
+@router.post("/offers/{offer_id}/schedules", status_code=201)
+async def create_schedule(offer_id: uuid.UUID, body: ScheduleIn, request: Request) -> dict:
+    pool = db.get()
+    actor = effective_reviewer(request, None, default="reviewer")
+    return await _create_one_schedule(pool, offer_id, body, actor)
+
+
+# ---------------------------------------------------------------- batch (WP-D)
+
+
+class PlatformOverrideIn(BaseModel):
+    """Per-platform overrides on top of the shared batch body. Anything set
+    here wins for that platform only — pins (render/account/playlist) stay
+    per-platform by nature; the release gates stay shared."""
+
+    local_time: Optional[datetime] = None
+    privacy: Optional[str] = None
+    caption_variant: Optional[str] = None
+    language: Optional[str] = None
+    content_variant_id: Optional[uuid.UUID] = None
+    metadata_variant: Optional[str] = None
+    cover_path: Optional[str] = None
+    pinned_comment: Optional[str] = None
+    website_url: Optional[str] = None
+    platform_account_id: Optional[uuid.UUID] = None
+    youtube_playlist_id: Optional[str] = None
+    render_id: Optional[uuid.UUID] = None
+
+
+class BatchScheduleIn(BaseModel):
+    """One click → the same verified package on several platforms (WP-D).
+
+    `platforms` is the target list; every row goes through the exact single-
+    schedule gates (approved offer, QC-passed render, redaction-reviewed
+    capture, script-hash match, metadata validation). Repeats are idempotent
+    per row via the existing idempotency key.
+    """
+
+    platforms: list[str] = Field(min_length=1, max_length=8)
+    local_time: datetime
+    timezone: str = "Asia/Karachi"
+    language: str = "en"
+    privacy: str = "private"
+    caption_variant: str = "default"
+    metadata_variant: str = "default"
+    content_variant_id: Optional[uuid.UUID] = None
+    cover_path: Optional[str] = None
+    pinned_comment: Optional[str] = None
+    website_url: Optional[str] = None
+    render_id: Optional[uuid.UUID] = None
+    platform_account_id: Optional[uuid.UUID] = None
+    youtube_playlist_id: Optional[str] = None
+    # Per-platform overrides, keyed by platform name.
+    per_platform: dict[str, PlatformOverrideIn] = Field(default_factory=dict)
+
+
+@router.post("/offers/{offer_id}/schedules/batch", status_code=207)
+async def create_schedules_batch(offer_id: uuid.UUID, body: BatchScheduleIn,
+                                 request: Request) -> dict:
+    """Schedule the same render on several platforms in one action.
+
+    207 multi-status: `results` carries one entry per platform with ok/id or
+    the exact gate refusal — a TikTok-specific failure never blocks YouTube.
+    """
+    pool = db.get()
+    actor = effective_reviewer(request, None, default="reviewer")
+    results: list[dict] = []
+    created = 0
+    for platform in dict.fromkeys(body.platforms):  # dedupe, keep order
+        override = body.per_platform.get(platform)
+        single = ScheduleIn(
+            platform=platform,
+            local_time=(override.local_time if override and override.local_time
+                        else body.local_time),
+            timezone=body.timezone,
+            language=(override.language if override and override.language
+                      else body.language),
+            privacy=(override.privacy if override and override.privacy
+                     else body.privacy),
+            caption_variant=(override.caption_variant if override and override.caption_variant
+                             else body.caption_variant),
+            metadata_variant=(override.metadata_variant if override and override.metadata_variant
+                              else body.metadata_variant),
+            content_variant_id=(override.content_variant_id if override
+                                and override.content_variant_id is not None
+                                else body.content_variant_id),
+            cover_path=(override.cover_path if override and override.cover_path
+                        else body.cover_path),
+            pinned_comment=(override.pinned_comment if override and override.pinned_comment
+                            else body.pinned_comment),
+            website_url=(override.website_url if override and override.website_url
+                         else body.website_url),
+            render_id=(override.render_id if override and override.render_id is not None
+                       else body.render_id),
+            platform_account_id=(override.platform_account_id if override
+                                 and override.platform_account_id is not None
+                                 else body.platform_account_id),
+            youtube_playlist_id=(override.youtube_playlist_id if override
+                                 and override.youtube_playlist_id is not None
+                                 else body.youtube_playlist_id),
+        )
+        try:
+            row = await _create_one_schedule(pool, offer_id, single, actor)
+        except HTTPException as exc:
+            results.append({"platform": platform, "ok": False,
+                            "detail": exc.detail, "status": exc.status_code})
+            continue
+        created += 1 if row.get("created") else 0
+        results.append({"platform": platform, "ok": True, **row})
+    return {
+        "created": created,
+        "requested": len(body.platforms),
+        "ok": all(r["ok"] for r in results),
+        "results": results,
+    }
+
+
+class BatchTransitionIn(BaseModel):
+    """Approve / queue several posts at once — a HUMAN batch action.
+
+    The per-schedule transition rules, attempt acknowledgment and audit stay
+    exactly the single-transition ones (`_transition`); this endpoint only
+    decides WHEN, one transaction per id, per-id results. Service credentials
+    are refused here outright: bulk approval is by definition a human decision
+    (automation approval has its own budgeted, guardrailed path)."""
+
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    to: str
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+    acknowledge_unknown_attempt: bool = False
+
+
+@router.post("/schedules/batch-transition")
+async def batch_transition(body: BatchTransitionIn, request: Request) -> dict:
+    if credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(
+            status_code=403,
+            detail="batch transitions are a human action — use a reviewer credential",
+        )
+    pool = db.get()
+    results: list[dict] = []
+    for schedule_id in dict.fromkeys(body.ids):
+        single = ScheduleTransitionIn(
+            to=body.to, reviewer=body.reviewer, note=body.note,
+            acknowledge_unknown_attempt=body.acknowledge_unknown_attempt,
+        )
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await _transition(conn, schedule_id, single, request)
+            results.append({"id": str(schedule_id), "ok": True, **row})
+        except HTTPException as exc:
+            results.append({"id": str(schedule_id), "ok": False,
+                            "detail": exc.detail, "status": exc.status_code})
+    return {
+        "to": body.to,
+        "ok": all(r["ok"] for r in results),
+        "approved": sum(1 for r in results if r["ok"]),
+        "results": results,
+    }
 
 
 # ---------------------------------------------------------------- calendar

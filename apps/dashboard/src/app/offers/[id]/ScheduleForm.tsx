@@ -31,7 +31,11 @@ export default function ScheduleForm({
   renders?: RenderOption[];
 }) {
   const router = useRouter();
-  const [platform, setPlatform] = useState("youtube");
+  const ALL_PLATFORMS = ["youtube", "facebook", "instagram", "tiktok"] as const;
+  // Review→Schedule wizard (WP-D): pick every target platform in one pass;
+  // the API applies the same release gates per row and reports per platform.
+  const [platforms, setPlatforms] = useState<string[]>(["youtube"]);
+  const primary = platforms[0] ?? "youtube";
   const [privacy, setPrivacy] = useState("private");
   const [language, setLanguage] = useState("en");
   const [renderId, setRenderId] = useState("");
@@ -50,6 +54,7 @@ export default function ScheduleForm({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [perPlatform, setPerPlatform] = useState<Record<string, string> | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -89,7 +94,7 @@ export default function ScheduleForm({
   }, []);
 
   const platformAccounts = accounts.filter(
-    (account) => account.platform === platform && (account.status ?? "active") === "active",
+    (account) => account.platform === primary && (account.status ?? "active") === "active",
   );
   const renderOptions = renders.filter(
     (render) =>
@@ -98,25 +103,64 @@ export default function ScheduleForm({
       render.qc_status === "passed",
   );
 
+  function togglePlatform(target: string) {
+    setPlatforms((prev) => {
+      if (prev.includes(target)) {
+        // keep at least one platform selected — the form needs a primary
+        return prev.length > 1 ? prev.filter((p) => p !== target) : prev;
+      }
+      return [...prev, target];
+    });
+    setAccountId("");
+  }
+
   async function schedule() {
     setBusy(true);
     setError(null);
     setMsg(null);
+    setPerPlatform(null);
+    const shared = {
+      privacy,
+      local_time: `${when}:00+05:00`,
+      timezone: "Asia/Karachi",
+      language,
+      metadata_variant: metadataVariant,
+      ...(renderId ? { render_id: renderId } : {}),
+      ...(coverPath.trim() ? { cover_path: coverPath.trim() } : {}),
+    };
     try {
-      // interpret the input as Asia/Karachi (+05:00) — display timezone per §17
-      const res = await clientFetch(`/offers/${offerId}/schedules`, {
+      // Single platform keeps the original single endpoint (identical gates).
+      if (platforms.length === 1) {
+        const res = await clientFetch(`/offers/${offerId}/schedules`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...shared,
+            platform: platforms[0],
+            ...(accountId ? { platform_account_id: accountId } : {}),
+          }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(body.detail ?? `HTTP ${res.status}`);
+          return;
+        }
+        setMsg(
+          body.created
+            ? `Queued (${body.state}) — approve it on the calendar before it can publish`
+            : `Already queued (${body.state}) — idempotent re-submit`,
+        );
+        router.refresh();
+        return;
+      }
+      // Multi-platform: ONE request, per-platform results, identical gates.
+      const res = await clientFetch(`/offers/${offerId}/schedules/batch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          platform,
-          privacy,
-          local_time: `${when}:00+05:00`,
-          timezone: "Asia/Karachi",
-          language,
-          metadata_variant: metadataVariant,
+          ...shared,
+          platforms,
           ...(accountId ? { platform_account_id: accountId } : {}),
-          ...(renderId ? { render_id: renderId } : {}),
-          ...(coverPath.trim() ? { cover_path: coverPath.trim() } : {}),
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -124,10 +168,18 @@ export default function ScheduleForm({
         setError(body.detail ?? `HTTP ${res.status}`);
         return;
       }
+      setPerPlatform(
+        Object.fromEntries((body.results ?? []).map(
+          (r: { platform: string; ok: boolean; state?: string; detail?: string }) => [
+            r.platform,
+            r.ok ? `✓ ${r.state ?? "queued"}` : `✗ ${r.detail ?? "refused"}`,
+          ],
+        )),
+      );
       setMsg(
-        body.created
-          ? `Queued (${body.state}) — approve it on the calendar before it can publish`
-          : `Already queued (${body.state}) — idempotent re-submit`,
+        body.ok
+          ? `Queued on ${body.created} platform(s) — approve on the calendar`
+          : `Partially queued (${body.created}/${body.requested}) — per-platform results below`,
       );
       router.refresh();
     } finally {
@@ -137,28 +189,34 @@ export default function ScheduleForm({
 
   return (
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: "0.6rem" }}>
-      <select
-        value={platform}
-        onChange={(e) => {
-          setPlatform(e.target.value);
-          setAccountId("");
-        }}
-        style={inputStyle}
-        aria-label="Platform"
+      <div
+        role="group"
+        aria-label="Platforms"
+        style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
       >
-        <option value="youtube">YouTube</option>
-        <option value="facebook">Facebook</option>
-        <option value="instagram">Instagram</option>
-        <option value="tiktok">TikTok</option>
-      </select>
+        {ALL_PLATFORMS.map((p) => (
+          <label
+            key={p}
+            style={{ display: "flex", gap: 3, alignItems: "center", fontSize: "0.78rem", cursor: "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={platforms.includes(p)}
+              onChange={() => togglePlatform(p)}
+            />
+            {p[0].toUpperCase() + p.slice(1)}
+          </label>
+        ))}
+      </div>
       {platformAccounts.length > 0 && (
         <select
           value={accountId}
           onChange={(e) => setAccountId(e.target.value)}
           style={inputStyle}
           aria-label="Platform account"
+          title={`Account for ${primary}; other platforms auto-pin their first active account`}
         >
-          <option value="">Auto: first active account</option>
+          <option value="">{primary}: auto (first active account)</option>
           {platformAccounts.map((account) => (
             <option key={account.id} value={account.id}>
               {account.account_handle}
@@ -189,7 +247,7 @@ export default function ScheduleForm({
         title="Pin the exact rendered file. Auto uses the platform's native aspect."
       >
         <option value="">
-          Auto: {platform === "instagram" || platform === "tiktok"
+          Auto: {primary === "instagram" || primary === "tiktok"
             ? "9:16 vertical"
             : "16:9 landscape"}
         </option>
@@ -244,10 +302,26 @@ export default function ScheduleForm({
           cursor: busy ? "wait" : "pointer",
         }}
       >
-        {busy ? "Scheduling…" : "🗓 Schedule test post"}
+        {busy ? "Scheduling…"
+          : platforms.length > 1
+            ? `🗓 Schedule ${platforms.length} platforms`
+            : "🗓 Schedule test post"}
       </button>
       {msg && <span style={{ color: "#3fb950", fontSize: "0.75rem" }}>{msg}</span>}
       {error && <span style={{ color: "#f85149", fontSize: "0.75rem" }}>{error}</span>}
+      {perPlatform && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", width: "100%" }}>
+          {Object.entries(perPlatform).map(([p, outcome]) => (
+            <span
+              key={p}
+              className="small"
+              style={{ color: outcome.startsWith("✓") ? "#3fb950" : "#f85149" }}
+            >
+              {p}: {outcome}
+            </span>
+          ))}
+        </div>
+      )}
       {windows.length > 0 && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", width: "100%" }}>
           <span className="muted small">publish windows:</span>

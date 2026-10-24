@@ -41,7 +41,7 @@ router = APIRouter(tags=["jobs"])
 
 DEFAULT_LEASE_S = 900
 JOB_KINDS = ("publish_schedule", "render_package", "collect", "recheck", "notify",
-             "trend_scan")
+             "trend_scan", "script")
 
 
 class JobIn(BaseModel):
