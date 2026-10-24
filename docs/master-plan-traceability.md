@@ -122,15 +122,19 @@ pytest, `ruff` (E9/F63/F7/F82), `compileall`, dashboard `tsc`.
 
 Traceability for
 [`enhancement-plan-2026-10-24-evidence-to-video.md`](enhancement-plan-2026-10-24-evidence-to-video.md),
-baselined at commit `75ddff3`. Status: **PROPOSED — no EP code exists yet**, so
-every row's Code/Proof column records the *intended* landing place, not shipped
+baselined at commit `75ddff3`. Status: **partially PROPOSED** — EP-00 has
+landed (see its row and the log); EP-01…EP-07 have no code yet, so their
+Code/Proof columns record the *intended* landing place, not shipped
 work. Rows close the gap register G01–G28 in that plan; WP-A–WP-H features above
 are the preserved foundation. Ordering: EP-00 → EP-01 → EP-02 → EP-03 →
 (EP-04 ∥ EP-05) → EP-06 → EP-07. Rough scope 17–32 developer-days.
+Executed-check vs unproven detail per EP lives in
+[`ep-implementation-log.md`](ep-implementation-log.md); **status column updated
+per EP as it lands.**
 
 | EP | Deliverable (gaps closed) | Intended code | Intended proof |
 |---|---|---|---|
-| 0 | Contribution confidence: portable Windows tempfile test, filename-portability lint, CI billing unblock (owner), implemented/partial/unproven status table in traceability docs (G28) | `workers/publishing/tests/test_rate_limits.py`, CI workflow, this document | CI executes real steps; Windows test passes without on-disk reopen; no stale green banners |
+| 0 — **COMPLETE (2026-10-24, minus owner billing action)** | Contribution confidence: portable Windows tempfile test, filename-portability lint, CI billing unblock (owner), implemented/partial/unproven status table in traceability docs (G28) | `workers/publishing/tests/test_rate_limits.py`, `scripts/check_filenames.py` + CI/verify wiring, this document, `ep-implementation-log.md` | portable tempfile tests pass; lint run clean + guard tests; rename landed as its own reviewed commit (`5357c7f`); CI execution still blocked by owner billing (logged, not silent) |
 | 1 | Safety & financial correctness: Instagram privacy capability model, no synthetic `confirmed=True`, fail-closed atomic budget reservations, role/route matrix + scoped extension credential, derived-metric permission switches (G01–G05, G12, G21, G27) | `workers/publishing/platforms/instagram.py`, `workers/publishing/main.py`, `packages/costing.py`, `services/api/costs_store.py`, `api_hardening.py`, `media_api.py` | unknown budget ⇒ zero paid calls; concurrent reservations cannot oversubscribe; accepted ≠ processing ≠ published; extension denied on jobs/media writes |
 | 2 | Discovery & observable momentum: shared adapter registry, persisted excerpts/raw observations, append-only engagement series, cache contract fixes, Google token auth, Compose env matrix, Reddit off-by-default (G06–G11, G13–G16, G22) | `schemas.py`, `workers/collectors/main.py`, `services/api/trends_api.py`, `packages/source_adapters/google_trends.py`, `github_stars.py`, `services/api/cache.py`, `costs_store.py`, `infra/docker/docker-compose.yml` | HN 100→160 fixture ⇒ raw 30 points/h with no duplicate story; unchanged fields can't fake momentum; cached Trends RSS parses; every adapter kind creatable via API |
 | 3 | Research briefs & content-type gates: explainer/tutorial/research tracks, versioned claim ledger, reproducible slate snapshot, queue SQL/readiness fixes (G17–G18) | `trends_api.py`, `queue_api.py`, extraction/script templates, migrations | a paper becomes an accurately attributed explainer with no invented coupon/price fields; conflicting evidence blocks unsupported copy |
