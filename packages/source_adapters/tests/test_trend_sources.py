@@ -25,6 +25,7 @@ from source_adapters import (  # noqa: E402
     fetch_reddit_new,
 )
 from source_adapters.trendcache import cached_json  # noqa: E402
+from source_adapters.trendcache import cached_text  # noqa: E402,F401
 
 
 class FakeFetcher:
@@ -358,6 +359,31 @@ class TestGoogleTrends:
     def test_invalid_geo_rejected(self, bad):
         with pytest.raises(ValueError):
             fetch_google_trends_trending(bad, fetcher=FakeFetcher({}))
+
+    def test_cached_parse_is_identical_to_live_parse(self, monkeypatch):
+        """G10: the RSS body used to go into set_json (json.dumps on bytes →
+        TypeError), so any configured cache broke every fetch. Now the exact
+        text is cached and the cached parse equals the live parse item for
+        item — the acceptance criterion."""
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        cache = JsonCache(namespace="t", clock=lambda: NOW)
+        fetcher = FakeFetcher({"https://trends.google.com/trending/rss": TRENDS_RSS})
+        live = fetch_google_trends_trending("US", fetcher=fetcher, cache=cache)
+        assert len(fetcher.calls) == 1
+
+        cached = fetch_google_trends_trending("US", fetcher=fetcher, cache=cache)
+        # Served from the cache: no second network call, identical result.
+        assert len(fetcher.calls) == 1
+        assert [(i.external_item_id, i.title, i.text, i.url) for i in cached] == \
+            [(i.external_item_id, i.title, i.text, i.url) for i in live]
+        assert cached[0].external_item_id.startswith("gt:US:")
+
+    def test_text_cache_rejects_non_text_values(self, monkeypatch):
+        """The typed text path refuses to silently json-encode bytes again."""
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        cache = JsonCache(namespace="t", clock=lambda: NOW)
+        with pytest.raises(TypeError):
+            cache.set_text("k", b"<rss/>")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------- cache

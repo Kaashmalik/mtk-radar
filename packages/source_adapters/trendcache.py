@@ -120,6 +120,58 @@ class JsonCache:
             except Exception as exc:  # noqa: BLE001 — memory layer already holds it
                 log.debug("trend cache set failed (%s)", exc)
 
+    # ---------------------------------------------------------- text (G10)
+    # Adapter payloads are not always JSON: Google Trends serves RSS/XML.
+    # `set_json`/`get_json` json-encode whatever they receive, which 500s on
+    # bytes — so text sources get a symmetric raw-string path. Memory and
+    # Redis hold the SAME string, and `cached_text` hands the loader's exact
+    # text back on a hit, guaranteeing live and cached parses are identical.
+
+    def get_text(self, key: str) -> Optional[str]:
+        now = self._clock()
+        full_key = self._key(key)
+        entry = self._memory.get(full_key)
+        if entry is not None:
+            expires_at, raw = entry
+            if now < expires_at:
+                self.hits += 1
+                return raw
+            self._memory.pop(full_key, None)
+
+        client = self._redis_client()
+        if client is not None:
+            try:
+                raw = client.get(full_key)
+                if raw:
+                    self.hits += 1
+                    text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                    # Repopulate the memory layer like a Redis get_json hit.
+                    self._memory[full_key] = (
+                        now + self._default_ttl_s, text)
+                    return text
+            except Exception as exc:  # noqa: BLE001 — cache misses fall through
+                log.debug("trend cache get failed (%s)", exc)
+        self.misses += 1
+        return None
+
+    def set_text(self, key: str, value: str, ttl_s: Optional[int] = None) -> None:
+        if not isinstance(value, str):
+            raise TypeError("set_text stores str payloads only "
+                            "(use set_json for structured data)")
+        ttl = max(1, int(ttl_s or self._default_ttl_s))
+        full_key = self._key(key)
+        self._memory[full_key] = (self._clock() + ttl, value)
+        while len(self._memory) > self._max_entries:
+            oldest = next(iter(self._memory))
+            self._memory.pop(oldest, None)
+
+        client = self._redis_client()
+        if client is not None:
+            try:
+                client.setex(full_key, ttl, value)
+            except Exception as exc:  # noqa: BLE001 — memory layer already holds it
+                log.debug("trend cache set failed (%s)", exc)
+
     def clear(self) -> None:
         self._memory.clear()
 
@@ -149,4 +201,23 @@ def cached_json(
     payload = loader()
     if cache is not None and payload is not None:
         cache.set_json(key, payload, ttl_s)
+    return payload
+
+
+def cached_text(
+    cache: Optional["JsonCache"],
+    key: str,
+    ttl_s: Optional[int],
+    loader: Callable[[], str],
+) -> str:
+    """Text twin of :func:`cached_json` (G10): for sources whose payloads are
+    XML/RSS/HTML. The loader's exact text is stored, so a cache hit parses
+    byte-for-byte identically to the live response."""
+    if cache is not None:
+        hit = cache.get_text(key)
+        if hit is not None:
+            return hit
+    payload = loader()
+    if cache is not None and payload is not None:
+        cache.set_text(key, payload, ttl_s)
     return payload
