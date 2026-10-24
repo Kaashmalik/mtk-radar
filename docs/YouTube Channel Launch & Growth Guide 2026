@@ -1,0 +1,253 @@
+# YouTube Channel Launch & Growth Guide 2026
+
+As of 24 October 2026. Full version with tables and sources: the Claude doc "YouTube Channel Launch & Growth Guide 2026".
+
+---
+
+## 0. Research findings (what I checked, and what it means)
+
+| Date (2026) | Confirmed change | Source | What to do |
+| --- | --- | --- | --- |
+| 21 Jan | CEO letter names low-quality AI content a priority | [YouTube Blog](https://blog.youtube/inside-youtube/the-future-of-youtube-2026/) | AI is fine; spam and sameness are the target |
+| 27 May | AI labels move under player and onto Shorts; YouTube can auto-label realistic AI video | [YouTube Blog](https://blog.youtube/news-and-events/improving-ai-labels-viewers-creators/) | Disclose realistic AI media; a label alone does not change reach or pay |
+| 16 Jul | "Inauthentic content" = generic/repetitive template videos, distressing videos, AI personas on health/money/legal | [Creator Insider](https://www.youtube.com/watch?v=14Vm0CiyUVE) | Every video needs its own idea and your own contribution |
+| 10 Aug | Partner Program overhaul, effective 1 Feb 2027 | [YouTube Blog](https://blog.youtube/news-and-events/youtube-partner-program-updates-2027-new-opportunities-earn/) | Plan monetization around new thresholds (see section 10) |
+| 24 Aug | Public views count from first frame on all formats; old stricter metric is "engaged views" | [TeamYouTube](https://support.google.com/youtube/thread/433409976) | Judge by engaged views and retention |
+| 23 Sep | Made on YouTube: Shorts series, Custom Feeds, wider Ask YouTube, video A/B tests | [YouTube Blog](https://blog.youtube/news-and-events/made-on-youtube-creators-shorts-series-tv-features/) | Plan series and answer clear questions |
+| 1 Oct | Shorts feed favors original videos; mostly-reupload channels get less reach | [TeamYouTube](https://support.google.com/youtube/thread/470890423/prioritizing-original-content-on-shorts?hl=en) | Never build on other people's clips |
+
+**How ranking works (YouTube's own words).** Recommendations are mostly pulled per viewer from their watch behavior. Subscribers are not a test group, new viewers can see a video within the first hour, and many videos earn most views a month or more after upload ([Creator Insider interview](https://www.youtube.com/watch?v=rHLjxrbXmmY)).
+
+**No YouTube source found (do not plan around):** a January "Gemini rebuild" of recommendations, a 30-day Shorts cutoff, an AI-video penalty.
+
+**Monetization numbers** come from the [YouTube Blog announcement](https://blog.youtube/news-and-events/youtube-partner-program-updates-2027-new-opportunities-earn/) and the [AIR Media-Tech guide](https://air.io/en/monetization/youtube-partner-program-requirements-2026-the-complete-guide) (updated 18 Sep 2026).
+
+---
+
+## 1. Channel foundation
+
+**Niche test (score 1-5 each, keep 16+):** Interest (can I do this 2 years?), Demand (do people search/watch it?), Money (affiliate, services, memberships, sponsors?), Edge (my experience, voice, format).
+
+**Positioning statement:** I help [specific viewer] achieve [specific result] through [format], so they can [bigger benefit].
+
+**2026 rules for a new channel**
+- Make every video from your own script, footage or analysis.
+- No AI presenters on health, money or legal topics.
+- Use AI as a tool, not a replacement for your point of view.
+
+**Setup checklist**
+- [ ] Google account with 2-Step Verification
+- [ ] Channel name and matching @handle
+- [ ] Verify phone (videos over 15 min, custom thumbnails)
+- [ ] Turn on advanced features in Studio
+- [ ] Country, language, default upload settings
+- [ ] About section, channel keywords, links, business email
+- [ ] Start AdSense setup early
+
+**Branding specs:** profile 800x800; banner 2560x1440 (safe area about 1546x423); watermark 150x150; thumbnail 1280x720. Pick 2 colors, 1-2 fonts, one thumbnail style.
+
+---
+
+## 2. Topic finding and research
+
+**Sources (use 3+):** search autocomplete and Ask YouTube; outlier videos (far above their channel's average); Studio Research tab; competitor comments; Google Trends and Reddit; your own audience questions.
+
+**Workflow**
+1. Collect 30 raw ideas.
+2. Search each and open the top 10 results; note dates, views, channel size, gaps.
+3. Check demand lasts months, not a week.
+4. Check small channels rank (a good sign).
+5. Define your angle (better explanation, newer update, personal test, other level, other format).
+6. Score and rank.
+
+**Idea scorecard (1-5):** Demand, Competition gap, Your edge, Packaging potential, Series potential, Effort.
+
+**Content pillars:** Search videos 40%, Browse videos (stories, opinions, comparisons) 30%, Series 20%, Shorts and community posts 10%. First 10 videos: lean to search-friendly questions.
+
+---
+
+## 3. Script
+
+| Part | Time | Job |
+| --- | --- | --- |
+| Hook | 0-15 s | Promise or problem plus curiosity |
+| Context | 15-40 s | Why for them, why you |
+| Body | chapters of 60-120 s | One sub-question each |
+| Re-hooks | every 60-90 s | Reset attention |
+| Payoff | last 30-60 s | Deliver the promise |
+| Next step | last 10 s | Send to a related video |
+
+**Hook formulas:** result first; problem and stakes; curiosity gap; story open; challenge. Hook must match title and thumbnail.
+
+**Retention rules:** cut the greeting; one idea per video; write for the ear; change something every 5-10 s; open loops; show proof; cut filler.
+
+**Shorts (15-45 s):** 0-2 s stops the swipe; one idea, fast cuts, on-screen text; end with payoff or a loop. Original footage/script only. Consider numbered series.
+
+**AI for scripts:** brainstorm and tighten only; add your experience; fact-check; never swap the topic in a template.
+
+```
+TITLE / THUMBNAIL IDEA / VIEWER / PROMISE
+HOOK (0-15s) -> CONTEXT (15-40s)
+CHAPTER 1..n: point, proof, visual, re-hook
+PAYOFF -> NEXT STEP -> ONE CTA
+```
+
+---
+
+## 4. Video making
+
+| Priority | Budget | Better |
+| --- | --- | --- |
+| Audio | Wired lavalier (about $15-30) | USB/XLR mic or wireless kit |
+| Light | Window plus reflector | Key, fill, back light |
+| Camera | Phone, 4K 30 fps | Mirrorless with fast lens |
+| Stability | Phone tripod | Tripod with fluid head |
+| Screen capture | Built-in/free recorder | Recorder with cursor highlight |
+
+- **Audio:** soft quiet room, mic 15-20 cm away, peaks around -12 dB, record 10 s of room tone.
+- **Light and frame:** key light about 45 degrees, simple background, eyes on upper third, 16:9 long-form, 9:16 Shorts, lock exposure and focus.
+- **Workflow:** record the hook first (2-3 takes), shoot in chapters, pause 1 s between lines, 3-5 B-roll clips per chapter, record a spare hook for A/B, back up same day.
+- **Faceless is fine if original:** own script and voice, visuals made per video, disclose realistic AI media, no AI hosts on sensitive topics.
+- **Schedule:** Day 1 script, Day 2 record, Day 3 edit, Day 4 thumbnail/metadata/quality check, Day 5 upload and schedule.
+
+---
+
+## 5. Editing and quality
+
+1. Assemble and sync.
+2. Rough cut (remove mistakes, pauses, filler).
+3. Tighten the first 15 s.
+4. Visual change every 5-10 s (cuts, zooms, B-roll, graphics).
+5. Sound: clean voice, quiet music (15-20 dB below voice).
+6. Accurate captions and key on-screen text.
+7. Consistent color.
+8. Watch once on phone and once on laptop.
+9. Export.
+
+**Audio target:** about -14 LUFS integrated, true peak below -1 dB.
+
+| Setting | Long-form | Shorts |
+| --- | --- | --- |
+| Format | MP4, H.264 | MP4, H.264 |
+| Resolution | 1080p min, 4K if shot in 4K | 1080x1920 |
+| Frame rate | as shot | 30 or 60 fps |
+| Bitrate | about 8-12 Mbps (1080p), 35-45 (4K) | about 8-10 Mbps |
+| Audio | AAC 48 kHz, 192-320 kbps | AAC 48 kHz |
+
+Starting points to test, not official YouTube limits.
+
+**Pre-upload checklist**
+- [ ] First 15 s deliver the promise
+- [ ] Clear, consistent voice
+- [ ] No unlicensed music or clips
+- [ ] Facts and numbers verified
+- [ ] Captions checked
+- [ ] Ending points to a specific next video
+- [ ] AI disclosure set if realistic
+
+---
+
+## 6. Thumbnails and titles
+
+**Thumbnail rules:** one idea; 3 words or fewer; face or one large object; strong contrast; readable at about 150 px; consistent style; keep key items away from bottom-right; show something that is in the video. Size 1280x720.
+
+**Title formulas (100 chars max, first 50-60 matter):** How to [result] in [time]; I tried [thing] for [time]; [number] mistakes beginners make; [A] vs [B]; Why does [surprising thing] happen. Honest beats clickbait.
+
+**Test & Compare:** desktop Studio feature, up to 3 thumbnail or title variants, winner by watch time ([overview, third-party](https://vidanalyze.com/news/youtube-ab-testing-for-titles-thumbnails-2026-guide)). Test one variable at a time. If unavailable, swap manually every 2-4 weeks and watch CTR. Compare against your own average.
+
+---
+
+## 7. Description, tags, hashtags
+
+**Description (5,000 chars):** lines 1-2 keyword plus benefit; one link; chapters (first at 00:00, at least 3, each 10 s+); 2-4 sentence summary that answers the question; resources; disclosures; 3-5 hashtags at the end.
+
+**Hashtags:** 3-5 relevant; max 15 (more may be ignored); first 3 show above title; avoid #viral/#fyp ([guide](https://touhfa.art/blog/seo/youtube-hashtags-guide/)).
+
+**Tags:** minimal role in 2026; 5-10 accurate tags, 500-character cap.
+
+**Disclosures:** altered/synthetic content, paid promotion, made-for-kids.
+
+---
+
+## 8. Upload and schedule
+
+1. Create > Upload; upload a few hours early so HD processing finishes.
+2. Details: title, description, thumbnail, playlist, audience, disclosures.
+3. More options: tags, language, category, comments.
+4. Video elements: captions, end screen (last 5-20 s), cards.
+5. Wait for copyright/monetization checks.
+6. Visibility: Public, Schedule or Premiere.
+7. Preview on mobile.
+
+**When:** Studio > Analytics > Audience > "When your viewers are on YouTube"; publish 2-3 hours before peak. No data yet: test two slots for 4-6 weeks. Keep the same slot weekly.
+
+**Pace:** months 1-3: 1 long video a week, 3-5 original Shorts; later 1-2 a week. YouTube sets no required count. Batch scripts and keep a 2-video buffer.
+
+---
+
+## 9. CTAs, community, discovery
+
+| Goal | Where | Example |
+| --- | --- | --- |
+| Watch next | End and end screen | "To fix [problem], watch this next" |
+| Subscribe | After a win | "Subscribe for the next lesson in this series" |
+| Comment | After a question | "Which mistake did you make?" |
+| Lead/product | Description, pinned comment | "Free checklist in the description" |
+
+One CTA per video, always with a reason. End screen: one video plus subscribe or playlist. Group videos into keyword-named playlists, reuse thumbnail style per series, turn long videos into 3-5 original Shorts, reply in the first hour, ask one question in the pinned comment, collaborate with similar-size channels. Never buy views or subscribers.
+
+---
+
+## 10. Analytics, monetization, growth plan
+
+| Tier | Unlocks | Now (to 31 Jan 2027) | From 1 Feb 2027 |
+| --- | --- | --- | --- |
+| Tier 1 | Memberships, Super Chat/Thanks, Shopping, Creator Partnerships | 500 subs, 3 uploads in 90 days, 3,000 qualified hours or 3M Shorts views | Unchanged |
+| Tier 2 | Ads and Premium revenue | 1,000 subs plus 4,000 hours or 10M Shorts views | 1,000 subs plus 8,000 hours (365 days) or 20M Shorts views (90 days) |
+| Shorts revenue pool | Shorts ads/subscription share | No monthly minimum | 10M qualified Shorts views in last 90 days, monthly (includes existing partners) |
+
+Also required: 2-Step Verification, advanced features, no active strikes, AdSense, eligible country. Hours and Shorts views never combine. Private, unlisted or deleted videos do not count.
+
+**For a brand-new channel:** 4,000 hours before 31 Jan 2027 is unlikely. Target Tier 1 first and plan for the 8,000-hour bar. If close, apply early (review about a month, 30-day wait after a rejection; applications reaching YouTube by 23:59 UTC on 31 Jan use current rules). Existing partners must accept new terms in Studio by 31 Jan 2027.
+
+**Income beyond ads:** affiliate, own products/services, memberships, Creator Partnerships, Shopping, new incentives for smaller channels (check Studio Earn tab).
+
+**Monthly metrics:** CTR (Reach), average view duration and retention curve (Engagement), engaged views for Shorts (Advanced Mode), traffic sources, returning viewers, subscribers per video.
+
+**Monthly review (60 min):** top and bottom 3 videos; what top ones share; where viewers drop; pick one change to test; update calendar.
+
+**90-day plan**
+
+| Phase | Weeks | Focus | Output |
+| --- | --- | --- | --- |
+| Foundation | 1-2 | Niche, branding, setup, 30 ideas, first 3 videos | 3 videos banked |
+| Launch | 3-6 | Weekly long video, 3-5 Shorts/week, reply to comments | 4-6 videos, 12+ Shorts |
+| Learn | 7-10 | Analytics, double best formats, test thumbnails/titles, start series | Repeatable format |
+| Scale | 11-13 | Collabs, series, community posts, lead magnet, apply for Tier 1 if eligible | 10+ videos |
+
+**12 months:** M1-3 publish 12 long videos; M4-6 reach Tier 1 and launch an offer; M7-9 build a series and collaborate; M10-12 reach full-monetization thresholds and launch a first product or sponsor package.
+
+**Mistakes to avoid:** changing niche constantly, reposting others' content or template videos, chasing unrelated trends, obsessing over tags instead of retention and packaging, buying views, misleading titles, quitting before 20-30 videos.
+
+---
+
+## Weekly checklist
+
+- [ ] Mon: idea, demand check, angle
+- [ ] Tue: script and visuals plan
+- [ ] Wed: record A-roll, B-roll, spare hook
+- [ ] Thu: edit, captions, sound, export
+- [ ] Fri: 2 thumbnails and titles, description, upload, schedule
+- [ ] Weekend: 2-3 Shorts, community poll, comments, review numbers
+
+## Sources
+
+- [YouTube Blog: Partner Program changes (10 Aug 2026)](https://blog.youtube/news-and-events/youtube-partner-program-updates-2027-new-opportunities-earn/)
+- [AIR Media-Tech: YPP requirements 2026](https://air.io/en/monetization/youtube-partner-program-requirements-2026-the-complete-guide)
+- [AITuber: confirmed 2026 algorithm changes](https://aituber.app/blog/youtube-algorithm-changes/)
+- [TeamYouTube: original content on Shorts](https://support.google.com/youtube/thread/470890423/prioritizing-original-content-on-shorts?hl=en)
+- [TeamYouTube: public view counting](https://support.google.com/youtube/thread/433409976)
+- [Creator Insider: algorithm interview](https://www.youtube.com/watch?v=rHLjxrbXmmY)
+- [YouTube Help: country availability](https://support.google.com/youtube/answer/7101720)
+
+Gear, scripting, editing and thumbnail sections reflect standard creator practice, not a single source. Confirm current rules in YouTube Studio before applying.
