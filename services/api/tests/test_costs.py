@@ -150,6 +150,76 @@ def test_shared_cache_roundtrip_and_expiry(client):
 
 # --------------------------------------------------------- provider probe
 
+
+# -------------------------------------------------- G04 reservation ledger
+
+def test_reservation_settlement_counts_spend_once(client):
+    """G04: an allowed request RESERVES its projected size; the usage report
+    settles that reservation with actuals. The budget counts the reserved
+    amount conservatively immediately, and after settlement exactly once —
+    never predicted+actual double. (Earlier tests in this file emit over 1M
+    TTS chars 'today', so every assertion is relative to current spend.)"""
+    client.put("/automation/policy", json={
+        "policy": {"guardrails": {"max_tts_chars_per_day": 5_000_000}}})
+    baseline = client.get("/costs/budget").json()["tts"]["chars_today"]
+
+    gate = client.post("/costs/check", json={
+        "kind": "tts", "units": 1_000,
+        "provider": "openai-compatible", "model": "tts-1",
+        "ref_type": "render"})
+    assert gate.status_code == 200
+    reservation_id = gate.json().get("reservation_id")
+    assert reservation_id, "an allowed sized request must return a reservation"
+
+    # the reservation is conservative budget state right away
+    assert client.get("/costs/budget").json()["tts"]["chars_today"] == baseline + 1_000
+
+    # settlement replaces the reservation with the actual usage
+    settled = client.post("/costs/usage", json={
+        "settle_reservation": reservation_id,
+        "events": [{"kind": "tts", "units": 700, "unit_type": "chars",
+                    "provider": "openai-compatible", "model": "tts-1"}]})
+    assert settled.status_code == 200, settled.text
+    assert client.get("/costs/budget").json()["tts"]["chars_today"] == baseline + 700, \
+        "settled spend must count the ACTUAL usage exactly once"
+
+    # an unknown reservation id appends raw rather than losing the spend
+    orphan = client.post("/costs/usage", json={
+        "settle_reservation": str(uuid.uuid4()),
+        "events": [{"kind": "tts", "units": 50, "unit_type": "chars"}]})
+    assert orphan.status_code == 200
+    assert client.get("/costs/budget").json()["tts"]["chars_today"] == baseline + 750
+
+
+def test_concurrency_budget_projection_sees_standing_reservations(client):
+    """G04 acceptance: a check that would exceed the cap given ALREADY
+    reserved spend must not pass — the projection inside the advisory-locked
+    transaction includes each prior check's reservation, so parallel workers
+    cannot jointly oversubscribe the cap."""
+    client.put("/automation/policy", json={
+        "policy": {"guardrails": {"max_tts_chars_per_day": 5_000_000}}})
+    baseline = client.get("/costs/budget").json()["tts"]["chars_today"]
+    # headroom for exactly ONE 400-char reservation out of the four checks
+    client.put("/automation/policy", json={
+        "policy": {"guardrails": {
+            "max_tts_chars_per_day": baseline + 400}}})
+
+    results = []
+    # the API client is a shared TestClient; the workers' process-parallel
+    # case reduces to the same serialized sequence — each check must see the
+    # previous check's reservation, which the same-transaction insert gives.
+    for _ in range(4):
+        results.append(client.post("/costs/check", json={
+            "kind": "tts", "units": 400}).json())
+    allowed = sum(1 for r in results if r["allowed"])
+    assert allowed == 1, (
+        f"{allowed} of 4 400-char checks passed a {baseline + 400}-char cap "
+        "with outstanding reservations — the projection ignored them")
+    assert all("exhausted" in (r["reason"] or "") for r in results if not r["allowed"])
+    client.put("/automation/policy", json={
+        "policy": {"guardrails": {"max_tts_chars_per_day": 50_000}}})
+
+
 def test_provider_probe_never_raises_when_unconfigured(client):
     # No VERIFY_LLM_BASE_URL / TTS_BASE_URL in the test env → configured:
     # false, and never an error.

@@ -127,9 +127,13 @@ def synthesize(text: str, out_path: Path, *,
                             model=model_id, unit_type="chars",
                             meta={"cache_hit": True})
                 return cached_path
-        if not cost.budget_ok("tts", units=len(text or ""),
-                              provider="openai-compatible", model=model_id):
+        # G04: reserve the predicted char count atomically before the call;
+        # the usage report after success settles this reservation.
+        gate = cost.budget_check("tts", units=len(text or ""),
+                                 provider="openai-compatible", model=model_id)
+        if not gate.get("allowed"):
             return None
+        reservation_id = gate.get("reservation_id")
     body = {
         "model": model_id,
         "voice": voice_id,
@@ -149,9 +153,12 @@ def synthesize(text: str, out_path: Path, *,
         if cost is not None:
             cost.cache_store("tts", cache_key, {"path": str(out_path)})
             cost.report("tts", units=len(text or ""), provider="openai-compatible",
-                        model=model_id, unit_type="chars")
+                        model=model_id, unit_type="chars",
+                        settle_reservation=reservation_id)
         return out_path
     except Exception:  # noqa: BLE001
+        # G04: a failed/sent TTS request leaves its reservation standing —
+        # the provider may still bill for it; unknown usage is not free.
         return None
 
 

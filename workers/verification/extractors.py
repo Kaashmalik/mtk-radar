@@ -12,6 +12,7 @@ Two backends:
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any, Optional
@@ -230,6 +231,14 @@ LLM_MAX_CALLS_PER_RUN = int(os.environ.get("VERIFY_LLM_MAX_CALLS_PER_RUN", "12")
 LLM_MAX_ATTEMPTS = max(1, int(os.environ.get("VERIFY_LLM_MAX_ATTEMPTS", "3")))
 LLM_BACKOFF_BASE_S = float(os.environ.get("VERIFY_LLM_BACKOFF_BASE_S", "1.0"))
 
+# G04 (evidence-to-video plan): the extraction call must ask for permission
+# with a PREDICTED size, not "0 units", and must physically bound the output
+# it can consume. chars/4 is the standard ~4-characters-per-token heuristic;
+# the output cap is a hard request parameter, not a hope.
+CHARS_PER_TOKEN = 4
+LLM_MAX_OUTPUT_TOKENS = max(
+    256, int(os.environ.get("VERIFY_LLM_MAX_OUTPUT_TOKENS", "2000")))
+
 
 class RunBudget:
     """Per-run request budget for the optional LLM extractor (WP-G).
@@ -314,11 +323,21 @@ def extract_fields_llm(
                         ref_type="offer", ref_id=ref_offer_id,
                         meta={"cache_hit": True})
             return cached
-        if not cost.budget_ok("llm_extract", provider="openai-compatible",
-                              model=model_id, ref_type="offer",
-                              ref_id=ref_offer_id):
+        # G04: ask for permission with the PREDICTED request size (uncapped
+        # input + a hard output cap), never a bare 0 — the budget service
+        # reserves this upper bound atomically before any bytes are sent.
+        predicted_text = text[:8000]
+        predicted_units = ((len(predicted_text) + CHARS_PER_TOKEN - 1)
+                           // CHARS_PER_TOKEN) + LLM_MAX_OUTPUT_TOKENS
+        gate = cost.budget_check(
+            "llm_extract", units=predicted_units,
+            provider="openai-compatible", model=model_id,
+            ref_type="offer", ref_id=ref_offer_id,
+            meta={"predicted": True, "text_chars": len(predicted_text),
+                  "max_output_tokens": LLM_MAX_OUTPUT_TOKENS})
+        if not gate.get("allowed"):
             return None
-
+        reservation_id = gate.get("reservation_id")
     system = (
         "You extract structured offer data for a verification desk. "
         "Only report what the text literally supports. For each field give: "
@@ -334,6 +353,9 @@ def extract_fields_llm(
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": text[:8000]}],
         "temperature": 0,
         "response_format": {"type": "json_object"},
+        # G04: the output cap is a real request parameter — predicted cost
+        # and consumed cost share the same ceiling.
+        "max_tokens": LLM_MAX_OUTPUT_TOKENS,
     }
     # WP-G: bounded retries with backoff + jitter. Network errors, 5xx and
     # 429 are retried; a malformed payload is NOT (a re-ask would return the
@@ -364,6 +386,9 @@ def extract_fields_llm(
             if not isinstance(data.get("fields"), dict):
                 if run_budget is not None:
                     run_budget.note("llm_bad_payload")
+                # G04: the reservation stays OPEN — the request was sent and
+                # the provider bill for it may exist even though the payload
+                # was garbage. Unknown usage must not count as free.
                 return None  # malformed — retrying would return the same garbage
             if cost is not None:
                 usage = payload.get("usage") or {}
@@ -374,7 +399,8 @@ def extract_fields_llm(
                             provider="openai-compatible", model=model_id,
                             unit_type="tokens", ref_type="offer",
                             ref_id=ref_offer_id,
-                            meta={"tokens_in": tokens_in, "tokens_out": tokens_out})
+                            meta={"tokens_in": tokens_in, "tokens_out": tokens_out},
+                            settle_reservation=reservation_id)
             if run_budget is not None:
                 run_budget.note("llm_succeeded")
             return data
@@ -384,6 +410,14 @@ def extract_fields_llm(
             continue
     if run_budget is not None:
         run_budget.note("llm_failures")
+    if cost is not None and reservation_id:
+        # G04: never discard usage just because the response was unusable.
+        # The reservation stays open and IS the liability record for the
+        # sent request(s); the operator sees it on the Costs card until it
+        # is reconciled.
+        logging.getLogger("verification").warning(
+            "llm extraction failed after a budgeted attempt — reservation %s "
+            "stays open as the recorded liability", reservation_id)
     return None
 
 
