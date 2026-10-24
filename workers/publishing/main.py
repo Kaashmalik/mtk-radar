@@ -786,6 +786,19 @@ class Publisher:
                                 "(register its env credentials, then resume)")
             return False
 
+        # G01 (evidence-to-video plan): a privacy mode the adapter cannot
+        # honor must fail BEFORE the attempt claim and any publishing side
+        # effect. Instagram, for one, has no per-post private mode at all.
+        supports_privacy = getattr(adapter, "supports_privacy", None)
+        requested_privacy = post.get("privacy", "private")
+        if supports_privacy is not None and not supports_privacy(requested_privacy):
+            self._block(
+                post["id"],
+                f"{platform} cannot publish with privacy='{requested_privacy}' "
+                "(the platform has no such per-post mode — see the adapter's "
+                "capability list); reschedule with a supported mode, never retry")
+            return False
+
         # v0.23: an upload attempt that never reported its outcome is
         # UNKNOWN — the post may already be live on the platform. Publishing
         # again would create a duplicate public post, so the post is held for

@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from platforms.base import TokenExpiredError
+from platforms.base import TokenExpiredError, UnsupportedPrivacyError
 from platforms.instagram import InstagramAdapter
 
 
@@ -59,6 +59,35 @@ def test_missing_public_url_fails_loudly(tmp_path):
     adapter = InstagramAdapter(user_id="ig-1", access_token="tok", http=_client(handler))
     with pytest.raises(RuntimeError, match="publicly reachable"):
         adapter.upload(video, {"caption": "hello"})
+
+
+# --------------------------------------------------------- G01 privacy guard
+
+def test_unsupported_privacy_is_rejected_before_any_side_effect(tmp_path):
+    """G01: 'private'/'unlisted' do not exist on Instagram's Content Publishing
+    API. The old docstring promised a draft state that was never real — a
+    'private test' would go LIVE. The request must be refused before the
+    container is created, with no HTTP call at all."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        calls.append(request.url.path)
+        raise AssertionError("no API call may happen for unsupported privacy")
+
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"video")
+    adapter = InstagramAdapter(user_id="ig-1", access_token="tok", http=_client(handler))
+    for privacy in ("private", "unlisted", "draft", ""):
+        with pytest.raises(UnsupportedPrivacyError, match="no per-post private"):
+            adapter.upload(video, {"caption": "hello", "public_url": "https://cdn.test/reel.mp4"},
+                           privacy=privacy)
+    assert calls == [], "a rejected privacy mode must not reach the Graph API"
+
+
+def test_supported_privacy_capability_probe():
+    assert InstagramAdapter.supports_privacy("public") is True
+    assert InstagramAdapter.supports_privacy("private") is False
+    assert InstagramAdapter.supports_privacy("unlisted") is False
 
 
 def test_failed_container_is_never_published(tmp_path):

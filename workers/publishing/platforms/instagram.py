@@ -10,9 +10,14 @@ Instagram needs THREE things this adapter makes explicit:
   3. the two-step container flow: create a media container, wait for the
      transcoding status to be FINISHED, then publish it.
 
-Test uploads stay unpublished by default: `privacy != "public"` publishes the
-container but keeps the media in a draft state, mirroring the Facebook
-adapter's conservative default.
+G01 (evidence-to-video plan): there is NO private/draft publish on this
+platform — an earlier docstring claimed test uploads "stay unpublished by
+default", which was false. `media_publish` puts the media live in front of
+the account's default audience, full stop. Schedules requesting `private`
+or `unlisted` are rejected with UnsupportedPrivacyError BEFORE the container
+is created: correct the schedule to `public` or connect a platform that
+supports the requested mode. Facebook keeps the `published=false` draft
+capability; that is a Facebook feature, not an Instagram one.
 """
 
 import time
@@ -26,6 +31,7 @@ from .base import (
     RateLimited,
     TokenExpiredError,
     TransportUnauthorized,
+    UnsupportedPrivacyError,
     exchange_long_lived_token as _base_exchange,
     raise_on_graph_error,
     retry_after_from_response,
@@ -33,6 +39,14 @@ from .base import (
 
 GRAPH_VERSION = "v21.0"
 GRAPH_ENDPOINT = f"https://graph.facebook.com/{GRAPH_VERSION}/"
+
+# G01 (evidence-to-video plan): Instagram's Content Publishing API has NO
+# per-post privacy control. A container is published to the account's default
+# audience the moment `media_publish` succeeds — there is no draft/private
+# state to fall back on. Advertising one is how a "private test" becomes a
+# public live post. Only `public` is supported; anything else is rejected
+# before any API call is made. (`unlisted` is not an Instagram concept.)
+SUPPORTED_PRIVACY = frozenset({"public"})
 
 # Graph polls the container until transcoding completes; keep the window short
 # and bounded so a stuck container cannot block the publishing worker.
@@ -42,6 +56,11 @@ CONTAINER_POLL_INTERVAL_S = 3
 
 class InstagramAdapter(PublishAdapter):
     platform = "instagram"
+
+    @classmethod
+    def supports_privacy(cls, privacy: str) -> bool:
+        """Capability probe used as a pre-flight check publishing-side."""
+        return privacy in SUPPORTED_PRIVACY
 
     def __init__(self, user_id: str, access_token: str,
                  account_id: Optional[str] = None, on_refresh=None,
@@ -60,8 +79,16 @@ class InstagramAdapter(PublishAdapter):
     # ---------------------------------------------------------------- upload
 
     def upload(self, video_path: Path, meta: dict[str, Any],
-               privacy: str = "private", idempotency_key: Optional[str] = None) -> str:
+               privacy: str = "public", idempotency_key: Optional[str] = None) -> str:
         self.ensure_ready()
+        # G01: reject unsupported privacy BEFORE any publishing side effect —
+        # no container may exist for a request Graph cannot honor anyway.
+        if privacy not in SUPPORTED_PRIVACY:
+            raise UnsupportedPrivacyError(
+                f"instagram cannot publish with privacy='{privacy}': the Content "
+                f"Publishing API has no per-post private/unpublished mode; supported "
+                f"modes are {sorted(SUPPORTED_PRIVACY)} — fix the schedule, do not retry"
+            )
         public_url = (meta.get("public_url") or "").strip()
         if not public_url:
             raise RuntimeError(
@@ -72,7 +99,7 @@ class InstagramAdapter(PublishAdapter):
         caption = (meta.get("caption") or meta.get("title") or "")[:2200]
         container_id = self._create_container(public_url, caption)
         self._await_container(container_id)
-        return self._publish_container(container_id, privacy)
+        return self._publish_container(container_id)
 
     # ------------------------------------------------------------- internals
 
@@ -119,7 +146,9 @@ class InstagramAdapter(PublishAdapter):
             time.sleep(CONTAINER_POLL_INTERVAL_S)
         raise RuntimeError("instagram media processing did not finish in time")
 
-    def _publish_container(self, container_id: str, privacy: str) -> str:
+    def _publish_container(self, container_id: str) -> str:
+        # No privacy parameter exists on media_publish — if one appears here
+        # again, that is the G01 lie returning.
         resp = self._http.post(
             f"{GRAPH_ENDPOINT}{self.user_id}/media_publish",
             data={"creation_id": container_id, "access_token": self.access_token},
