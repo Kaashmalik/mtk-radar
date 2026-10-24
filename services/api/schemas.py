@@ -2,16 +2,34 @@
 
 import base64
 import binascii
+import sys
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Final, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from document_sections import MAX_DOCUMENT_CHARS
 
+# G06: the adapter-kind registry in `packages/` is authoritative for the API
+# too, so a new adapter cannot exist in the collector while `SourceIn` still
+# refuses to create it.
+_PACKAGES = Path(__file__).resolve().parents[2] / "packages"
+if str(_PACKAGES) not in sys.path:
+    sys.path.insert(0, str(_PACKAGES))
+
+from source_adapters.registry import missing_config as _adapter_missing_config  # noqa: E402
+from source_adapters.registry import ADAPTER_KINDS as _ADAPTER_KINDS  # noqa: E402
+
 TrustTier = Literal["A_provider_owned", "B_discovery_lead", "C_excluded"]
-AdapterKind = Literal["rss", "github_releases", "page_watch", "extension", "manual"]
+# Keep this Literal in sync with registry.ADAPTER_KINDS — the guard test
+# `test_registry_sync` fails the suite if the two drift apart.
+AdapterKind = Literal[
+    "rss", "github_releases", "page_watch", "hf_papers", "hn_search",
+    "github_stars", "reddit_new", "google_trends_rss", "extension", "manual",
+]
+assert set(_ADAPTER_KINDS) == set(AdapterKind.__args__)  # import-time sync check
 OfferStateL = Literal[
     "candidate",
     "evidence_needed",
@@ -68,6 +86,18 @@ class SourceIn(BaseModel):
     country_scope: list[str] = Field(default_factory=list)
     trust_tier: TrustTier = "B_discovery_lead"
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def _adapter_config_present(self):
+        """G06: a source must be registrable AND runnable — reject kinds whose
+        required adapter config is missing at creation time (with the seed
+        script now going through the same rules) instead of letting the
+        collector discover the hole on its first poll."""
+        absent = _adapter_missing_config(self.adapter, self.config)
+        if absent:
+            raise ValueError(
+                f"adapter {self.adapter!r} requires config key(s): {', '.join(absent)}")
+        return self
 
 
 class PollResult(BaseModel):

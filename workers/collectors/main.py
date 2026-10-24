@@ -42,6 +42,8 @@ from source_adapters import (  # noqa: E402
     fetch_reddit_new,
     fetch_rss,
 )
+from source_adapters.registry import ADAPTERS as REGISTRY  # noqa: E402
+from source_adapters.registry import get as spec_for  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
@@ -89,6 +91,15 @@ def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -
             config = {}
     if not isinstance(config, dict):
         config = {}
+
+    if adapter not in REGISTRY:
+        # G06: unregistered kinds are a data bug, not a no-op — the collector
+        # used to silently return [] which left the source "green" while
+        # polling nothing.
+        raise ValueError(f"unknown adapter kind: {adapter!r}")
+    if not spec_for(adapter).collector_polled:
+        # 'manual' and 'extension' sources are not collector-polled.
+        return []
 
     if adapter == "rss":
         feed_url = config.get("feed_url")
@@ -141,8 +152,9 @@ def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -
             config.get("geo", "US"), fetcher=fetcher, cache=cache
         )
     else:
-        # 'manual' and 'extension' sources are not collector-polled.
-        return []
+        # Registered but not polled (handled above) — unreachable; kept as a
+        # guard so a future registry entry without a branch cannot fall out.
+        raise ValueError(f"adapter {adapter!r} has no collector branch")
 
     return [
         {

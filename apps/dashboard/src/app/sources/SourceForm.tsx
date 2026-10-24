@@ -15,9 +15,17 @@ const ADAPTERS = [
   { id: "rss", label: "RSS / Atom feed", needs: "config.feed_url" },
   { id: "github_releases", label: "GitHub releases", needs: "config.repo" },
   { id: "page_watch", label: "Web page (watch)", needs: "config.url" },
+  { id: "hf_papers", label: "Hugging Face daily papers", needs: "— (no config)" },
+  { id: "hn_search", label: "Hacker News search", needs: "config.query" },
+  { id: "github_stars", label: "GitHub stars (velocity)", needs: "config.repos (owner/name per line)" },
+  { id: "google_trends_rss", label: "Google Trends (trending searches)", needs: "config.geo (default US)" },
   { id: "extension", label: "Browser extension saves", needs: "— (manual saves)" },
   { id: "manual", label: "Manual (seed only)", needs: "—" },
 ];
+// `reddit_new` is intentionally absent: the Reddit adapter is off until its
+// access/use is approved and documented (EP-02 G22). Once approved, add it
+// here AND to packages/source_adapters/registry.py — the registry, the API
+// schema and this form must stay in sync (guard-tested on the Python side).
 
 const TIERS = [
   { id: "A_provider_owned", label: "A — provider owned (can back a verified offer)" },
@@ -37,6 +45,9 @@ export default function SourceForm() {
   const [repo, setRepo] = useState("");
   const [tier, setTier] = useState("B_discovery_lead");
   const [cadence, setCadence] = useState("6 hours");
+  const [query, setQuery] = useState("");
+  const [repos, setRepos] = useState("");
+  const [geo, setGeo] = useState("US");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,10 +58,16 @@ export default function SourceForm() {
     setError(null);
     setMsg(null);
 
-    const config: Record<string, string> = {};
+    const config: Record<string, string | string[]> = {};
     if (adapter === "rss" && feedUrl.trim()) config.feed_url = feedUrl.trim();
     if (adapter === "github_releases" && repo.trim()) config.repo = repo.trim();
     if (adapter === "page_watch" && feedUrl.trim()) config.url = feedUrl.trim();
+    if (adapter === "hn_search" && query.trim()) config.query = query.trim();
+    if (adapter === "github_stars" && repos.trim()) {
+      config.repos = repos.split(/[\n,]/).map((r) => r.trim())
+        .filter(Boolean);
+    }
+    if (adapter === "google_trends_rss" && geo.trim()) config.geo = geo.trim();
 
     try {
       const res = await clientFetch("/sources", {
@@ -78,6 +95,9 @@ export default function SourceForm() {
       setDomain("");
       setFeedUrl("");
       setRepo("");
+      setQuery("");
+      setRepos("");
+      setGeo("US");
       router.refresh();
     } finally {
       setBusy(false);
@@ -124,6 +144,27 @@ export default function SourceForm() {
           <label htmlFor="src-url" className="small">Page URL</label>
           <input id="src-url" value={feedUrl} onChange={(e) => setFeedUrl(e.target.value)}
                  placeholder="https://acme.com/offers" />
+        </>
+      )}
+      {adapter === "hn_search" && (
+        <>
+          <label htmlFor="src-query" className="small">Search query</label>
+          <input id="src-query" value={query} onChange={(e) => setQuery(e.target.value)}
+                 placeholder='student discount' />
+        </>
+      )}
+      {adapter === "github_stars" && (
+        <>
+          <label htmlFor="src-repos" className="small">Repositories (owner/name, comma or newline separated)</label>
+          <textarea id="src-repos" value={repos} onChange={(e) => setRepos(e.target.value)}
+                    rows={3} placeholder={"acme/domains\nother/toolkit"} />
+        </>
+      )}
+      {adapter === "google_trends_rss" && (
+        <>
+          <label htmlFor="src-geo" className="small">Country code</label>
+          <input id="src-geo" value={geo} onChange={(e) => setGeo(e.target.value)}
+                 placeholder="US" />
         </>
       )}
 
