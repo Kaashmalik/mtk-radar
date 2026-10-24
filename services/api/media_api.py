@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import CREDENTIAL_DISABLED, CREDENTIAL_REVIEWER, credential_class
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "packages") not in sys.path:
@@ -315,15 +316,21 @@ def _delete_ref(ref: str) -> bool:
 
 
 @router.post("/media/gc")
-async def media_gc(body: MediaGcIn) -> dict:
+async def media_gc(body: MediaGcIn, request: Request) -> dict:
     """Retain non-pinned media for the documented 90-day policy, then offer
     reclamation (WP-G §5.6.4). Pinned artifacts — anything a live schedule
     (state not cancelled/failed) still references — are ALWAYS exempt.
 
+    G05 (evidence-to-video plan): destructive reclamation is a HUMAN action —
+    reviewer credential required (also enforced centrally in the auth
+    middleware's route/role matrix; this check is the second lock).
     Dry run first (default): returns the exact candidate list; nothing is
     touched. `dry_run=false` deletes and writes an audit entry with every
     removed ref so the reclamation is reviewable afterwards.
     """
+    if credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(status_code=403, detail=(
+            "media GC is reviewer-only: a robot must not delete artifacts"))
     pool = db.get()
     candidates = await _gc_candidates(pool, body.retention_days)
     if body.dry_run:

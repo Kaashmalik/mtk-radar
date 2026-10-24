@@ -62,6 +62,72 @@ CREDENTIAL_EXTENSION = "extension"
 SYSTEM_CLASSES = frozenset({CREDENTIAL_SERVICE, CREDENTIAL_WORKER, CREDENTIAL_EXTENSION})
 _AUTOMATION_PREFIXES = ("automation:", "system:")
 
+# ---- G05 route/role matrix (evidence-to-video plan) -------------------------
+#
+# Deny-by-default for scoped NON-HUMAN credentials. A credential class is
+# only ever allowed what its row grants — a class label is not authorization.
+# Human reviewer credentials (and dev-open mode) are unrestricted here;
+# human-only WRITES remain gated in the routers by automation policy, this
+# matrix is the transport-level backstop.
+#
+# CREDENTIAL_EXTENSION: intake-only by design. The extension saves candidate
+# items and probes its own identity — nothing else. It can never read private
+# media, claim jobs, poison caches, or delete artifacts, even if its token
+# leaks (it is scoped AND revocable: rotate MTK_EXTENSION_TOKEN).
+NON_HUMAN_ROUTE_GRANTS: dict[str, tuple[tuple[str, frozenset[str]], ...]] = {
+    CREDENTIAL_EXTENSION: (
+        ("/items", frozenset({"POST"})),
+        ("/whoami", frozenset({"GET"})),
+    ),
+}
+
+#: Routes reserved for HUMAN reviewers. Any non-human credential — service,
+#: worker, extension — is refused here centrally, independent of routers.
+REVIEWER_ONLY_ROUTES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("/media/gc", frozenset({"POST"})),          # destructive reclamation
+    ("/jobs/bulk-retry", frozenset({"POST"})),   # operator-only un-wedging
+)
+
+
+#: Classes with an explicit allowlist — everything NOT granted here is denied
+#: for these classes (deny-by-default). Workers are intentionally NOT in this
+#: map: they run the pipeline broadly, and human-only writes stay gated by the
+#: automation policy in the routers plus REVIEWER_ONLY_ROUTES centrally.
+ALLOWLISTED_NON_HUMAN_CLASSES = frozenset({CREDENTIAL_EXTENSION})
+
+
+def _route_matches(prefix: str, path: str) -> bool:
+    """Prefix match on path segments (so '/items' does not match '/items2' but
+    does match '/items/sub')."""
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def route_authorization_failure(credential_class: str, method: str,
+                                path: str) -> Optional[str]:
+    """Return a refusal reason when the credential's route grant denies this
+    request — None when allowed. Reviewer/disabled classes are never denied
+    by the non-human matrix."""
+    for prefix, methods in REVIEWER_ONLY_ROUTES:
+        if method in methods and _route_matches(prefix, path):
+            if credential_class not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+                return (f"route {method} {path} is reserved for human reviewers "
+                        f"(credential class '{credential_class}' is not)")
+            return None
+    if credential_class not in ALLOWLISTED_NON_HUMAN_CLASSES:
+        return None
+    grants = NON_HUMAN_ROUTE_GRANTS.get(credential_class)
+    if grants is None:
+        return (f"credential class '{credential_class}' has no route grants "
+                "(deny-by-default; extend NON_HUMAN_ROUTE_GRANTS deliberately)")
+    for prefix, methods in grants:
+        if _route_matches(prefix, path):
+            if method in methods:
+                return None
+            return (f"credential class '{credential_class}' may only use "
+                    f"{sorted(methods)} on {prefix} (got {method})")
+    return (f"credential class '{credential_class}' is not granted {method} "
+            f"{path} (intake-only credential)")
+
 # token_hash -> (name, cached_at). Positives only; revocation takes effect on
 # the next request or ≤TTL. reset_reviewer_cache() clears it immediately.
 _REVIEWER_CACHE: dict[str, tuple[str, float]] = {}
@@ -312,6 +378,14 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
         self._tokens = dict(tokens)
         self._db_url = db_url
 
+    async def _finish(self, request: Request, cls: str, call_next) -> Response:  # noqa: ANN001
+        """Set the credential class, apply the G05 route/role matrix, continue."""
+        refusal = route_authorization_failure(cls, request.method, request.url.path)
+        if refusal:
+            return JSONResponse(status_code=403, content={"detail": refusal})
+        request.state.credential_class = cls
+        return await call_next(request)
+
     async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
         if not self._tokens:
             # dev-open mode: no auth, no identity binding
@@ -344,8 +418,7 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
             if hmac.compare_digest(credential, configured):
                 _auth_failure_reset(ip)
                 request.state.actor = None
-                request.state.credential_class = cls
-                return await call_next(request)
+                return await self._finish(request, cls, call_next)
 
         if self._db_url:
             try:
@@ -359,8 +432,7 @@ class _TokenAuthMiddleware(BaseHTTPMiddleware):
             if reviewer:
                 _auth_failure_reset(ip)
                 request.state.actor = reviewer
-                request.state.credential_class = CREDENTIAL_REVIEWER
-                return await call_next(request)
+                return await self._finish(request, CREDENTIAL_REVIEWER, call_next)
 
         _auth_failure_record(ip)
         return _auth_required("invalid token")

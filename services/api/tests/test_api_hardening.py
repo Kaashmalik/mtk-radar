@@ -286,3 +286,85 @@ def test_metrics_requires_auth_when_token_configured(hardened_app):
     hardened_app.include_router(metrics_api.router)
     with TestClient(hardened_app) as client:
         assert client.get("/metrics").status_code == 401
+
+
+# ----------------------------------------- G05 route/role matrix (intake-only)
+
+@pytest.fixture()
+def matrix_app():
+    app = FastAPI()
+
+    @app.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    @app.get("/whoami")
+    async def whoami():
+        return {"ok": True}
+
+    @app.post("/items")
+    async def post_item():
+        return {"ok": True}
+
+    @app.post("/media/gc")
+    async def media_gc():
+        return {"deleted": True}
+
+    return app
+
+
+def test_extension_credential_is_intake_only(matrix_app, monkeypatch):
+    """G05: the extension credential may ONLY save candidate items and probe
+    its own identity. Leaked, it cannot read the dashboard, claim jobs, or
+    delete artifacts — deny-by-default on everything else."""
+    monkeypatch.setenv("MTK_EXTENSION_TOKEN", "ext-tok")
+    import api_hardening as ah
+    ah.register(matrix_app, token="svc-tok")
+    ext = {"Authorization": "Bearer ext-tok"}
+    with TestClient(matrix_app) as client:
+        assert client.post("/items", headers=ext).status_code == 200
+        assert client.get("/whoami", headers=ext).status_code == 200
+        assert client.get("/ping", headers=ext).status_code == 403
+        assert client.post("/media/gc", headers=ext).status_code == 403
+
+        # prefix discipline: /items2 is NOT granted by an /items prefix
+        assert client.get("/ping", headers={"Authorization": "Bearer ext-tok"}).status_code == 403
+
+        # the service credential is not the extension: rules differ
+        assert client.get("/ping", headers={"Authorization": "Bearer svc-tok"}).status_code == 200
+
+
+def test_media_gc_reserved_for_human_reviewers_central(matrix_app, monkeypatch):
+    """G05: /media/gc is destructive — the service and worker credentials are
+    refused centrally, before any router logic runs."""
+    monkeypatch.setenv("MTK_WORKER_TOKEN", "work-tok")
+    import api_hardening as ah
+    ah.register(matrix_app, token="svc-tok")
+    with TestClient(matrix_app) as client:
+        assert client.post("/media/gc",
+                           headers={"Authorization": "Bearer svc-tok"}).status_code == 403
+        assert client.post("/media/gc",
+                           headers={"Authorization": "Bearer work-tok"}).status_code == 403
+        # other routes stay open to the control-plane credential
+        assert client.get("/ping",
+                          headers={"Authorization": "Bearer svc-tok"}).status_code == 200
+
+
+def test_route_matrix_decision_function_unit():
+    from api_hardening import route_authorization_failure as raf
+
+    # extension allowlist, exact + prefix semantics
+    assert raf("extension", "POST", "/items") is None
+    assert raf("extension", "POST", "/items/sub") is None
+    assert raf("extension", "GET", "/items2") is not None  # no prefix bleed
+    assert raf("extension", "DELETE", "/items") is not None
+    assert raf("extension", "POST", "/media/gc") is not None
+    # reviewer-only wins over any non-human grant
+    assert "reviewer" in raf("worker", "POST", "/media/gc")
+    assert "reviewer" in raf("service", "POST", "/jobs/bulk-retry")
+    # humans and dev-open are never denied by the matrix
+    assert raf("reviewer", "POST", "/media/gc") is None
+    assert raf("disabled", "POST", "/media/gc") is None
+    # workers keep broad pipeline access
+    assert raf("worker", "POST", "/jobs") is None
+    assert raf("worker", "GET", "/offers") is None

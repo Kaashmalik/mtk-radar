@@ -15,15 +15,20 @@
   <body>
     <h1>MTK RADAR AI — Save Page settings</h1>
     <p class="hint">
-      The API URL points at your MTK RADAR API. The token is the shared worker
-      token (<code>MTK_API_TOKEN</code>) — required whenever the API is not
-      running in open local-dev mode. Get it from your deployment operator.
+      The API URL points at your MTK RADAR API. The token is the DEDICATED,
+      intake-only extension credential (<code>MTK_EXTENSION_TOKEN</code>) —
+      NOT the shared API/service token. It can only save candidate items
+      (<code>POST /items</code>) and identify itself; it cannot read private
+      media, run jobs, or delete anything. Ask your deployment operator to
+      mint one and rotate/revoke it (change the <code>MTK_EXTENSION_TOKEN</code>
+      env) whenever the browser profile should lose access — it takes effect
+      immediately.
     </p>
     <form id="form">
       <label for="apiBase">API URL</label>
       <input id="apiBase" name="apiBase" type="url" placeholder="http://localhost:8000" required />
-      <label for="token">API token (bearer)</label>
-      <input id="token" name="token" type="password" autocomplete="off" placeholder="paste MTK_API_TOKEN" />
+      <label for="token">Extension intake token (bearer)</label>
+      <input id="token" name="token" type="password" autocomplete="off" placeholder="paste MTK_EXTENSION_TOKEN" />
       <label for="handle">Account handle (optional)</label>
       <input id="handle" name="handle" type="text" placeholder="which account/context saved this" />
       <button type="submit">Save</button>
