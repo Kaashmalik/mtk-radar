@@ -69,14 +69,35 @@ def narration_segments(markdown: str) -> list[str]:
     return segments
 
 
+def _costing():
+    """Shared cost module (WP-F), imported lazily so tests without the
+    packages path on sys.path keep importing this module."""
+    try:
+        import costing
+    except ImportError:  # pragma: no cover — fallback for direct imports
+        import sys as _sys
+        _sys.path.insert(0, os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "..", "packages")))
+        import costing
+    return costing
+
+
 def synthesize(text: str, out_path: Path, *,
                base_url: Optional[str] = None,
                api_key: Optional[str] = None,
                model: Optional[str] = None,
                voice: Optional[str] = None,
-               language: str = "en") -> Optional[Path]:
+               language: str = "en",
+               cost=None) -> Optional[Path]:
     """One narration line → MP3 via an OpenAI-compatible /audio/speech endpoint.
     Returns None on any failure (never raises into the pipeline).
+
+    Cost engine (WP-F): with a `cost` client attached, an unchanged
+    narration line is served from the shared
+    `tts:{sha256(text+voice+model)}` cache (0 characters spent on a
+    re-render), and the DAILY TTS CHAR BUDGET is checked BEFORE the call —
+    denied → None (the capture's own audio stays the fallback) and the
+    block is recorded so Needs-You shows it.
 
     Urdu uses language-specific env overrides first:
       TTS_BASE_URL_UR / TTS_API_KEY_UR / TTS_MODEL_UR / TTS_VOICE_UR
@@ -93,9 +114,25 @@ def synthesize(text: str, out_path: Path, *,
            or os.environ.get("TTS_API_KEY", ""))
     if not base or not key:
         return None
+    model_id = model or model_for(language)
+    voice_id = voice or voice_for(language)
+    cache_key = _costing().tts_cache_key(text, voice=voice_id, model=model_id)
+
+    if cost is not None:
+        cached = cost.cache_lookup("tts", cache_key)
+        if isinstance(cached, dict) and cached.get("path"):
+            cached_path = Path(cached["path"])
+            if cached_path.exists() and cached_path.stat().st_size > 0:
+                cost.report("tts", units=0, provider="openai-compatible",
+                            model=model_id, unit_type="chars",
+                            meta={"cache_hit": True})
+                return cached_path
+        if not cost.budget_ok("tts", units=len(text or ""),
+                              provider="openai-compatible", model=model_id):
+            return None
     body = {
-        "model": model or model_for(language),
-        "voice": voice or voice_for(language),
+        "model": model_id,
+        "voice": voice_id,
         "input": text,
         "response_format": "mp3",
     }
@@ -109,13 +146,17 @@ def synthesize(text: str, out_path: Path, *,
         resp.raise_for_status()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(resp.content)
+        if cost is not None:
+            cost.cache_store("tts", cache_key, {"path": str(out_path)})
+            cost.report("tts", units=len(text or ""), provider="openai-compatible",
+                        model=model_id, unit_type="chars")
         return out_path
     except Exception:  # noqa: BLE001
         return None
 
 
 def synthesize_all(segments: list[str], out_dir: Path,
-                   language: str = "en") -> dict:
+                   language: str = "en", cost=None) -> dict:
     """Render all segments; returns {"paths": [...], "used": bool}.
 
     Partial success is treated as failure (a narration with holes is worse
@@ -125,7 +166,8 @@ def synthesize_all(segments: list[str], out_dir: Path,
         return {"paths": [], "used": False}
     paths: list[str] = []
     for i, seg in enumerate(segments):
-        out = synthesize(seg, out_dir / f"narration-{i:03d}.mp3", language=language)
+        out = synthesize(seg, out_dir / f"narration-{i:03d}.mp3",
+                         language=language, cost=cost)
         if out is None:
             return {"paths": [], "used": False}
         paths.append(str(out))

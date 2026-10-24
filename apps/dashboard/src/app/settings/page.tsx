@@ -8,6 +8,11 @@
 
 import "./styles.css";
 import AutomationForm, { type AutomationPolicy } from "./AutomationForm";
+import CostsCard, {
+  type CostsBudget,
+  type CostsSummary,
+  type ProvidersInfo,
+} from "./CostsCard";
 import LanguagePolicyForm, { type LanguagePolicy } from "./LanguagePolicyForm";
 import NotificationsCard from "./NotificationsCard";
 import ReleasePolicyForm, { type ReleasePolicy } from "./ReleasePolicyForm";
@@ -115,7 +120,7 @@ function timeLabel(iso: string): string {
 }
 
 export default async function SettingsPage() {
-  const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts] =
+  const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts, costsRes, costBudgetRes, providersRes] =
     await Promise.all([
     getJson<{ key: string; value: { windows?: string[] } | null }>(
       "/settings/publish_windows",
@@ -164,6 +169,28 @@ export default async function SettingsPage() {
       "/platform-accounts",
       [],
     ),
+    getJson<CostsSummary>("/costs/summary", {
+      usd_today: 0,
+      usd_7d: 0,
+      usd_30d: 0,
+      by_kind: [],
+      published_videos_30d: 0,
+      cost_per_published_video_usd_30d: null,
+      pricing: {
+        llm_input_usd_per_mtok: 0.15,
+        llm_output_usd_per_mtok: 0.6,
+        tts_usd_per_mchar: 15,
+      },
+    }),
+    getJson<CostsBudget>("/costs/budget", {
+      llm: { used_usd_today: 0, limit_usd_per_day: 0, exhausted: false, blocked_today: 0 },
+      tts: { chars_today: 0, limit_chars_per_day: 0, exhausted: false, blocked_today: 0 },
+    }),
+    getJson<ProvidersInfo>("/costs/providers", {
+      extraction: { configured: false, reachable: false, models: [] },
+      tts: { configured: false, reachable: false, models: [] },
+      cached: false,
+    }),
   ]);
 
   const windows = setting.value?.windows ?? ["18:00"];
@@ -213,6 +240,8 @@ export default async function SettingsPage() {
         </p>
         <AutomationForm initialPolicy={policy} controls={controls} />
       </section>
+
+      <CostsCard summary={costsRes} budget={costBudgetRes} providers={providersRes} />
 
       <section className="card">
         <h2>Live automation status</h2>

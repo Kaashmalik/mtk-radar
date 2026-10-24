@@ -77,6 +77,10 @@ class Verifier:
     def __init__(self, api_url: str = API_URL):
         self.api_url = api_url.rstrip("/")
         self.client = httpx.Client(timeout=30, headers=_api_auth_headers())
+        # Cost engine (WP-F): shared cache + budget gate + usage ledger. The
+        # client is fail-open everywhere except an explicit budget denial.
+        import costing as _costing
+        self.cost = _costing.CostClient(api_url)
         self.fetcher = Fetcher(timeout=25.0, min_interval=3.0)
         # Verification fetches are HTTPS-only, public-address-only, hop-validated
         # and bounded (master plan §6 step 2, audit A19).
@@ -236,6 +240,7 @@ class Verifier:
                 )
             fields, page_conflicts, page_model, sections_total = extract_document(
                 item.text, item.url,
+                cost=getattr(self, "cost", None), ref_offer_id=str(offer_id),
             )
             payload = {
                 "url": item.url, "source_id": source_id,

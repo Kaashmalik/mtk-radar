@@ -46,6 +46,11 @@ class JsonCache:
         self._memory: dict[str, tuple[float, str]] = {}
         self._redis: Any = None
         self._redis_checked = False
+        # Cost-engine counters (WP-F): the collectors report how many network
+        # fetches a sweep actually made vs served from cache (usage_events
+        # kind='trend_fetch'), so politeness-shaped rate limits are visible.
+        self.hits = 0
+        self.misses = 0
 
     def _key(self, key: str) -> str:
         return f"{self._namespace}:{key}"
@@ -79,6 +84,7 @@ class JsonCache:
             expires_at, raw = entry
             if now < expires_at:
                 try:
+                    self.hits += 1
                     return json.loads(raw)
                 except ValueError:
                     self._memory.pop(full_key, None)
@@ -90,9 +96,11 @@ class JsonCache:
             try:
                 raw = client.get(full_key)
                 if raw:
+                    self.hits += 1
                     return json.loads(raw)
             except Exception as exc:  # noqa: BLE001 — cache misses fall through
                 log.debug("trend cache get failed (%s)", exc)
+        self.misses += 1
         return None
 
     def set_json(self, key: str, value: Any, ttl_s: Optional[int] = None) -> None:
@@ -114,6 +122,13 @@ class JsonCache:
 
     def clear(self) -> None:
         self._memory.clear()
+
+    def take_stats(self) -> dict[str, int]:
+        """Hit/miss counters since the last call (delta semantics so a sweep
+        can report exactly what IT fetched)."""
+        stats = {"hits": self.hits, "misses": self.misses}
+        self.hits = self.misses = 0
+        return stats
 
 
 def cached_json(

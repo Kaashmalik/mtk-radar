@@ -158,7 +158,7 @@ def test_model_reported_conflicts_are_not_discarded(monkeypatch):
     fields = extract_fields_rules(text, "https://example.com/terms")
     conflict = {"field": "eligibility", "reason": "terms ambiguous"}
     monkeypatch.setattr(extractors, "llm_configured", lambda: True)
-    monkeypatch.setattr(extractors, "extract_fields_llm", lambda *args: {
+    monkeypatch.setattr(extractors, "extract_fields_llm", lambda *args, **kwargs: {
         "fields": fields, "conflicts": [conflict],
     })
     _, conflicts, _ = extractors.extract(text, "https://example.com/terms")
