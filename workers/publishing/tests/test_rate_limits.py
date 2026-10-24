@@ -76,6 +76,21 @@ def test_graph_dead_session_still_unauthorized():
 
 
 import tempfile  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _video_path():
+    """A closed-on-disk .mp4 path safe on every OS.
+
+    `NamedTemporaryFile(...)` keeps the handle open; on Windows a second open
+    of the same file raises PermissionError before the adapter even runs
+    (evidence-to-video plan G28/EP-00). Write and *close* first instead.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "clip.mp4"
+        path.write_bytes(b"\x00")
+        yield path
 
 
 def test_facebook_upload_translates_http_429():
@@ -87,10 +102,10 @@ def test_facebook_upload_translates_http_429():
                                   json={"error": {"message": "throttled"}},
                                   request=httpx.Request("POST", url))
 
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+    with _video_path() as video:
         adapter = FacebookAdapter(page_id="pg1", page_access_token="tok", http=Http())
         with pytest.raises(RateLimited) as exc:
-            adapter.upload(Path(video.name), {"title": "t"})
+            adapter.upload(video, {"title": "t"})
     assert exc.value.retry_after_s == 33
 
 
@@ -108,9 +123,9 @@ def test_tiktok_init_throttle_raises_rate_limited():
     import time as _time
     adapter._access = "tok"
     adapter._expires_monotonic = _time.monotonic() + 9999
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+    with _video_path() as video:
         with pytest.raises(RateLimited) as exc:
-            adapter.upload(Path(video.name), {})
+            adapter.upload(video, {})
     assert exc.value.retry_after_s == 60
 
 

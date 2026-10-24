@@ -46,6 +46,8 @@ jobs:
           pip install pytest ruff
       - name: Lint (syntax errors + undefined/unused names — catches broken SQL-call classes)
         run: ruff check --select E9,F63,F7,F82 services workers packages
+      - name: Filename portability (Windows-invalid characters — G28/EP-00)
+        run: python3 scripts/check_filenames.py
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests (discovery is defined once in pytest.ini)

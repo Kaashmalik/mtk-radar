@@ -60,6 +60,10 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 1. lint
+step "Filename portability (Windows-invalid characters, G28/EP-00)"
+python3 scripts/check_filenames.py || fail "filenames"
+ok "filenames portable"
+
 step "Python lint (ruff: syntax + undefined names)"
 ruff check --select E9,F63,F7,F82,F821 services workers packages || fail "ruff"
 ok "ruff clean"
