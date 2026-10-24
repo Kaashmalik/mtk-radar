@@ -170,6 +170,10 @@ def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -
             "title": item.title,
             "text": item.text,
             "published_at": item.published_at.isoformat() if item.published_at else None,
+            # G07: the adapter's typed payload (raw engagement counts, entity
+            # ids, source_kind) used to be dropped here — the API could never
+            # persist what was actually observed.
+            "extra": dict(item.extra or {}),
         }
         for item in raw
     ]

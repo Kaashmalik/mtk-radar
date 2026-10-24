@@ -23,6 +23,9 @@ from source_adapters.registry import missing_config as _adapter_missing_config  
 from source_adapters.registry import approval_denial as _adapter_approval_denial  # noqa: E402
 from source_adapters.registry import ADAPTER_KINDS as _ADAPTER_KINDS  # noqa: E402
 
+#: G07: bounded persisted context per item (excerpt/selection).
+MAX_ITEM_CONTEXT_CHARS = 4000
+
 TrustTier = Literal["A_provider_owned", "B_discovery_lead", "C_excluded"]
 # Keep this Literal in sync with registry.ADAPTER_KINDS — the guard test
 # `test_registry_sync` fails the suite if the two drift apart.
@@ -51,12 +54,34 @@ class ItemIn(BaseModel):
     source_id: Optional[uuid.UUID] = None  # collectors pass this; extension omitted
     external_item_id: Optional[str] = None  # stable id from the source
     url: HttpUrl
-    title: Optional[str] = None
+    title: Optional[str] = Field(default=None, max_length=600)
     selection: Optional[str] = None  # text selected in the browser, if any
-    account_handle: Optional[str] = None
+    account_handle: Optional[str] = Field(default=None, max_length=200)
     text: Optional[str] = None  # body/excerpt for hashing (collectors)
     published_at: Optional[datetime] = None
     observed_at: Optional[datetime] = None
+    extra: dict[str, Any] = Field(default_factory=dict)  # G07: adapter payload
+                                                       # (typed counts, ids)
+
+    @field_validator("text", "selection")
+    @classmethod
+    def _bounded_context(cls, v: Optional[str]) -> Optional[str]:
+        """G07: the context that used to be dropped (or, worse, kept
+        unbounded) is persisted but capped — observations must not smuggle a
+        whole page into the inbox."""
+        if v is None:
+            return None
+        return v[:MAX_ITEM_CONTEXT_CHARS]
+
+    @field_validator("extra")
+    @classmethod
+    def _bounded_extra(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if len(v) > 30:
+            raise ValueError("extra carries at most 30 keys")
+        for key, value in v.items():
+            if isinstance(value, str) and len(value) > 500:
+                raise ValueError(f"extra.{key} exceeds 500 chars")
+        return v
 
 
 class ItemOut(BaseModel):
