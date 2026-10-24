@@ -134,10 +134,12 @@ python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); pri
   || fail "ci yaml"
 ok "ci workflow parses"
 
-step "Extension (Manifest V3) syntax"
+step "Extension (Manifest V3) syntax + unit suite (Chrome-API stubs)"
+node --check apps/extension/core.js || fail "extension core.js"
 node --check apps/extension/background.js || fail "extension background.js"
 node --check apps/extension/options.js || fail "extension options.js"
 python3 -c "import json; json.load(open('apps/extension/manifest.json'))" || fail "extension manifest"
+( cd apps/extension && node --test tests/*.test.js ) || fail "extension unit tests"
 ok "extension clean"
 
 # -------------------------------------------------------------- 6. e2e

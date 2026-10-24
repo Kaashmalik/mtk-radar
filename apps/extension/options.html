@@ -4,36 +4,74 @@
     <meta charset="utf-8" />
     <title>MTK RADAR — extension settings</title>
     <style>
-      body { font: 14px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+      body { font: 14px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
+      h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
       label { display: block; margin: 0.8rem 0 0.2rem; font-weight: 600; }
       input { width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem; }
       .hint { color: #666; font-size: 12px; }
-      button { margin-top: 1rem; padding: 0.4rem 1rem; cursor: pointer; }
-      #status { margin-left: 0.8rem; color: #1a7f37; }
+      button { margin: 0.6rem 0.4rem 0 0; padding: 0.4rem 0.9rem; cursor: pointer; }
+      .status { margin-left: 0.8rem; }
+      .ok { color: #1a7f37; } .err { color: #c62828; }
+      .tokenmask { font-family: ui-monospace, monospace; }
+      table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 0.4rem; }
+      th, td { text-align: left; border-bottom: 1px solid #ddd; padding: 0.3rem 0.4rem; vertical-align: top; }
+      td.actions { white-space: nowrap; }
+      td.actions button { margin: 0 0.2rem; padding: 0.15rem 0.5rem; font-size: 12px; }
+      .st-saved { color: #1a7f37; } .st-duplicate { color: #1a7f37; }
+      .st-pending { color: #9a6700; } .st-failed, .st-abandoned { color: #c62828; }
+      .row-buttons { margin-top: 0.3rem; }
     </style>
   </head>
   <body>
     <h1>MTK RADAR AI — Save Page settings</h1>
+
     <p class="hint">
       The API URL points at your MTK RADAR API. The token is the DEDICATED,
       intake-only extension credential (<code>MTK_EXTENSION_TOKEN</code>) —
-      NOT the shared API/service token. It can only save candidate items
-      (<code>POST /items</code>) and identify itself; it cannot read private
+      NOT the shared API/service token and never a personal reviewer token.
+      It can only save candidate items (<code>POST /items</code>) and probe
+      its own identity (<code>GET /whoami</code>); it cannot read private
       media, run jobs, or delete anything. Ask your deployment operator to
-      mint one and rotate/revoke it (change the <code>MTK_EXTENSION_TOKEN</code>
-      env) whenever the browser profile should lose access — it takes effect
-      immediately.
+      mint one; rotating or revoking it (change <code>MTK_EXTENSION_TOKEN</code>)
+      cuts off this browser profile immediately.
     </p>
+
     <form id="form">
-      <label for="apiBase">API URL</label>
-      <input id="apiBase" name="apiBase" type="url" placeholder="http://localhost:8000" required />
+      <label for="apiBase">API URL (https outside localhost)</label>
+      <input id="apiBase" name="apiBase" type="url" placeholder="https://radar.example.com" required />
       <label for="token">Extension intake token (bearer)</label>
       <input id="token" name="token" type="password" autocomplete="off" placeholder="paste MTK_EXTENSION_TOKEN" />
       <label for="handle">Account handle (optional)</label>
       <input id="handle" name="handle" type="text" placeholder="which account/context saved this" />
-      <button type="submit">Save</button>
-      <span id="status" role="status"></span>
+      <label for="dashboardBase">Dashboard URL (optional — enables “Open saved item”)</label>
+      <input id="dashboardBase" name="dashboardBase" type="url" placeholder="https://radar.example.com" />
+      <label for="denylist">Extra excluded domains (optional, one per line)</label>
+      <textarea id="denylist" rows="3" style="width:100%;box-sizing:border-box;"
+                placeholder="*.internal-bank.example&#10;webmail.corp.example"></textarea>
+      <button type="submit">Save settings</button>
+      <button type="button" id="test-conn">Test connection</button>
+      <button type="button" id="revoke">Revoke &amp; reset</button>
+      <span id="status" class="status" role="status"></span>
+      <p class="hint" id="whoami-result" style="margin-left:0.8rem"></p>
     </form>
-    <script src="options.js"></script>
+
+    <h2>Saved items queue (durable offline outbox)</h2>
+    <p class="hint">
+      Saves made while the API is unreachable queue here (max 50, kept 14
+      days) and are delivered automatically — each with the same client
+      idempotency key, so a retry can never create a second inbox row.
+    </p>
+    <button type="button" id="flush">Deliver queued now</button>
+    <button type="button" id="clear-done">Clear delivered</button>
+    <table id="outbox-table">
+      <thead>
+        <tr><th>Status</th><th>Item</th><th>Attempted</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="outbox-rows">
+        <tr><td colspan="4" class="hint">Nothing saved yet.</td></tr>
+      </tbody>
+    </table>
+
+    <script type="module" src="options.js"></script>
   </body>
 </html>
