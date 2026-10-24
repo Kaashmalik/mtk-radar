@@ -11,6 +11,13 @@ production-readiness certificate and not a promise of views or revenue.
 - [system-review-2026-10-23.md](system-review-2026-10-23.md) — day-4/5 dispositions and the deferred P2/P3 table
 - [automation-master-plan-2026-10-21.md](automation-master-plan-2026-10-21.md) — WP05/WP06 trend radar (still unchecked there)
 
+**Follow-up plan (supersedes sections of this doc):**
+[enhancement-plan-2026-10-24-evidence-to-video.md](enhancement-plan-2026-10-24-evidence-to-video.md)
+— a post-implementation audit (commit `75ddff3` baseline) that keeps WP-A–WP-H as
+the preserved foundation but registers integration gaps G01–G28 and work
+packages EP-00–EP-07. Where this doc and that plan disagree, that plan wins;
+notably its source [S11] corrects the YouTube quota figures below (§4.1, §4.3).
+
 **Implementation status (2026-10-24): COMPLETE — all work packages shipped to
 origin/main.** WP-A `546603a` · WP-B `cd0721c` · WP-C `b95568e` · WP-D
 `031ec62` · WP-E `9ba3cde` · WP-F `3267201` · WP-G `6a610aa` · WP-H `e90a9d3`
@@ -18,6 +25,13 @@ origin/main.** WP-A `546603a` · WP-B `cd0721c` · WP-C `b95568e` · WP-D
 updated in the same series). Suite green at WP-H: 580 API + 461
 workers/packages tests, ruff, compileall, dashboard tsc. Feature-to-code map:
 [`master-plan-traceability.md`](master-plan-traceability.md).
+
+> **Scope caveat (added at sync, 2026-10-24):** "COMPLETE" means the WP-A–WP-H
+> *features* shipped with passing suites — it does not prove their end-to-end
+> promises (engagement observations surviving ingestion, budget fail-closed,
+> publication confirmation, Instagram privacy semantics, extension durability).
+> The [follow-up evidence-to-video plan](enhancement-plan-2026-10-24-evidence-to-video.md)
+> audits exactly these gaps (G01–G28) and proposes EP-00–EP-07 to close them.
 
 ---
 
@@ -108,13 +122,20 @@ These facts constrain the design. Re-verify at implementation time; providers ch
 | **Hugging Face Daily Papers** | **Free JSON API**: `GET /api/daily_papers?sort=trending&date=YYYY-MM-DD` (limit, week, month params). Direct arXiv IDs | **First-class adapter.** Perfect "hot research with evidence" feed — the paper page *is* the evidence link, upvotes are the momentum signal |
 | **GitHub** | REST free at 5,000 req/h (token); Releases API already integrated; **star velocity** computed from `stargazers` sampling or Search API | Add star-velocity adapter (Δstars/day per watched repo) — feeds existing github-releases items |
 | **Hacker News** | **Free, no-key Algolia API** (`hn.algolia.com/api/v1/search_by_date?query=...&numericFilters=points>N`); Firebase API for items | Point-velocity adapter for AI/dev keywords (tiered akin to existing X/Reddit treatment) |
-| **YouTube trending/velocity** | Data API free but **quota-shaped: 10,000 units/day; `search.list` = 100 units, max 100 calls/day**; `videos.list` = 1 unit | Budgeted, cached keyword-velocity probes (e.g. 20 long-interval keywords/day); **never** scrape. Dec 2025 revision: `videos.insert` now ~100-from-100/day bucket — publishing is cheap, research is the scarce quota |
+| **YouTube trending/velocity** | Data API free but **quota-shaped**: separate buckets of **100 search calls/day and 100 upload calls/day** (each call in those two buckets costs 1 unit) **plus 10,000 units/day for other endpoints**; reset zone is Pacific time *(corrected 2026-10-24 per the follow-up plan's [S11] — the calculator page, updated 15 Oct 2026, supersedes earlier indexed costs)* | Budgeted, cached keyword-velocity probes (e.g. 20 long-interval keywords/day); **never** scrape. Publishing is cheap, research is the scarce quota; keep a bucketed reservation ledger |
 | **TikTok** | Creative Center scraping now **prohibited** (Apr 2026 transparency rules); sanctioned bulk path = gated Research API. Third-party paid APIs exist (TickerTrends, Apify, EnsembleData) | **Do not scrape.** Manual Creative Center entry maps to the existing 3-competitor typed-evidence flow; optional paid API behind a setting later |
 | **Reddit** | Free API heavily limited / paid tiers; RSS still readable for public subs | Keep as lead-signal RSS only (consistent with existing Tier-C policy) |
 
 Sources: [YouTube quota calculator](https://developers.google.com/youtube/data/determine_quota_cost), [Blotato API pricing](https://www.blotato.com/blog/youtube-api-pricing), [TikTok Creative Center guide](https://www.admapix.com/blog/ad-intelligence/tiktok-creative-center-tutorial), [HF papers skill docs](https://mcpservers.org/agent-skills/huggingface/huggingface-papers).
 
 ### 4.2 Hashtag reality (do it right, not more)
+
+> **Sync note (2026-10-24):** treat the effective counts below as *editorial
+> channel preferences*, not platform law — the follow-up plan's G24/S03–S04
+> separates API rules from preference ("more than 60 hashtags are ignored" is
+> the official warning), and tags-weak-signal wording in this section is
+> consistent with the [follow-up plan's](enhancement-plan-2026-10-24-evidence-to-video.md)
+> hashtag guidance.
 
 - **Effective counts:** YouTube 3–5 hashtags (60 hard cap; >60 suppresses search), only 3 show above the title; TikTok 3–5; Instagram 3–5; Facebook 1–2; X 1–2. ([Sprout Social via US Chamber](https://www.uschamber.com/co/grow/marketing/how-to-use-hashtags), [hashtagtools.io 2026 guide](https://hashtagtools.io/blog/youtube-hashtags-shorts-seo-guide-2026))
 - **YouTube tags ≠ hashtags ≠ keywords.** Backend tags are a weak signal in 2026 ("tags past the eighth slot return effectively nothing"); hashtags in the description help categorization; keywords in title/description/script are the real SEO. ([KDCC: YouTube tags are dead in 2026](https://blog.kdcc.social/youtube-tags-are-dead-2026))
@@ -127,7 +148,7 @@ Sources: [YouTube quota calculator](https://developers.google.com/youtube/data/d
 | **Narration TTS** | ElevenLabs ≈ $100/1M chars; OpenAI gpt-4o-mini-tts ≈ $16/1M | **Kokoro-82M** (Apache-2.0, ~$0 local CPU, $0.70/1M hosted; top-ranked open TTS on Artificial Analysis, ELO 1059) or Chatterbox (MIT, cloning) | ~60–140× |
 | **Field extraction LLM** | gpt-4o-mini per section, per round (uncached) | Hash-keyed response cache + section batching + **Ollama** (serve with the model the repo already tracks) | 60–90% |
 | **Script/metadata generation** | (currently template-only, $0 — keep the templates; add *optional* LLM polish behind cache) | — | Avoid scope creep into per-video LLM dependency |
-| **YouTube publishing** | Dec 2025 quota change: uploads ≈ 100-unit bucket, 100 uploads/day | Publishing headroom is now plentiful; spend quota on *research*, not uploads | n/a |
+| **YouTube publishing** | Quota calculator (15 Oct 2026): uploads in a **separate 100-calls/day bucket**, 1 unit per call | Publishing headroom is plentiful; spend quota on *research*, not uploads. Verify the project's console entitlement + reset zone at implementation | n/a |
 | **Trend fetches** | Scraping =fragile + policy risk | Free official APIs (HF, HN, GitHub) + cached Trends wrapper | $0 |
 | **Hosting** | Existing [cost-laptop-vps doc](cost-laptop-vps-2026-10-22.md) scenarios | Unchanged; caches ride existing Redis | n/a |
 
@@ -405,6 +426,7 @@ join WP-C scope if needed.
 
 ## 10. Related documents
 
+- [enhancement-plan-2026-10-24-evidence-to-video.md](enhancement-plan-2026-10-24-evidence-to-video.md) — follow-up audit; gap register G01–G28 + EP-00–EP-07 (drafting order: EP-00 → EP-01 → EP-02 → EP-03)
 - [enhancement-plan-2026-10-22.md](enhancement-plan-2026-10-22.md) — baseline audit & two-month hardening (superseded sections noted in its resolution banner)
 - [system-review-2026-10-23.md](system-review-2026-10-23.md) — fixed/deferred dispositions this plan carries forward
 - [cost-laptop-vps-2026-10-22.md](cost-laptop-vps-2026-10-22.md) — hosting scenarios this plan's caches ride on

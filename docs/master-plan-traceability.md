@@ -117,3 +117,24 @@ closed, and every human gate is untouched.
 
 Full-suite green at the documentation commit: 580 API + 461 workers/packages
 pytest, `ruff` (E9/F63/F7/F82), `compileall`, dashboard `tsc`.
+
+## Follow-up plan 2026-10-24 (EP-00…EP-07) — evidence-to-video audit
+
+Traceability for
+[`enhancement-plan-2026-10-24-evidence-to-video.md`](enhancement-plan-2026-10-24-evidence-to-video.md),
+baselined at commit `75ddff3`. Status: **PROPOSED — no EP code exists yet**, so
+every row's Code/Proof column records the *intended* landing place, not shipped
+work. Rows close the gap register G01–G28 in that plan; WP-A–WP-H features above
+are the preserved foundation. Ordering: EP-00 → EP-01 → EP-02 → EP-03 →
+(EP-04 ∥ EP-05) → EP-06 → EP-07. Rough scope 17–32 developer-days.
+
+| EP | Deliverable (gaps closed) | Intended code | Intended proof |
+|---|---|---|---|
+| 0 | Contribution confidence: portable Windows tempfile test, filename-portability lint, CI billing unblock (owner), implemented/partial/unproven status table in traceability docs (G28) | `workers/publishing/tests/test_rate_limits.py`, CI workflow, this document | CI executes real steps; Windows test passes without on-disk reopen; no stale green banners |
+| 1 | Safety & financial correctness: Instagram privacy capability model, no synthetic `confirmed=True`, fail-closed atomic budget reservations, role/route matrix + scoped extension credential, derived-metric permission switches (G01–G05, G12, G21, G27) | `workers/publishing/platforms/instagram.py`, `workers/publishing/main.py`, `packages/costing.py`, `services/api/costs_store.py`, `api_hardening.py`, `media_api.py` | unknown budget ⇒ zero paid calls; concurrent reservations cannot oversubscribe; accepted ≠ processing ≠ published; extension denied on jobs/media writes |
+| 2 | Discovery & observable momentum: shared adapter registry, persisted excerpts/raw observations, append-only engagement series, cache contract fixes, Google token auth, Compose env matrix, Reddit off-by-default (G06–G11, G13–G16, G22) | `schemas.py`, `workers/collectors/main.py`, `services/api/trends_api.py`, `packages/source_adapters/google_trends.py`, `github_stars.py`, `services/api/cache.py`, `costs_store.py`, `infra/docker/docker-compose.yml` | HN 100→160 fixture ⇒ raw 30 points/h with no duplicate story; unchanged fields can't fake momentum; cached Trends RSS parses; every adapter kind creatable via API |
+| 3 | Research briefs & content-type gates: explainer/tutorial/research tracks, versioned claim ledger, reproducible slate snapshot, queue SQL/readiness fixes (G17–G18) | `trends_api.py`, `queue_api.py`, extraction/script templates, migrations | a paper becomes an accurately attributed explainer with no invented coupon/price fields; conflicting evidence blocks unsupported copy |
+| 4 | Browser extension finish: link/selection targets, dedicated pairing credential, runtime host grant, durable offline outbox + idempotency, result UX, tests (extension table in plan) | `apps/extension/{background,options}.js`, `options.html`, `verify.sh` | clicked link (not current page) is saved; offline save survives worker restart, delivered once; 401/429/duplicate/timeout are distinct tested states |
+| 5 | Scene-based real video production: scene manifest/editor, public-page capture worker, citation/rights overlays, audio normalization, font-aware caption checks, content-addressed TTS cache | `workers/render/`, `workers/capture/`, `workers/render/narration.py`, `packages/costing.py` | one explainer yields reviewable long video + two self-contained vertical edits with traceable claims; claim walkthrough stops for human actions |
+| 6 | One-click reviewed scheduling: per-platform preview with disabled targets, idempotent stale-hash commit, account-aware UTC conflicts, hashtag rule relabeling, TikTok export bundle (G19–G20, G23–G24, G26) | `apps/dashboard` ScheduleForm/BatchApprove, `schedules_api.py`, `hashtags.py` | ten repeat submissions ⇒ one logical post per target; stale/changed package refused; unapproved targets never publish |
+| 7 | Recovery, learning & cost optimization: lease fencing, telemetry outboxes, circuit breakers, retention, token-rotation persistence, comparable-age outcome snapshots, failure-injection contracts | `services/api/jobs_api.py`, `media_api.py`, `workers/publishing/main.py`, `workers/metrics/` | crash/retry drills show no duplicate publish; budget bounded during outage; restored backup recovers artifact references |
