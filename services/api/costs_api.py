@@ -33,6 +33,7 @@ from costs_store import (
     check_budget,
     probe_providers,
     record_events,
+    settle_reservation,
     spend_summary,
 )
 
@@ -53,15 +54,21 @@ class UsageEventIn(BaseModel):
 
 class UsageIn(BaseModel):
     events: list[UsageEventIn] = Field(min_length=1, max_length=500)
+    settle_reservation: Optional[str] = None
 
 
 @router.post("/usage")
 async def post_usage(body: UsageIn) -> dict:
-    """Append metered spend. Unknown kinds/malformed rows are dropped, never
-    fatal — an emitter must never break the stage that fed it."""
+    """Append metered spend. With `settle_reservation`, the FIRST event
+    replaces a prior budget-check reservation (G04): the ledger counts the
+    spend once with its actual units. Unknown kinds/malformed rows are
+    dropped, never fatal — an emitter must never break the stage that fed it."""
     pool = db.get()
-    return await record_events(pool, [e.model_dump(exclude_none=True)
-                                      for e in body.events])
+    events = [e.model_dump(exclude_none=True) for e in body.events]
+    if body.settle_reservation:
+        outcome = await settle_reservation(pool, body.settle_reservation, events[0])
+        return {**outcome, "recorded": 1 if outcome.get("settled") else len(events)}
+    return await record_events(pool, events)
 
 
 class BudgetCheckIn(BaseModel):

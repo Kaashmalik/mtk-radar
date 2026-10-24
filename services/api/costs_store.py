@@ -26,6 +26,7 @@ path is an exhausted explicit budget.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from typing import Any, Optional
@@ -246,57 +247,134 @@ async def budget_state(pool) -> dict[str, Any]:
 
 # ------------------------------------------------------------ the budget gate
 
+def _budget_lock_key(kind: str) -> int:
+    """Stable per-kind advisory-lock key so the read-decide-insert cycle is
+    serialized per budget line (G04): concurrent workers can no longer each
+    read the same spend and both exceed the cap."""
+    digest = hashlib.sha256(f"mtk-budget:{kind}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") - (1 << 63)  # signed bigint
+
+
 async def check_budget(pool, kind: str, *, units: int = 0,
                        est_cost: float | None = None,
                        provider: str = "", model: str = "",
                        ref_type: str | None = None,
                        ref_id=None, meta: dict[str, Any] | None = None,
                        ) -> dict[str, Any]:
-    """FAIL-CLOSED gate: may this stage spend right now?
+    """FAIL-CLOSED gate: may this stage spend right now? (G04-hardened)
 
-    Asked BEFORE the money is spent. A denial is recorded as a zero-unit
-    `blocked` event so the block is visible in Costs and Needs-You instead of
-    silently degrading. Estimation: for `tts` the units are chars; for
-    `llm_extract` callers may pass an est_cost (tokens are unknown up-front),
-    otherwise only the allowance line is compared.
+    Asked BEFORE the money is spent. The read-decide-insert cycle runs in ONE
+    transaction under a per-kind advisory lock, so concurrent attempts cannot
+    each observe the same spend and jointly oversubscribe the cap.
+
+    On `allowed`, a conservative RESERVATION event (the projected units/cost,
+    `meta.reservation = true`) is inserted and its id returned; the caller
+    settles it with actual usage via `settle_reservation`. A reservation that
+    is never settled stays standing — that IS the recorded liability for a
+    paid call whose outcome is unknown (provider timeout, crashed worker).
+    Unknown usage never counts as free.
+
+    A denial is recorded as a zero-unit `blocked` event so the block is
+    visible in Costs and Needs-You instead of silently degrading.
     """
-    state = await budget_state(pool)
     spend_meta = dict(meta or {})
     est = float(est_cost) if est_cost is not None else estimate_cost(kind, units, spend_meta)
 
-    ok = True
-    reason: str | None = None
-    if kind == "llm_extract":
-        line = state["llm"]
-        projected = line["used_usd_today"] + max(0.0, est)
-        if line["exhausted"] or projected > line["limit_usd_per_day"]:
-            ok, reason = False, (
-                f"daily LLM budget exhausted: ${line['used_usd_today']:.2f} used of "
-                f"${line['limit_usd_per_day']:.2f} — extraction falls back to the "
-                "deterministic rules path"
-            )
-    elif kind == "tts":
-        line = state["tts"]
-        projected = line["chars_today"] + max(0, int(units or 0))
-        if line["exhausted"] or projected > line["limit_chars_per_day"]:
-            ok, reason = False, (
-                f"daily TTS budget exhausted: {line['chars_today']} chars used of "
-                f"{line['limit_chars_per_day']} — narration falls back to capture audio"
-            )
-    else:
-        ok = True  # trend fetches / quota units are observed, not gated
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)",
+                               _budget_lock_key(kind))
+            state = await budget_state(conn)
 
-    if not ok or spend_meta:
-        await record_events(pool, [{
-            "kind": kind, "provider": provider, "model": model,
-            "units": 0 if not ok else int(units or 0),
-            "unit_type": UNIT_TYPES.get(kind, "units"),
-            "cost_usd_est": 0.0 if not ok else est,
-            "ref_type": ref_type, "ref_id": ref_id,
-            "meta": {**spend_meta, **({} if ok else {"blocked": True,
-                                                     "reason": reason})},
-        }])
-    return {"allowed": ok, "reason": reason, "budget": state}
+            ok = True
+            reason: str | None = None
+            if kind == "llm_extract":
+                line = state["llm"]
+                projected = line["used_usd_today"] + max(0.0, est)
+                if line["exhausted"] or projected > line["limit_usd_per_day"]:
+                    ok, reason = False, (
+                        f"daily LLM budget exhausted: ${line['used_usd_today']:.2f} used of "
+                        f"${line['limit_usd_per_day']:.2f} — extraction falls back to the "
+                        "deterministic rules path"
+                    )
+            elif kind == "tts":
+                line = state["tts"]
+                projected = line["chars_today"] + max(0, int(units or 0))
+                if line["exhausted"] or projected > line["limit_chars_per_day"]:
+                    ok, reason = False, (
+                        f"daily TTS budget exhausted: {line['chars_today']} chars used of "
+                        f"{line['limit_chars_per_day']} — narration falls back to capture audio"
+                    )
+            else:
+                ok = True  # trend fetches / quota units are observed, not gated
+
+            reservation_id: str | None = None
+            if not ok:
+                await conn.execute(
+                    """
+                    INSERT INTO usage_events
+                        (kind, provider, model, units, unit_type, cost_usd_est,
+                         ref_type, ref_id, meta)
+                    VALUES ($1, $2, $3, 0, $4, 0, $5, $6, $7::jsonb)
+                    """,
+                    kind, provider, model, UNIT_TYPES.get(kind, "units"),
+                    ref_type, ref_id,
+                    __import__("json").dumps(
+                        {**spend_meta, "blocked": True, "reason": reason}),
+                )
+            elif kind in ("llm_extract", "tts") and (units or est):
+                # G04: an allowed request reserves its projected cost
+                # immediately — the eventual usage report SETTLES this row.
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO usage_events
+                        (kind, provider, model, units, unit_type, cost_usd_est,
+                         ref_type, ref_id, meta)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid, $9::jsonb)
+                    RETURNING id
+                    """,
+                    kind, provider, model, max(0, int(units or 0)),
+                    UNIT_TYPES.get(kind, "units"), round(max(0.0, est), 6),
+                    ref_type, ref_id,
+                    __import__("json").dumps(
+                        {**spend_meta, "reservation": True, "predicted": True}),
+                )
+                reservation_id = str(row["id"]) if row else None
+
+    return {"allowed": ok, "reason": reason, "budget": state,
+            "reservation_id": reservation_id}
+
+
+async def settle_reservation(pool, reservation_id: str,
+                             event: dict[str, Any]) -> dict[str, Any]:
+    """Replace a reservation with the actual usage (G04).
+
+    The settled row keeps its past (meta.settled = true) and takes the
+    ACTUAL units/cost — the ledger counts the spend once. If the reservation
+    row is missing or already settled, the actual event is appended raw:
+    worse to double-count than to under-count paid work.
+    """
+    event = _coerce_event(event)
+    if event is None or not reservation_id:
+        return {"settled": False, "reason": "invalid reservation settlement"}
+    result = await pool.execute(
+        """
+        UPDATE usage_events
+        SET units = $2, unit_type = $3,
+            cost_usd_est = $4,
+            meta = meta || $5::jsonb
+        WHERE id = $1::uuid
+          AND meta->>'reservation' = 'true'
+          AND meta->>'settled' IS NULL
+        """,
+        __import__("uuid").UUID(reservation_id),
+        event["units"], event["unit_type"], event["cost_usd_est"],
+        __import__("json").dumps({"settled": True}),
+    )
+    if result.endswith("UPDATE 1"):
+        return {"settled": True}
+    await record_events(pool, [event])
+    return {"settled": False, "appended": True}
 
 
 # ------------------------------------------------------------- shared cache

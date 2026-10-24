@@ -117,19 +117,18 @@ class CostClient:
 
     # ------------------------------------------------------------ budget gate
 
-    def budget_ok(self, kind: str, *, units: int = 0,
-                  est_cost: float | None = None,
-                  provider: str = "", model: str = "",
-                  ref_type: str | None = None, ref_id: str | None = None,
-                  meta: dict[str, Any] | None = None) -> bool:
-        """Truly FAIL-CLOSED money check (G03).
+    def budget_check(self, kind: str, *, units: int = 0,
+                     est_cost: float | None = None,
+                     provider: str = "", model: str = "",
+                     ref_type: str | None = None, ref_id: str | None = None,
+                     meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Full gate response (G04): allowed / reason / reservation_id.
 
-        Only an explicit `allowed: true` from the budget service permits paid
-        work. An unreachable API, a non-200 answer, or a payload without a
-        boolean `allowed` all deny: unknown budget = zero paid calls. NO paid
-        call may run on an unchecked budget. Callers route a False to the
-        deterministic/no-cost fallback (extraction rules path, capture audio)
-        and the block is recorded so Needs-You surfaces it.
+        A permitted request RESERVES its projected cost server-side; the
+        reservation id must travel to the eventual usage report so the real
+        spend settles that row instead of double-counting. A reservation that
+        never settles stays standing — the liability for a paid call whose
+        outcome is unknown is never silently dropped.
         """
         body: dict[str, Any] = {"kind": kind, "units": int(units or 0),
                                 "provider": provider, "model": model,
@@ -141,10 +140,21 @@ class CostClient:
         if ref_id:
             body["ref_id"] = ref_id
         result = self._post("/costs/check", body)
-        if result is None:
+        if not isinstance(result, dict):
             log.warning("budget check for %s unavailable — failing CLOSED", kind)
-            return False
-        return result.get("allowed") is True
+            return {"allowed": False, "reason": "budget service unavailable "
+                                                   "(fail-closed: unknown budget = no paid calls)",
+                    "reservation_id": None}
+        return {
+            "allowed": result.get("allowed") is True,
+            "reason": result.get("reason"),
+            "reservation_id": result.get("reservation_id"),
+        }
+
+    def budget_ok(self, kind: str, **kwargs) -> bool:
+        """Truly FAIL-CLOSED money check (G03). Only an explicit
+        `allowed: true` from the budget service permits paid work."""
+        return self.budget_check(kind, **kwargs)["allowed"]
 
     # ----------------------------------------------------------------- cache
 
@@ -173,8 +183,15 @@ class CostClient:
     def report(self, kind: str, *, units: int = 0, provider: str = "",
                model: str = "", unit_type: str | None = None,
                ref_type: str | None = None, ref_id: str | None = None,
-               meta: dict[str, Any] | None = None) -> None:
-        """Fire-and-forget usage emission; never raises, never blocks."""
+               meta: dict[str, Any] | None = None,
+               settle_reservation: str | None = None) -> None:
+        """Fire-and-forget usage emission; never raises, never blocks.
+
+        With `settle_reservation` (G04) the first event replaces the
+        budget-check reservation server-side — the ledger counts the spend
+        once, at its actual size. If settlement fails, the reservation keeps
+        standing (conservative: spend still bounded, never understated).
+        """
         event: dict[str, Any] = {"kind": kind, "units": int(units or 0),
                                  "provider": provider, "model": model,
                                  "meta": meta or {}}
@@ -184,7 +201,10 @@ class CostClient:
             event["ref_type"] = ref_type
         if ref_id:
             event["ref_id"] = ref_id
-        self._post("/costs/usage", {"events": [event]})
+        body: dict[str, Any] = {"events": [event]}
+        if settle_reservation:
+            body["settle_reservation"] = settle_reservation
+        self._post("/costs/usage", body)
 
 
 def extraction_cache_key(model: str, text: str) -> str:
