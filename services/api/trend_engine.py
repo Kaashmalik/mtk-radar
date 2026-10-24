@@ -19,8 +19,9 @@ to an operator. Discovery proposes; verification still proves.
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
-from typing import Any, Final, Iterable
+from typing import Any, Final, Iterable, Optional
 
 # Keywords that historically correlate with a claimable, video-worthy offer.
 _HIGH_INTENT: Final[dict[str, int]] = {
@@ -117,6 +118,30 @@ def measurement_from_extra(extra: Any) -> dict[str, float]:
         if num >= 0 and num == num:  # finite, non-negative
             out[name] = num
     return out
+
+
+def story_key(title: Any) -> Optional[str]:
+    """Cross-URL same-story clustering key (G09).
+
+    `duplicate_group` is the canonical URL: the SAME story republished at a
+    different URL (syndication, a platform mirror, an updated permalink) got
+    a different group and its independent confirmations were invisible. The
+    story key clusters by the headline the way a human would: case-,
+    punctuation- and whitespace-insensitive, with common filler words
+    dropped. Deliberately conservative — it is a SIGNAL AGGREGATION key
+    (corroboration counts), never a dedup key: `items` UNIQUE constraints
+    remain the only story-dedup mechanism, so two genuinely different stories
+    with similar titles are scored separately.
+    """
+    text = str(title or "").lower()
+    tokens = re.findall(r"[a-z0-9]+", text)
+    filler = {"the", "a", "an", "of", "for", "to", "on", "in", "and", "or",
+              "is", "are", "with", "at", "by", "from", "its", "it", "this",
+              "that", "as", "be", "was", "were", "new"}
+    words = [w for w in tokens if w not in filler]
+    if len(words) < 3:
+        return None  # too thin to cluster honestly
+    return "story:" + "-".join(words[:12])
 
 
 def engagement_rate(samples: list[tuple[Any, dict[str, Any]]]) -> dict[str, Any]:

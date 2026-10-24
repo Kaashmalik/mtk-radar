@@ -5449,3 +5449,61 @@ def test_scan_computes_engagement_rate_from_observed_counts(client, source):
     listed = client.get("/trends", params={"limit": 100}).json()["candidates"]
     mine = [c for c in listed if c["url"] == url]
     assert mine and json.loads(mine[0]["engagement"])["per_h"] == 30.0
+
+
+# ------------------- EP-02 G09: corroboration clusters the story across URLs
+
+def test_corroboration_counts_independent_sources_across_urls(client, source):
+    """G09: two providers publishing the SAME story at DIFFERENT canonical
+    URLs used to land in different duplicate_groups → corroboration read as
+    1. The story cluster (normalized headline) must see both providers."""
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+    source_id = uuidlib.UUID(source)
+    other_source = _run(
+        """
+        INSERT INTO sources (provider, canonical_domain, category, adapter, config,
+                             polling_cadence, trust_tier)
+        VALUES ($1, 'mirror.example', 'trend_signals', 'rss', '{}'::jsonb,
+                '6 hours', 'B_discovery_lead')
+        RETURNING id
+        """,
+        f"Mirror Outlet {marker}",
+    )[0]["id"]
+
+    headline = f"Providers launch free student AI credits program {marker}"
+    for sid, ext, host in (
+        (source_id, f"g09-a-{marker}", "news.example"),
+        (other_source, f"g09-b-{marker}", "mirror.example"),
+    ):
+        res = client.post("/items", json={
+            "source_id": str(sid),
+            "external_item_id": ext,
+            "url": f"https://{host}/{marker}",
+            "title": headline,
+            "text": "identical story body syndicated across outlets",
+        })
+        assert res.status_code == 201, res.text
+
+    rows = _run(
+        "SELECT story_key, duplicate_group, source_id FROM items "
+        "WHERE external_item_id IN ($1, $2)",
+        f"g09-a-{marker}", f"g09-b-{marker}")
+    assert len(rows) == 2
+    assert rows[0]["story_key"] == rows[1]["story_key"], \
+        "one story across two URLs → one cluster key"
+    assert rows[0]["duplicate_group"] != rows[1]["duplicate_group"], \
+        "canonical URLs still differ (dedup keys untouched)"
+
+    scan = client.post("/trends/scan", params={"limit": 100})
+    assert scan.status_code == 201, scan.text
+    # Both candidates (one per URL) carry the FULL story corroboration.
+    cands = _run(
+        "SELECT url, corroboration FROM trend_candidates "
+        "WHERE url IN ($1, $2) ORDER BY url",
+        f"https://mirror.example/{marker}", f"https://news.example/{marker}")
+    assert len(cands) == 2, "each URL stays its own candidate"
+    for c in cands:
+        assert c["corroboration"] == 2, \
+            f"{c['url']}: both independent providers must be counted"
