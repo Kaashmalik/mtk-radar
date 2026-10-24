@@ -32,8 +32,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from source_adapters import (  # noqa: E402
     Fetcher,
+    JsonCache,
     fetch_github_releases,
+    fetch_github_stars,
+    fetch_google_trends_trending,
+    fetch_hf_daily_papers,
+    fetch_hn_stories,
     fetch_page_snapshot,
+    fetch_reddit_new,
     fetch_rss,
 )
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
@@ -71,7 +77,7 @@ def parse_cadence(cadence: Optional[str], default: int = 6 * 3600) -> int:
     return int(value) * _UNIT_SECONDS[unit.lower()]
 
 
-def collect(source: dict, fetcher: Fetcher) -> list[dict]:
+def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -> list[dict]:
     """Run the source's adapter. Returns raw item payloads (API dedups)."""
     adapter = source["adapter"]
     config = source.get("config") or {}
@@ -99,6 +105,41 @@ def collect(source: dict, fetcher: Fetcher) -> list[dict]:
         if not url:
             raise ValueError("page_watch source missing config.url")
         raw = fetch_page_snapshot(url, fetcher=fetcher)
+    elif adapter == "hf_papers":
+        # Trend signal (Tier-B): daily AI research papers with upvote counts.
+        raw = fetch_hf_daily_papers(
+            config.get("date"),
+            limit=int(config.get("limit", 30)),
+            fetcher=fetcher,
+            cache=cache,
+        )
+    elif adapter == "hn_search":
+        raw = fetch_hn_stories(
+            config.get("query"),
+            min_points=int(config.get("min_points", 50)),
+            max_age_hours=int(config.get("max_age_hours", 72)),
+            limit=int(config.get("limit", 20)),
+            fetcher=fetcher,
+            cache=cache,
+        )
+    elif adapter == "github_stars":
+        # Change-only star snapshots: velocity series without worker state.
+        raw = fetch_github_stars(
+            config.get("repos"), fetcher=fetcher, token=GITHUB_TOKEN
+        )
+    elif adapter == "reddit_new":
+        raw = fetch_reddit_new(
+            config.get("subreddit"),
+            min_score=int(config.get("min_score", 25)),
+            max_age_hours=int(config.get("max_age_hours", 48)),
+            limit=int(config.get("limit", 25)),
+            fetcher=fetcher,
+            cache=cache,
+        )
+    elif adapter == "google_trends_rss":
+        raw = fetch_google_trends_trending(
+            config.get("geo", "US"), fetcher=fetcher, cache=cache
+        )
     else:
         # 'manual' and 'extension' sources are not collector-polled.
         return []
@@ -120,6 +161,9 @@ class Collector:
         self.api_url = api_url.rstrip("/")
         self.client = httpx.Client(timeout=30, headers=_api_auth_headers())
         self.fetcher = Fetcher()
+        # Trend fetches (HF papers, HN, Reddit, Google Trends) cache their raw
+        # payloads here so a burst of sweeps never doubles the API traffic.
+        self.trend_cache = JsonCache(namespace="trend")
         self.next_due: dict[str, float] = {}
 
     def run_forever(self) -> None:
@@ -247,7 +291,7 @@ class Collector:
                 self.next_due[sid] = time.time() + cadence
 
     async def _poll(self, source: dict) -> None:
-        payloads = await asyncio.to_thread(collect, source, self.fetcher)
+        payloads = await asyncio.to_thread(collect, source, self.fetcher, self.trend_cache)
         created = 0
         for payload in payloads:
             resp = self.client.post(

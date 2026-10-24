@@ -109,6 +109,68 @@ SOURCES = [
         "trust_tier": "A_provider_owned",
         "polling_cadence": "24 hours",
     },
+    # --- Trend signals (Tier-B: momentum leads — NEVER verification evidence).
+    # Registered for the Trend Radar v2 (docs/enhancement-plan-2026-10-24-
+    # trends-automation.md, WP-A). Each feed is official/free; upvotes, points,
+    # star counts and trending placement only propose topics for the radar.
+    {
+        "provider": "Hugging Face Papers",
+        "canonical_domain": "huggingface.co",
+        "category": "research_papers",
+        "adapter": "hf_papers",
+        "config": {},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "24 hours",
+    },
+    {
+        "provider": "Hacker News",
+        "canonical_domain": "news.ycombinator.com",
+        "category": "trend_signals",
+        "adapter": "hn_search",
+        "config": {"query": "AI", "min_points": 100, "max_age_hours": 48, "limit": 15},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "6 hours",
+    },
+    {
+        "provider": "Reddit r/LocalLLaMA",
+        "canonical_domain": "reddit.com",
+        "category": "trend_signals",
+        "adapter": "reddit_new",
+        "config": {"subreddit": "LocalLLaMA", "min_score": 100,
+                   "max_age_hours": 48, "limit": 20},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "6 hours",
+    },
+    {
+        "provider": "GitHub Stars",
+        "canonical_domain": "github.com",
+        "category": "trend_signals",
+        "adapter": "github_stars",
+        "config": {"repos": [
+            "ollama/ollama", "ggml-org/llama.cpp", "vllm-project/vllm",
+            "huggingface/transformers", "langchain-ai/langchain",
+        ]},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "24 hours",
+    },
+    {
+        "provider": "Google Trends US",
+        "canonical_domain": "trends.google.com",
+        "category": "trend_signals",
+        "adapter": "google_trends_rss",
+        "config": {"geo": "US"},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "6 hours",
+    },
+    {
+        "provider": "Google Trends PK",
+        "canonical_domain": "trends.google.com",
+        "category": "trend_signals",
+        "adapter": "google_trends_rss",
+        "config": {"geo": "PK"},
+        "trust_tier": "B_discovery_lead",
+        "polling_cadence": "6 hours",
+    },
 ]
 
 
