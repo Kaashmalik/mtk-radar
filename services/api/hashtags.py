@@ -24,8 +24,13 @@ Two hard rules:
    cache its result; this module stays the floor.
 
 The `hashtag_performance` rollup (migration 034, maintained at metrics
-ingest) is consulted at generation time: tags that measurably underperform
-drop down the pool.
+ingest) stores per-tag measured impressions. Its APPLICATION here —
+re-ranking measured-best tags and sinking underperformers — is
+permission-gated behind `MTK_ENABLE_DERIVED_ENGAGEMENT` (G21,
+evidence-to-video plan): reordering generation from derived aggregates is
+the same restricted metric class as the growth-score blend. Default
+generation order is the deterministic source priority below; the rollup
+remains available as plain stored data.
 """
 
 from __future__ import annotations
@@ -130,8 +135,10 @@ def generate_hashtags(
 
     Returns a list of ``{"tag", "source", "ref"}`` — every tag cites where it
     came from. `performance` maps tag → {"avg_impressions", "posts"} from the
-    `hashtag_performance` rollup; tags with a meaningfully worse track record
-    than the pool's median sink below their still-unmeasured peers.
+    `hashtag_performance` rollup; when the derived-engagement permission is
+    enabled (G21), tags with a meaningfully worse track record than the best
+    measured tag sink below their still-unmeasured peers. With the permission
+    off (default) this argument is ignored.
 
     Ordering (deterministic): measured-best → trend-bridged → niche →
     provider → regional. Duplicates collapse case-insensitively.
@@ -185,10 +192,17 @@ def generate_hashtags(
     # Facebook officially tolerates 0–2; scale everything down to the cap.
     max_tags = high if low > 0 else min(2, high)
 
-    # 5. Feedback rollup: measured-best tags lead; UNMEASURED tags come next;
-    # a measured tag that underperforms the best measured tag by >70% sinks
-    # below everything unmeasured — the pool's floor before the cap cuts it.
-    perf = performance or {}
+    # 5. Feedback rollup — PERMISSION-GATED (G21, evidence-to-video plan).
+    # Re-ranking/sinking tags from measured platform aggregates is the same
+    # class of independently-calculated metric as the growth-score blend, so
+    # it only applies when the deployment opts in via
+    # MTK_ENABLE_DERIVED_ENGAGEMENT. Default: source-priority order decides
+    # (documented editorial heuristic); the rollup stays available as stored
+    # native data, it just never reshapes generation. When gated OFF,
+    # `performance` is ignored here.
+    from growth_engine import derived_engagement_enabled
+
+    perf = (performance or {}) if derived_engagement_enabled() else {}
     measured = [
         (tag.lower(), float((stats or {}).get("avg_impressions") or 0.0))
         for tag, stats in perf.items()

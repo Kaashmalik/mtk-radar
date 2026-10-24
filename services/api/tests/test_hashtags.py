@@ -103,23 +103,55 @@ def test_dedup_is_case_insensitive_and_casing_is_camel():
 # ------------------------------------------------------------- feedback rollup
 
 
-def test_measured_best_tags_lead_and_underperformers_sink():
+def test_measured_lift_is_permission_gated_and_applies_when_enabled(monkeypatch):
+    """G21 (evidence-to-video plan): reordering generation from the
+    `hashtag_performance` rollup is the same derived-aggregate class as the
+    growth-score blend — OFF by default, applied only under the explicit
+    MTK_ENABLE_DERIVED_ENGAGEMENT opt-in."""
     trends = ["tag one", "tag two", "tag three"]
     perf = {
         "#TagOne": {"posts": 10, "avg_impressions": 5000.0},
         "#TagTwo": {"posts": 10, "avg_impressions": 20.0},
     }
+
+    # default: performance is IGNORED — source-priority order (trend order)
+    # decides; generation with performance data is byte-identical to
+    # generation without it.
+    monkeypatch.delenv("MTK_ENABLE_DERIVED_ENGAGEMENT", raising=False)
+    baseline = generate_hashtags("instagram", provider="Acme", category="",
+                                 trend_keywords=trends)
+    gated = generate_hashtags("instagram", provider="Acme", category="",
+                              trend_keywords=trends, performance=perf)
+    assert baseline == gated, \
+        "measured lift must NOT reshape generation when the permission is off"
+
+    # opt-in: measured-best leads; the proven underperformer sinks below the
+    # unmeasured tag, and facebook's 2-tag cap keeps the winner only.
+    monkeypatch.setenv("MTK_ENABLE_DERIVED_ENGAGEMENT", "1")
     items = generate_hashtags("instagram", provider="Acme", category="",
                               trend_keywords=trends, performance=perf)
     tags = [i["tag"] for i in items]
     assert tags.index("#TagOne") < tags.index("#TagTwo")
-    # Once the platform cap forces a cut, the proven underperformer is the
-    # one that goes (instagram caps at 5; this pool has 4 → order only).
     fb = generate_hashtags("facebook", provider="Acme", category="",
                            trend_keywords=trends, performance=perf)
     fb_tags = [i["tag"] for i in fb]
     assert "#TagOne" in fb_tags and "#TagTwo" not in fb_tags, \
         "facebook's 2-tag cap keeps the measured winner, drops the measured loser"
+
+
+def test_feedback_rollup_ignored_without_permission_even_with_data(monkeypatch):
+    monkeypatch.delenv("MTK_ENABLE_DERIVED_ENGAGEMENT", raising=False)
+    trends = ["tag one", "tag two", "tag three"]
+    perf = {
+        "#TagThree": {"posts": 50, "avg_impressions": 1.0},  # terrible record
+    }
+    base = generate_hashtags("youtube", provider="Acme", category="",
+                             trend_keywords=trends, countries=["PK"])
+    without_lift = generate_hashtags("youtube", provider="Acme", category="",
+                                     trend_keywords=trends, countries=["PK"],
+                                     performance=perf)
+    assert base == without_lift, \
+        "stored aggregates must not reshape generation unless permitted"
 
 
 def test_generation_stays_deterministic():

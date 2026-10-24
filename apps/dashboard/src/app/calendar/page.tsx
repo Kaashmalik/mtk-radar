@@ -52,8 +52,19 @@ async function getSchedules(): Promise<ScheduleRow[] | null> {
   }
 }
 
+type BestTimesHour = {
+  local_hour: number;
+  sample_posts: number;
+  avg_views: number;
+  /** Present only when the derived engagement blend is permission-enabled
+   *  (MTK_ENABLE_DERIVED_ENGAGEMENT) — absent by default (G21). */
+  avg_engagement?: number;
+};
+
 type BestTimes = {
-  suggestions: Record<string, { local_hour: number; sample_posts: number; avg_engagement: number }[]>;
+  suggestions: Record<string, BestTimesHour[]>;
+  engagement_blend_enabled: boolean;
+  ranking_method: string;
 };
 
 async function getBestTimes(): Promise<BestTimes | null> {
@@ -198,14 +209,15 @@ export default async function CalendarPage() {
         within an hour) flagged BEFORE approve · {DISPLAY_TZ} display timezone.
       </p>
 
-      {bestEntries.length > 0 && (
+      {best && bestEntries.length > 0 && (
         <section className="card" id="best-times">
           <h2>Measured best times</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
-            From your own published posts&apos; metrics (views + 2×(likes +
-            comments)), grouped by the actual local publish hour. Suggestions
-            only — moving a reviewed package still goes through approval and
-            the release gate; hours with &lt; 2 measured posts are never shown.
+            From your own published posts&apos; metrics, grouped by the actual
+            local publish hour. Ranked the way the API reported:{" "}
+            {best.ranking_method}. Suggestions only — moving a reviewed
+            package still goes through approval and the release gate; hours
+            with &lt; 2 measured posts are never shown.
           </p>
           <div style={{ display: "flex", gap: "1.2rem", flexWrap: "wrap" }}>
             {bestEntries.map(([platform, hours]) => (
@@ -214,8 +226,11 @@ export default async function CalendarPage() {
                 <ul style={{ margin: "0.2rem 0 0", paddingLeft: "1.1rem" }}>
                   {hours.map((h) => (
                     <li key={h.local_hour}>
-                      {hourLabel(h.local_hour)} · {h.sample_posts} posts · engagement{" "}
-                      {h.avg_engagement.toLocaleString()}
+                      {hourLabel(h.local_hour)} · {h.sample_posts} posts · avg views{" "}
+                      {h.avg_views.toLocaleString()}
+                      {h.avg_engagement !== undefined && (
+                        <> · engagement {h.avg_engagement.toLocaleString()}</>
+                      )}
                     </li>
                   ))}
                 </ul>

@@ -184,8 +184,14 @@ async def _trend_keywords_for_offer(pool, offer_id: uuid.UUID) -> list[str]:
 
 
 async def _hashtag_performance(pool, platform: str) -> dict[str, dict[str, Any]]:
-    """The `hashtag_performance` feedback rollup (WP-E): tags that
-    consistently underperform drop down the generation pool."""
+    """The `hashtag_performance` feedback rollup (WP-E): measured per-tag
+    aggregates, maintained at metrics ingest.
+
+    NOTE (G21, evidence-to-video plan): the rollup is stored native data; its
+    use to RE-RANK generation is permission-gated in hashtags.py behind
+    `MTK_ENABLE_DERIVED_ENGAGEMENT` (off by default). This fetch stays
+    unconditional so the stored aggregates remain observable.
+    """
     try:
         rows = await pool.fetch(
             """
@@ -773,16 +779,29 @@ def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WIN
 
 @router.get("/schedules/best-times")
 async def best_times() -> dict:
-    """Data-informed publish-hour suggestions per platform (WP-H).
+    """Data-informed publish-hour suggestions per platform (WP-H, G21).
 
     Measured outcomes only: published posts join their `post_metrics`
     snapshots; each bucket is the LOCAL hour the post actually went out at
-    (the schedule's own display timezone). Engagement is views + 2×(likes +
-    comments) — deterministic and cite-able, no black-box scoring. Hours with
-    fewer than MIN_SAMPLE posts are never suggested; a platform without
-    measurements suggests nothing (no invention).
+    (the schedule's own display timezone). Hours with fewer than MIN_SAMPLE
+    posts are never suggested; a platform without measurements suggests
+    nothing (no invention).
+
+    Ranking mode is PERMISSION-GATED (G21, evidence-to-video plan):
+
+    * default — hours rank by their measured average VIEWS, a native platform
+      metric; the ordering itself is a documented editorial heuristic and is
+      labeled as such. No composite is computed or shown.
+    * `MTK_ENABLE_DERIVED_ENGAGEMENT=1` — hours rank by the derived
+      engagement blend `views + 2×(likes+comments)`, which is an
+      independently calculated metric of the kind YouTube's Developer
+      Policies restrict; the response is explicitly labeled as an internal
+      directional signal, not a platform metric.
     """
     MIN_SAMPLE = 2
+    from growth_engine import derived_engagement_enabled
+
+    blend_enabled = derived_engagement_enabled()
     pool = db.get()
     rows = await pool.fetch(
         """
@@ -805,31 +824,53 @@ async def best_times() -> dict:
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    buckets: dict[tuple, list[float]] = defaultdict(list)
+    buckets: dict[tuple, list[tuple[float, float, float]]] = defaultdict(list)
     for row in rows:
         when = row["local_time"]
         if not isinstance(when, _dt):
             continue
         tz = ZoneInfo(str(row["timezone"] or "Asia/Karachi"))
         hour = when.astimezone(tz).hour
-        engagement = (row["views"] or 0) + 2 * ((row["likes"] or 0)
-                                                + (row["comments"] or 0))
-        buckets[(row["platform"], hour)].append(engagement)
+        buckets[(row["platform"], hour)].append(
+            (float(row["views"] or 0), float(row["likes"] or 0),
+             float(row["comments"] or 0)))
     per_platform: dict[str, list[dict]] = defaultdict(list)
     for (platform, hour), samples in buckets.items():
         if len(samples) < MIN_SAMPLE:
             continue
-        per_platform[platform].append({
+        avg_views = sum(s[0] for s in samples) / len(samples)
+        entry = {
             "local_hour": hour,
             "sample_posts": len(samples),
-            "avg_engagement": round(sum(samples) / len(samples), 1),
-        })
+            "avg_views": round(avg_views, 1),
+        }
+        if blend_enabled:
+            engagement = [
+                s[0] + 2 * (s[1] + s[2]) for s in samples]
+            entry["avg_engagement"] = round(sum(engagement) / len(engagement), 1)
+        per_platform[platform].append(entry)
     suggestions = {}
     for platform, hours in per_platform.items():
-        hours.sort(key=lambda h: (-h["avg_engagement"], h["local_hour"]))
+        if blend_enabled:
+            hours.sort(key=lambda h: (-h["avg_engagement"], h["local_hour"]))
+        else:
+            # Editorial heuristic over a native metric: more measured views
+            # first. Deterministic, cite-able, and NOT presented as platform
+            # law or a composite score.
+            hours.sort(key=lambda h: (-h["avg_views"], h["local_hour"]))
         suggestions[platform] = hours[:3]
-    return {"minutes_per_slot": 60, "min_sample_posts": MIN_SAMPLE,
-            "suggestions": suggestions}
+    return {
+        "minutes_per_slot": 60,
+        "min_sample_posts": MIN_SAMPLE,
+        "engagement_blend_enabled": blend_enabled,
+        "ranking_method": (
+            "derived engagement blend views + 2×(likes+comments) — internal "
+            "directional signal, not a platform metric"
+            if blend_enabled else
+            "measured avg views (native metric); hour ordering is an "
+            "editorial heuristic, not a platform score"),
+        "suggestions": suggestions,
+    }
 
 
 @router.get("/schedules/{schedule_id}")
@@ -1651,7 +1692,13 @@ async def _rollup_hashtag_performance(conn, platform: str) -> None:
     Derived entirely from `schedules.metadata->'hashtags' ⋈ post_metrics` —
     recomputable, never incrementally drifted. Tags on posts without metrics
     still count as posts (they were shipped); impressions only accrue from
-    measured snapshots."""
+    measured snapshots.
+
+    NOTE (G21): this write path stores aggregates of NATIVE per-post metrics
+    (impressions/views) — kept as observable data. Its use to reorder
+    generation or rank publish hours is permission-gated elsewhere
+    (`MTK_ENABLE_DERIVED_ENGAGEMENT`, off by default).
+    """
     await conn.execute(
         """
         WITH tagged AS (
