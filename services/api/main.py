@@ -39,7 +39,7 @@ from metrics_api import router as metrics_router
 from jsonb import decode_mapping
 import tos_review
 from normalize import canonicalize_url, hash_parts
-from trend_engine import measurement_from_extra
+from trend_engine import measurement_from_extra, story_key
 from offers_api import router as offers_router
 from platforms_api import router as platforms_router
 from analytics_api import router as analytics_router
@@ -372,6 +372,7 @@ async def create_item(item: ItemIn) -> dict:
                             detail=f"unparseable item url: {exc}") from exc
     dupe_group = canonical
     text_hash = hash_parts(canonical, item.title, item.selection or item.text)
+    story = story_key(item.title)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -379,9 +380,9 @@ async def create_item(item: ItemIn) -> dict:
                 """
                 INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
                                    observed_at, published_at, text_hash, duplicate_group,
-                                   text, selection, account_handle, extra)
+                                   story_key, text, selection, account_handle, extra)
                 VALUES ($1, $2, $3, $4, $5,
-                        COALESCE($6, now()), $7, $8, $9, $10, $11, $12, $13::jsonb)
+                        COALESCE($6, now()), $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING id
                 """,
@@ -394,6 +395,7 @@ async def create_item(item: ItemIn) -> dict:
                 item.published_at,
                 text_hash,
                 dupe_group,
+                story,
                 item.text,
                 item.selection,
                 item.account_handle,

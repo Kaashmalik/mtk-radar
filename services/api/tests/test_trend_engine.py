@@ -293,3 +293,20 @@ def test_research_papers_and_trend_signal_categories_score_deliberately():
     unknown = score_item(item(source_category="mystery_box"), now=NOW)
     assert paper["audience_fit"] > unknown["audience_fit"]
     assert signal["audience_fit"] >= unknown["audience_fit"]
+
+
+# ------------------------------------------------- story clustering (G09)
+
+def test_story_key_clusters_syndicated_headlines():
+    from trend_engine import story_key
+
+    a = story_key("Free AI credits: providers launch student program")
+    b = story_key("free ai credits — providers launch student program!")
+    assert a == b and a is not None, "same story, different URL/title cosmetics"
+    # Order-sensitive (correctly distinct word sequences classify separately)
+    assert story_key("providers launch student program: free AI credits") != a
+    # Thin/duplicate tokens: never fabricate a cluster key.
+    assert story_key("") is None
+    assert story_key("The of and") is None
+    # Deterministic across case and whitespace.
+    assert story_key("FREE AI Credits:  PROVIDERS   launch STUDENT program") == a

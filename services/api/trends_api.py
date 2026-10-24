@@ -166,7 +166,7 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     rows = await pool.fetch(
         """
         SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
-               i.duplicate_group, i.text, i.selection,
+               i.duplicate_group, i.story_key, i.text, i.selection,
                s.provider AS source_provider,
                s.category AS source_category, s.trust_tier::text AS trust_tier,
                s.country_scope,
@@ -217,19 +217,24 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
         ) if provider else 0
         duplicates = 0
         corroborating = 1
-        if data.get("duplicate_group"):
+        # G09: cluster by the STORY (normalized headline across URLs), falling
+        # back to the canonical-URL group for rows that predate story_key.
+        cluster = data.get("story_key") or data.get("duplicate_group")
+        if cluster:
             duplicates = await pool.fetchval(
-                "SELECT COUNT(*) FROM items WHERE duplicate_group = $1",
-                data["duplicate_group"],
+                "SELECT COUNT(*) FROM items "
+                "WHERE COALESCE(story_key, duplicate_group) = $1",
+                cluster,
             ) or 0
             corroborating = await pool.fetchval(
                 """
                 SELECT COUNT(DISTINCT s.provider)::int
                 FROM items i2
                 JOIN sources s ON s.id = i2.source_id
-                WHERE i2.duplicate_group = $1 AND s.provider IS NOT NULL
+                WHERE COALESCE(i2.story_key, i2.duplicate_group) = $1
+                  AND s.provider IS NOT NULL
                 """,
-                data["duplicate_group"],
+                cluster,
             ) or 1
         corroborating = max(1, int(corroborating or 1))
 
