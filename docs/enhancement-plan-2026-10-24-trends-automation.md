@@ -11,6 +11,14 @@ production-readiness certificate and not a promise of views or revenue.
 - [system-review-2026-10-23.md](system-review-2026-10-23.md) — day-4/5 dispositions and the deferred P2/P3 table
 - [automation-master-plan-2026-10-21.md](automation-master-plan-2026-10-21.md) — WP05/WP06 trend radar (still unchecked there)
 
+**Implementation status (2026-10-24): COMPLETE — all work packages shipped to
+origin/main.** WP-A `546603a` · WP-B `cd0721c` · WP-C `b95568e` · WP-D
+`031ec62` · WP-E `9ba3cde` · WP-F `3267201` · WP-G `6a610aa` · WP-H `e90a9d3`
+(docs: §7 item 9 — go-live checklist, source registry, runbook, traceability —
+updated in the same series). Suite green at WP-H: 580 API + 461
+workers/packages tests, ruff, compileall, dashboard tsc. Feature-to-code map:
+[`master-plan-traceability.md`](master-plan-traceability.md).
+
 ---
 
 ## 1. Executive summary

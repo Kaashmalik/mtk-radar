@@ -146,6 +146,28 @@ Alert delivery setup, payload schema and the free-Supabase boundaries are in
 python workers/monitor/main.py --test-notification
 ```
 
+### 2.4 optional extras — trends, costs & robustness knobs (enhancement plan 2026-10-24)
+
+All of these have safe defaults and are optional; the workers degrade instead
+of spending when a knob is unset. Full copies with prose live in
+[`../.env.example`](../.env.example).
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `VERIFY_LLM_BASE_URL` / `VERIFY_LLM_API_KEY` / `VERIFY_LLM_MODEL` | unset | Optional OpenAI-compatible LLM for extraction help; a local Ollama works (`http://localhost:11434/v1`, dummy key). Unset ⇒ deterministic rules only, nothing breaks |
+| `VERIFY_LLM_TIMEOUT_S` / `VERIFY_LLM_MAX_ATTEMPTS` / `VERIFY_LLM_MAX_CALLS_PER_RUN` | 45 / 3 / 12 | WP-G LLM hardening: per-call timeout, bounded retries (backoff + jitter; malformed payloads are never retried), hard request budget per verification run |
+| `TTS_BASE_URL` / `TTS_API_KEY` / `TTS_MODEL` / `TTS_VOICE` | unset | Optional TTS narration; budget-denied or unreachable ⇒ capture audio (fail-soft, never fail-open spend) |
+| `COST_LLM_INPUT_PER_MTOK` / `COST_LLM_OUTPUT_PER_MTOK` / `COST_TTS_PER_MCHAR` | see `.env.example` | USD pricing for the **estimates** shown in Settings → Costs; deterministic, cite-able math (WP-F) |
+| `MTK_TOKEN_REFRESH_CADENCE_D` / `MTK_TOKEN_REFRESH_MARGIN_D` | 45 / 14 | WP-G token lifecycle: how often (and how close to expiry) the worker renews Facebook/Instagram long-lived tokens via Meta's `fb_exchange_token` grant |
+| `MTK_MEDIA_RETENTION_DAYS` | 90 | Retention before unpinned render/capture artifacts become GC candidates (`POST /media/gc`, dry run first, audited apply) |
+| `MTK_RENDER_LEASE_S` / `MTK_RENDER_LEASE_TOUCH_S` | 3600 / 600 | WP-G lease heartbeat: claim lease length and renewal interval while a long encode runs (`POST /jobs/{id}/touch`) |
+| `REDIS_URL` | unset | Optional shared cache tiers (fetch cache, extraction/TTS result cache, analytics) — memory tier always works without it |
+
+Minimum to go live: none of these. Recommended: set `REDIS_URL`,
+`MTK_PUBLIC_MEDIA_BASE_URL` (Instagram), the `COST_*` prices you pay, and the
+LLM/TTS endpoints you intend to use — the budget pages are only as honest as
+the prices configured.
+
 ---
 
 ## 3. Connect the social accounts

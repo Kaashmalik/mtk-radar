@@ -186,6 +186,31 @@ error. Rotating the secret signs every operator out.
    `POST /platform-accounts` (idempotent per platform+handle, resets to active).
 4. Resume paused posts after confirming the test upload.
 
+### Long-lived token auto-renewal (WP-G — Facebook/Instagram, 2026-10-24)
+
+Before resorting to the manual recovery above, the publishing worker renews
+Facebook/Instagram long-lived tokens itself on a ~45-day cadence
+(`MTK_TOKEN_REFRESH_CADENCE_D`, with a 14-day expiry margin) using Meta's
+`fb_exchange_token` grant. Playbook:
+
+- **Requirement:** `FACEBOOK_APP_ID` + `FACEBOOK_APP_SECRET` (or
+  `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`, or per-account prefix variants).
+  Without app credentials the sweep logs a skip and the expiry **monitor
+  stays the fallback** — nothing breaks, renewal is simply manual.
+- **Success:** the new expiry is reported to
+  `POST /platform-accounts/{id}/refreshed` (expiry only — the token itself
+  never leaves the worker process). Calendar shows the extended date.
+- **Refusal** (400/401/403 from the exchange): the account is marked
+  `token_expired` → it appears in Needs-You. **This is not silent:** do §3
+  manual recovery (re-consent → fresh long-lived token), then resume.
+- **At most one attempt per account per day** — a refused exchange never
+  becomes a per-sweep hammering loop against the OAuth endpoint.
+- TikTok/YouTube renew in-flight already (refresh-token hooks); no sweep
+  action exists for them by design.
+
+Verify the mechanism after configuring app credentials:
+`python -m pytest workers/publishing/tests/test_token_maintenance.py -q`.
+
 ### TikTok (Content Posting API)
 
 Requires an approved developer app with `video.publish`. Same pattern:
@@ -300,6 +325,59 @@ arrives (worker died mid-upload), the post is HELD — the calendar shows a
 warning, the auto-retry sweep skips it, and a human verifies on the platform
 before re-queueing. A duplicate public post is worse than a delayed one.
 
+### 5.2 Trend radar playbook (WP-A–C, 2026-10-24)
+
+The radar is a durable job, not a cron hope: migration `032` arms a
+`jobs` row with `dedupe_key = 'trend_scan'`; the collector worker claims it,
+scans all enabled trend sources (Tier-B leads only — see
+[`source-registry.md`](source-registry.md)), and re-arms the job on a healthy
+result via `POST /trends/scan-result` (attempts reset, `run_after` advances).
+Manual trigger stays available: `POST /trends/scan`.
+
+Symptoms and actions:
+
+| Symptom | Meaning | Action |
+| --- | --- | --- |
+| Radar page "No leads", sources green | scan job dead-lettered | check `GET /jobs?kind=trend_scan` → `POST /jobs/bulk-retry {"ids": [...]}` (**human-only**, reviewer credential) or `POST /trends/scan` once |
+| One source red in **Sources** | collector/adapter failure | worker log → fix endpoint/quota → the next sweep picks it up; a story pulsing on ≥2 sources keeps its corroboration |
+| `velocity`/`peak` look frozen | no new observations | check `trend_observations` rows for the topic; the scan appends a datapoint per scan when the story is still live |
+| Same story twice | title/entity dedup missed | report; `items_canonical` dedup runs at collect time (migration 031) |
+
+Promote flow (human decision): radar card → `POST /trends/{id}/promote`
+creates an offer + production-queue entry in ONE transaction (audited). The
+trend stays a lead; the offer still needs official evidence to verify —
+promotion never bypasses the verification gate.
+
+### 5.3 Bulk un-wedge, media GC & lease heartbeat (WP-G, 2026-10-24)
+
+- **Bulk un-wedge** — after an outage that dead-lettered many jobs:
+  `POST /jobs/bulk-retry` with reviewer credentials only (service tokens get
+  403; automation never bulk-requeues). It revives ONLY `dead`/`failed` rows —
+  leased (in-flight) and pending work is never re-armed — capped at 200,
+  filterable by `kinds`, per-id results + an `audit_log` entry
+  (`jobs:bulk_retry`).
+- **Media GC** — unpinned render/capture artifacts older than
+  `MTK_MEDIA_RETENTION_DAYS` (default 90) are reclaim candidates:
+  1. `POST /media/gc {"dry_run": true}` → the exact candidate list, nothing touched;
+  2. review; artifacts referenced by a schedule whose state is not
+     cancelled/failed are always exempt (their package must stay byte-exact);
+  3. `POST /media/gc {"dry_run": false}` deletes and writes the audited
+     `media:gc` entry with every removed ref.
+- **Render lease heartbeat** — long encodes auto-renew their job lease every
+  `MTK_RENDER_LEASE_TOUCH_S` (default 600 s). If you see
+  `lease renewal … refused (409)` in the render log the job lost its lease to
+  a restart — check whether anyone claimed it before re-running.
+
+### 5.4 Rate-limited platforms (WP-G, 2026-10-24)
+
+When a platform answers 429 (or Graph code 4 / subcode 2446852), the worker
+records `retry_after_s` (parsed from `Retry-After` / `x-ratelimit-*`) in the
+post's `outcome_detail`, marks the post failed (never held — nothing was
+uploaded, no duplicate risk), and the auto-retry sweep waits
+**max(its own backoff, the server-said delay)**. No action needed: do NOT
+manually requeue faster than the recorded delay — hammering a throttled
+endpoint only extends the ban.
+
 Concurrency safety (v0.22): worker sweeps take a named lock
 (`POST /locks/acquire`) before working the queue, so a deploy overlap or a
 manually started second worker cannot upload the same post twice. A lock
@@ -331,6 +409,9 @@ pnpm verify --fast  # same, without the browser smoke test
 - `backups/`: prune per backup policy (default 14d).
 - Captures/render bundles on disk: archive after the offer retires
   (`expired`/`corrected`); keep the DB rows.
+- Media artifacts (videos/captions/covers) not pinned by a live schedule:
+  reclaimable after `MTK_MEDIA_RETENTION_DAYS` (default 90) via
+  `POST /media/gc` — dry run first, audited apply (WP-G §5.3 playbook).
 
 ## 7. First production review (plan §"build one complete case study")
 

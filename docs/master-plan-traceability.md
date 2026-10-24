@@ -93,3 +93,27 @@ The mode is set in **Settings → Automation control** and stored as
 | `/connections` | register social accounts + where their credentials live |
 | `/settings` | automation policy (manual/assisted/autopilot, per-stage control, guardrails, kill switch, dry-run), live automation status/audit, publish windows |
 | `/offers/[id]` | script, capture, renders, corrections, scheduling |
+
+## Enhancement plan 2026-10-24 (WP-A…H) — feature-to-code map
+
+Traceability for
+[`enhancement-plan-2026-10-24-trends-automation.md`](enhancement-plan-2026-10-24-trends-automation.md)
+as of commit `e90a9d3` (2026-10-24, WP-H). Same proof discipline as above:
+re-run the named suites against the current commit before relying on a row.
+Standing safety rule across ALL rows: trend signals are Tier-B leads (never
+evidence), scoring is deterministic/cite-able, cost and release gates fail
+closed, and every human gate is untouched.
+
+| WP | Deliverable | Code | Proof |
+|---|---|---|---|
+| A | Trend sources + adapters (HF Papers, HN Algolia, Reddit new, GitHub stars, Google Trends RSS) | `packages/source_adapters/{hf_papers,hn_algolia,reddit_new,github_stars,google_trends}.py`, collector wiring in `workers/collectors/main.py`, `scripts/seed_sources.py` | adapter fixture tests in `packages/source_adapters/tests/`; egress/permission tests; [`source-registry.md`](source-registry.md) Tier-B table |
+| B | Engine v2: topics + observations, velocity/corroboration, incremental scans, durable `trend_scan` job | migrations `031_items_canonical_dedup.sql`, `032_trend_velocity.sql`; `services/api/trends_api.py`, scoring in `packages/trend_*` / trend engine modules; `jobs` arm in 032 | `services/api/tests/test_trend_engine.py`; scan-result re-arm contract in `test_integration.py` |
+| C | Production queue + trend→offer bridge | migration `033_production_queue.sql`; `POST /trends/{id}/promote` in `services/api/trends_api.py` (single transaction, audited); `/queue` dashboard | promote tests in `test_integration.py`; queue page `apps/dashboard/src/app/queue/` |
+| D | One-click scheduling from queue-ready entities | `services/api/schedules_api.py` (batch endpoints), dashboard calendar adds | `test_schedules.py`; `test_integration.py` batch-transition suite |
+| E | Hashtag engine + release gate (traceable tags only; over-max/charset/vanity BLOCK, below-min ADVISORY) | `services/api/hashtags.py`, `services/api/seo.py`, gate checks in `release_gate.py`; `hashtag_performance` (migration 034) | `services/api/tests/test_hashtags.py`, `test_seo.py` |
+| F | Cost engine: usage ledger, fail-closed budgets, shared caches (LLM/TTS/analytics), Settings → Costs | `services/api/costs_api.py`, `costs_store.py`, `cache.py`, migration `035_usage_events.sql`; workers meter over HTTP in `workers/verification/extractors.py`, render/narration | `services/api/tests/test_costs.py`, `test_cache.py`; `workers/verification/tests/test_extraction_costs.py` |
+| G | Robustness close-outs: token lifecycle, rate-limit taxonomy, LLM hardening, bulk-retry, media GC, lease heartbeat, global trends summary | `workers/publishing/platforms/base.py` (`RateLimited`, `retry_after_from_response`, `exchange_long_lived_token`) + adapters; `workers/publishing/main.py` (`token_maintenance`, `_server_retry_after`); `workers/verification/extractors.py` (`RunBudget`, retries); `services/api/jobs_api.py` (`/jobs/bulk-retry`, `/jobs/{id}/touch`); `services/api/media_api.py` (`/media/gc`); `workers/render/main.py` (`_lease_keeper`); migration `036_extraction_method.sql` | `workers/publishing/tests/test_rate_limits.py`, `test_token_maintenance.py`; `workers/verification/tests/test_llm_hardening.py`; `services/api/tests/test_robustness.py` |
+| H | Calendar & analytics polish: conflict flags, measured best-times, week grid | `services/api/schedules_api.py` (`_annotate_conflicts`, `GET /schedules/best-times`, `PUBLISH_CONFLICT_WINDOW_MIN`); `apps/dashboard/src/app/calendar/page.tsx` | `test_robustness.py` (conflict + best-times suites); dashboard `npx tsc --noEmit` |
+
+Full-suite green at the documentation commit: 580 API + 461 workers/packages
+pytest, `ruff` (E9/F63/F7/F82), `compileall`, dashboard `tsc`.
