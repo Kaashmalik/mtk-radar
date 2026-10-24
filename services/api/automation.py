@@ -80,6 +80,9 @@ _DEFAULT_GUARDRAILS: Final[dict[str, Any]] = {
     # and shows in Needs-You — never a surprise bill.
     "max_llm_cost_per_day_usd": 0.5,
     "max_tts_chars_per_day": 50_000,
+    # EP-03 G18: automation may only auto-shortlist so many topics for research
+    # per day (low-risk explainers). A human promote is never capped.
+    "auto_research_max_per_day": 2,
 }
 
 _STAGE_PRESETS: Final[dict[str, dict[str, str]]] = {
@@ -205,6 +208,8 @@ def _normalize_guardrails(raw: Any, base: dict[str, Any]) -> dict[str, Any]:
                     f"auto_schedule_privacy must be one of: {', '.join(PRIVACY)}")
             out[key] = value
         elif key == "auto_publish_max_per_day":
+            out[key] = _as_int(value, key, minimum=0, maximum=100)
+        elif key == "auto_research_max_per_day":
             out[key] = _as_int(value, key, minimum=0, maximum=100)
         elif key == "retry_max_attempts":
             out[key] = _as_int(value, key, minimum=0, maximum=10)

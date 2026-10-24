@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 import db
 from api_hardening import effective_reviewer
+from research_api import latest_brief_with_claims
 from schedules_state import script_version_hash
 from seo import PLATFORMS, build_thumbnail_text, build_variants
 from settings_store import audit, get_language_policy, get_value
@@ -97,6 +98,13 @@ async def _offer(pool, offer_id: uuid.UUID) -> dict[str, Any]:
             offer["fact_pack"] = json.loads(fact_pack["fact_pack"])
         except ValueError:
             offer["fact_pack"] = {}
+    # EP-03 G18: attach the current versioned research brief + claim ledger so
+    # script generation runs the contradicted-claim gate and the per-class
+    # attribution (and never invents offer fields for a paper).
+    brief = await latest_brief_with_claims(pool, offer_id)
+    if brief:
+        offer["research"] = brief
+        offer["content_type"] = brief.get("content_type")
     return offer
 
 
