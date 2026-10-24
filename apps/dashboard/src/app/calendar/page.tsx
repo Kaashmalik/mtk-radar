@@ -1,4 +1,5 @@
 import "./styles.css";
+import BatchApprove from "./BatchApprove";
 import HeldReconcile from "./HeldReconcile";
 import ScheduleActions from "./ScheduleActions";
 import { apiFetch } from "@/lib/api";
@@ -148,6 +149,18 @@ export default async function CalendarPage() {
           </div>
         )}
       </section>
+
+      {rows && rows.length > 0 && (
+        <BatchApprove
+          rows={rows.map((s) => ({
+            id: s.id,
+            platform: s.platform,
+            offer_title: s.offer_title,
+            local_time: s.local_time,
+            state: s.state,
+          }))}
+        />
+      )}
 
       {rows === null ? (
         <section className="card">

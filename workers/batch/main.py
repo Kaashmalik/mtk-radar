@@ -135,6 +135,54 @@ class Batch:
             return "unavailable"
         return "claimed" if body.get("claimed") else "empty"
 
+    def generate_scripts_owed(self) -> int:
+        """Drain durable `script` jobs (armed by POST /automation/run-now).
+
+        One bounded claim → generate → report loop. The API re-checks the §3
+        gate on every script call (this worker only decides WHEN); the outcome
+        is reported back so failures retry with backoff instead of vanishing
+        with a dead worker lease."""
+        created = 0
+        for _ in range(50):  # bounded per sweep like the render worker
+            try:
+                resp = self.api.post(
+                    "/jobs/claim",
+                    json={"worker": "batch", "lease_s": 900,
+                          "kinds": ["script"]},
+                )
+            except httpx.HTTPError:
+                return created
+            if resp.status_code != 200:
+                return created
+            try:
+                body = resp.json()
+            except ValueError:
+                return created
+            if not body.get("claimed"):
+                return created
+            job_id = body.get("id")
+            offer_id = ((body.get("payload") or {}).get("offer_id")
+                        or body.get("entity_id"))
+            ok, detail = False, None
+            try:
+                resp2 = self.api.post(f"/offers/{offer_id}/script",
+                                      params={"created_by": "batch"})
+                ok = resp2.status_code == 201
+                if ok:
+                    created += 1
+                    log.info("script generated for offer %s (owed job)", offer_id)
+                else:
+                    detail = f"script refused: HTTP {resp2.status_code}"[:1900]
+            except (httpx.HTTPError, ValueError) as exc:
+                detail = f"script failed: {exc}"[:1900]
+            try:
+                self.api.post(f"/jobs/{job_id}/result",
+                              json={"ok": ok, "detail": detail,
+                                    "retry_after_s": None if ok else 300})
+            except httpx.HTTPError:
+                log.warning("could not report script job %s result", job_id)
+        return created
+
     def maybe_scan_trends(self, policy: Optional[dict]) -> bool:
         """Job-driven first (durable owed work), then the cadence fallback for
         an API that predates the queue.
@@ -430,6 +478,8 @@ class Batch:
         trends_scanned = self.maybe_scan_trends(policy)
         queue_expired = self.expire_queue(policy)
         created = self.generate_scripts() if started_auto else 0
+        if started_auto:
+            created += self.generate_scripts_owed()
         approved = 0
         scheduled = 0
         if self._stage_auto(policy, "approve"):

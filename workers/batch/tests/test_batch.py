@@ -68,7 +68,16 @@ class FakeAPI:
         raise AssertionError(f"unexpected GET {path}")
 
     def post(self, path, json=None, params=None):
-        self.posts.append((path, params))
+        # record the request BODY (not params) — trend/script job results are
+        # asserted from it; every other assertion only looks at the path.
+        self.posts.append((path, json))
+        if path == "/jobs/claim":
+            # default: no owed script work (tests that exercise the drain
+            # subclass this, see test_owed_script_jobs_*).
+            return FakeResponse({"claimed": False})
+        if path == "/trends/scan-result" or (
+                path.startswith("/jobs/") and path.endswith("/result")):
+            return FakeResponse({"status": "done"})
         return FakeResponse({"id": "script-1"}, status_code=self.script_status)
 
 
@@ -166,11 +175,19 @@ def test_manual_policy_does_not_script_or_approve():
 
 def test_autopilot_claims_the_trend_scan_job_and_reports_the_result():
     class TrendAPI(FakeAPI):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.claims_left = 1  # exactly one owed job (the trend scan)
+
         def post(self, path, json=None, params=None):
             # record the request BODY (not params) for the assertion below
             self.posts.append((path, json))
             if path == "/jobs/claim":
-                return FakeResponse({"claimed": True, "id": "job-1"})
+                if self.claims_left > 0:
+                    self.claims_left -= 1
+                    return FakeResponse({"claimed": True, "id": "job-1",
+                                         "kind": "trend_scan"})
+                return FakeResponse({"claimed": False})
             if path == "/trends/scan":
                 return FakeResponse({"created": 1, "updated": 2, "rescored": 2})
             return FakeResponse({"rearmed": True})
@@ -187,10 +204,18 @@ def test_autopilot_claims_the_trend_scan_job_and_reports_the_result():
 
 def test_trend_scan_failure_still_reports_so_the_job_retries():
     class FailingScanAPI(FakeAPI):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.claims_left = 1
+
         def post(self, path, json=None, params=None):
             self.posts.append((path, json))  # record the body, not params
             if path == "/jobs/claim":
-                return FakeResponse({"claimed": True, "id": "job-1"})
+                if self.claims_left > 0:
+                    self.claims_left -= 1
+                    return FakeResponse({"claimed": True, "id": "job-1",
+                                         "kind": "trend_scan"})
+                return FakeResponse({"claimed": False})
             if path == "/trends/scan":
                 raise httpx.ConnectError("scan refused")
             return FakeResponse({"rearmed": True})
@@ -230,3 +255,64 @@ def test_api_unreachable_does_not_crash_the_batch():
     report = b.run_once()
     assert report["scripts_created"] == 0
     assert report.get("render_candidates") is None
+
+
+def test_owed_script_jobs_are_drained_and_reported():
+    class OwedScriptAPI(FakeAPI):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.script_claims = [
+                {"claimed": True, "id": "job-1", "kind": "script",
+                 "entity_id": "off-1", "payload": {"offer_id": "off-1"}},
+                {"claimed": False},
+            ]
+
+        def post(self, path, json=None, params=None):
+            self.posts.append((path, json))
+            if path == "/jobs/claim" and (json or {}).get("kinds") == ["script"]:
+                return FakeResponse(self.script_claims.pop(0))
+            if path == "/jobs/claim":
+                return FakeResponse({"claimed": False})  # no trend_scan job
+            if path.startswith("/jobs/") and path.endswith("/result"):
+                return FakeResponse({"status": "done"})
+            return FakeResponse({"id": "script-1"}, status_code=self.script_status)
+
+    api = OwedScriptAPI(offers=[_offer()],
+                        scripts={"off-1": [{"version": 1}]},  # list sweep skips
+                        policy=_policy("autopilot"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["scripts_created"] == 1
+    script_posts = [p for p, _ in api.posts if p.endswith("/script")]
+    assert "/offers/off-1/script" in script_posts
+    results = [j for p, j in api.posts if p.endswith("/result")]
+    assert results and results[0]["ok"] is True and results[0]["detail"] is None
+
+
+def test_failed_owed_script_job_reports_failure_with_retry_hint():
+    class FailingScriptAPI(FakeAPI):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.script_claims = [
+                {"claimed": True, "id": "job-2", "kind": "script",
+                 "entity_id": "off-1", "payload": {"offer_id": "off-1"}},
+                {"claimed": False},
+            ]
+
+        def post(self, path, json=None, params=None):
+            self.posts.append((path, json))
+            if path == "/jobs/claim" and (json or {}).get("kinds") == ["script"]:
+                return FakeResponse(self.script_claims.pop(0))
+            if path == "/jobs/claim":
+                return FakeResponse({"claimed": False})
+            if path.startswith("/jobs/") and path.endswith("/result"):
+                return FakeResponse({"status": "failed"})
+            return FakeResponse({"detail": "no"}, status_code=409)
+
+    api = FailingScriptAPI(offers=[_offer()], policy=_policy("assisted"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["scripts_created"] == 0, "the server refused — only reported"
+    results = [j for p, j in api.posts if p.endswith("/result")]
+    assert results and results[-1]["ok"] is False
+    assert results[-1]["retry_after_s"] == 300, "failure retries with backoff"

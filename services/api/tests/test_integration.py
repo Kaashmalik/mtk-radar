@@ -20,6 +20,7 @@ import importlib.util
 import json
 import os
 import sys as _sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit as url_split
@@ -4933,3 +4934,266 @@ def test_production_queue_self_expires_with_reasons(client):
     # Idempotent: nothing left to expire.
     second = client.post("/production-queue/expire", headers=SVC)
     assert second.json()["expired"] == 0
+
+
+# ------------------------------------------------ one-click scheduling (WP-D)
+
+def _wpd_ready_offer(client, marker, *, with_render=True):
+    """The release-check story: approved offer + script + redaction-reviewed
+    capture (+ an optional QC-passed render)."""
+    offer = client.post("/offers", headers=SVC, json={
+        "provider": f"WP-D {marker}", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = uuid.UUID(offer["id"])
+    markdown = f"# wpd script {marker}\n\nExact approved words."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language) "
+         "VALUES ($1, 1, $2, 'en')", offer_id, markdown)
+    capture_id = _run(
+        "INSERT INTO capture_sessions (offer_id, video_path, step_log, "
+        "redaction_reviewed) VALUES ($1, 'projects/x/cap.mp4', '[]'::jsonb, TRUE) "
+        "RETURNING id",
+        offer_id,
+    )[0]["id"]
+    if with_render:
+        _run(
+            "INSERT INTO renders (offer_id, capture_id, script_version, "
+            "script_version_hash, preset, width, height, video_path, language, "
+            "status, qc_status) VALUES ($1, $2, 1, $3, 'landscape', 1920, 1080, "
+            "'projects/x/wpd.mp4', 'en', 'rendered', 'passed')",
+            offer_id, capture_id, script_version_hash(markdown),
+        )
+    _run("UPDATE offers SET state = 'approved_for_video', "
+         "recheck_at = now() + interval '1 day', "
+         "expires_at = now() + interval '7 days' WHERE id = $1", offer_id)
+    return offer_id
+
+
+def test_batch_schedule_publishes_the_verified_story_on_all_platforms(client):
+    """Acceptance (WP-D): a fresh render goes from ready → queued on 3
+    platforms in ONE request, every created row passes the existing
+    release-check gates, and repeats stay idempotent."""
+    marker, stamp = uuid.uuid4().hex, "2027-05-04T13:00:00+00:00"
+    offer_id = _wpd_ready_offer(client, marker)
+
+    batched = client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "tiktok", "instagram"],
+        "local_time": stamp, "privacy": "private",
+    })
+    assert batched.status_code == 207, batched.text
+    body = batched.json()
+    assert body["created"] == 3 and body["ok"] is True, body
+    by_platform = {r["platform"]: r for r in body["results"]}
+    assert set(by_platform) == {"youtube", "tiktok", "instagram"}
+
+    # Every batch row passes the SAME gate story as a single-created row for
+    # the identical render: build the single-create baseline and compare the
+    # release-check output field by field (minus the id/timestamps).
+    single = client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-05-04T15:00:00+00:00",
+        "privacy": "private",
+    })
+    assert single.status_code == 201, single.text
+    batch_check = client.get(f"/schedules/{by_platform['youtube']['id']}/release-check").json()
+    single_check = client.get(f"/schedules/{single.json()['id']}/release-check").json()
+    assert batch_check["ok"] == single_check["ok"]
+    assert batch_check["problems"] == single_check["problems"], \
+        "batch rows must be gated EXACTLY like single-created rows"
+
+    # Identical repeat → idempotent (created=False), no duplicate rows.
+    repeat = client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "tiktok", "instagram"],
+        "local_time": stamp, "privacy": "private",
+    })
+    assert repeat.json()["created"] == 0
+    stored = _run(
+        """
+        SELECT platform, COUNT(*)::int AS n FROM schedules
+        WHERE offer_id = $1 AND local_time = $2
+        GROUP BY platform
+        """,
+        offer_id, datetime.fromisoformat("2027-05-04T13:00:00+00:00"),
+    )
+    assert {r["platform"] for r in stored} == {"youtube", "tiktok", "instagram"}
+    assert all(r["n"] == 1 for r in stored)
+
+    # A per-platform failure (pinned render that doesn't exist) never blocks
+    # the other platform: 207, one ok + one refused with the gate reason.
+    partial = client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "facebook"],
+        "local_time": "2027-05-05T13:00:00+00:00", "privacy": "private",
+        "per_platform": {"facebook": {"render_id": str(uuid.uuid4())}},
+    })
+    assert partial.status_code == 207, partial.text
+    results = {r["platform"]: r for r in partial.json()["results"]}
+    assert results["youtube"]["ok"] is True and results["facebook"]["ok"] is False
+    assert "does not exist" in results["facebook"]["detail"]
+
+    # The offer-gate still applies: a candidate offer can't batch at all.
+    fresh_offer = client.post("/offers", headers=SVC, json={
+        "provider": f"WP-D blocked {marker}", "category": "domains",
+        "offer_type": "coupon",
+    }).json()
+    blocked = client.post(f"/offers/{fresh_offer['id']}/schedules/batch",
+                          headers=SVC, json={
+        "platforms": ["youtube"], "local_time": "2027-05-06T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert blocked.status_code == 207
+    entry = blocked.json()["results"][0]
+    assert entry["ok"] is False and "scheduling blocked" in entry["detail"]
+
+
+def test_batch_transition_is_human_only_with_per_id_results(auth_client):
+    marker, stamp = uuid.uuid4().hex, "2027-05-07T13:00:00+00:00"
+    offer_id = _wpd_ready_offer(auth_client, marker)
+    batched = auth_client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "tiktok"], "local_time": stamp,
+        "privacy": "private",
+    }).json()
+    ids = [r["id"] for r in batched["results"]]
+    ghost = str(uuid.uuid4())
+
+    # Service credentials are refused outright — bulk approval is a human act.
+    refused = auth_client.post("/schedules/batch-transition", headers=SVC, json={
+        "ids": ids, "to": "needs_approval",
+    })
+    assert refused.status_code == 403, refused.text
+
+    # Human reviewer: per-id results; a bogus id fails without blocking.
+    # The state machine stays the single one: draft → needs_approval → approved.
+    to_review = auth_client.post("/schedules/batch-transition", headers=AUTH, json={
+        "ids": ids + [ghost], "to": "needs_approval",
+    })
+    assert to_review.status_code == 200, to_review.text
+    to_review_body = to_review.json()
+    assert to_review_body["approved"] == 2
+    results = {r["id"]: r for r in to_review_body["results"]}
+    assert all(results[i]["ok"] and results[i]["state"] == "needs_approval" for i in ids)
+    assert results[ghost]["ok"] is False and results[ghost]["status"] == 404
+
+    human = auth_client.post("/schedules/batch-transition", headers=AUTH, json={
+        "ids": ids, "to": "approved",
+    })
+    assert human.status_code == 200, human.text
+    body = human.json()
+    assert body["to"] == "approved" and body["ok"] is True and body["approved"] == 2
+    results = {r["id"]: r for r in body["results"]}
+    assert all(results[i]["ok"] and results[i]["state"] == "approved" for i in ids)
+
+    states = _run("SELECT id::text, state::text FROM schedules WHERE id = ANY($1::uuid[])",
+                  ids)
+    assert {r["state"] for r in states} == {"approved"}
+
+
+def test_automation_run_now_arms_owed_work_and_never_human_stages(client):
+    marker = uuid.uuid4().hex
+
+    # Self-sufficient: one marker-scoped enabled source always owes collection.
+    _run(
+        """
+        INSERT INTO sources (provider, canonical_domain, category, adapter,
+                             config, enabled)
+        VALUES ($1, 'runnow.example', 'model_hubs', 'rss',
+                '{"url": "https://runnow.example/feed.xml"}'::jsonb, TRUE)
+        RETURNING id
+        """,
+        f"RunNow Source {marker}",
+    )
+
+    # Human stages are structurally unreachable.
+    bad = client.post("/automation/run-now", headers=SVC,
+                      params={"stages": "collect,approve"})
+    assert bad.status_code == 422, bad.text
+    assert "human stages" in bad.json()["detail"]
+    none = client.post("/automation/run-now", headers=SVC, params={"stages": ""})
+    assert none.status_code == 200 and none.json()["armed"] == {}
+
+    # A verified offer with official evidence but NO script owes a script;
+    # one with a script + reviewed capture but no render owes a render.
+    owe_script = client.post("/offers", headers=SVC, json={
+        "provider": f"RunNow script {marker}", "category": "domains",
+        "offer_type": "coupon",
+    }).json()
+    owe_script_id = uuid.UUID(owe_script["id"])
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", owe_script_id)
+    _run(
+        "INSERT INTO evidence (offer_id, url, content_hash, official, domain_ok) "
+        "VALUES ($1, 'https://official.example/run-now', $2, TRUE, TRUE)",
+        owe_script_id, f"hash-{marker}",
+    )
+
+    owe_render = _wpd_ready_offer(client, marker + "-render", with_render=False)
+
+    # A leased job stays untouched (a worker holds it in flight).
+    leased_offer = client.post("/offers", headers=SVC, json={
+        "provider": f"RunNow leased {marker}", "category": "domains",
+        "offer_type": "coupon",
+    }).json()
+    _run(
+        """
+        INSERT INTO jobs (kind, entity_id, payload, dedupe_key, status,
+                          run_after, lease_expires_at, lease_holder)
+        VALUES ('collect', $1, '{}'::jsonb, $2, 'leased', now() - interval '2 hours',
+                now() + interval '10 minutes', 'someone-else')
+        """,
+        uuid.UUID(leased_offer["id"]), f"collect:{leased_offer['id']}",
+    )
+
+    run = client.post("/automation/run-now", headers=SVC,
+                      params={"stages": "collect,scan,script,render"})
+    assert run.status_code == 200, run.text
+    body = run.json()
+    assert set(body["stages"]) == {"collect", "scan", "script", "render"}
+    assert body["armed"]["collect"] >= 1
+    assert body["armed"]["scan"] == 1
+    assert body["armed"]["script"] >= 1
+    assert body["armed"]["render"] >= 1
+
+    # collect: due NOW for enabled sources (the leased one keeps its slot).
+    due = _run("SELECT COUNT(*)::int AS n FROM jobs WHERE kind = 'collect' "
+               "AND run_after <= now() AND status = 'pending'")[0]["n"]
+    assert due >= 1
+    leased = _run(
+        "SELECT run_after < now() - interval '1 hour' AS untouched, status "
+        "FROM jobs WHERE dedupe_key = $1",
+        f"collect:{leased_offer['id']}",
+    )[0]
+    assert leased["untouched"], "a leased job keeps its slot — no blind re-arm"
+    assert leased["status"] == "leased"
+
+    # scan: exactly one due trend_scan job.
+    scan = _run("SELECT COUNT(*)::int AS n FROM jobs WHERE dedupe_key = 'trend_scan' "
+                "AND run_after <= now() AND status = 'pending'")[0]["n"]
+    assert scan == 1
+
+    # script: a durable job keyed to the exact offer that owes one.
+    script_job = _run("SELECT id FROM jobs WHERE dedupe_key = $1 AND run_after <= now()",
+                      f"script:{owe_script_id}")
+    assert script_job, "the verified+evidenced offer without a script owes one"
+
+    # render: keyed to the exact script version that misses a passed render.
+    render_job = _run(
+        "SELECT j.id FROM jobs j WHERE j.kind = 'render_package' "
+        "AND j.entity_id = $1 AND j.run_after <= now()",
+        owe_render,
+    )
+    assert render_job, "scripted+captured offer without a render owes one"
+
+    # An offer WITH a QC-passed render (the WP-D ready story) owes nothing —
+    # the ready offer isn't a render candidate anymore.
+    rendered_offer = _wpd_ready_offer(client, marker + "-done")
+    _run("UPDATE offers SET state = 'approved_for_video' WHERE id = $1", rendered_offer)
+    already = _run(
+        "SELECT COUNT(*)::int AS n FROM jobs WHERE kind = 'render_package' "
+        "AND entity_id = $1", rendered_offer,
+    )[0]["n"]
+    assert already == 0, "a finished render is not owed work"
+
+    # Idempotent: a second run-now re-arms nothing new (same counts).
+    second = client.post("/automation/run-now", headers=SVC,
+                         params={"stages": "scan,script"})
+    assert second.json()["armed"]["scan"] == 1
+
+    # Audited.
+    trail = _run("SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'automation:run-now'")
+    assert trail[0]["n"] >= 1
