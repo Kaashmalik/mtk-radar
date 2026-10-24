@@ -175,6 +175,14 @@ SOURCES = [
 
 
 async def main() -> None:
+    # G06: seed rows go through the same validation as POST /sources so the
+    # registry, the API schema and the seeds cannot drift apart. (Reddit stays
+    # seeded disabled pending approval — enforced in G22.)
+    from schemas import SourceIn
+
+    for src in SOURCES:
+        SourceIn(**src)
+
     conn = await asyncpg.connect(DATABASE_URL)
     created = skipped = 0
     for src in SOURCES:

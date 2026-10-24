@@ -9,6 +9,7 @@ from .models import RawItem
 from .page_watch import PARSER_VERSION, fetch_page_snapshot
 from .permissions import RobotsDecision, check_robots
 from .reddit_new import fetch_reddit_new
+from .registry import ADAPTERS, ADAPTER_KINDS, AdapterSpec
 from .rss import fetch_rss
 from .trendcache import JsonCache, cached_json
 
@@ -19,6 +20,9 @@ __all__ = [
     "Fetcher",
     "JsonCache",
     "PARSER_VERSION",
+    "ADAPTERS",
+    "ADAPTER_KINDS",
+    "AdapterSpec",
     "RawItem",
     "RobotsDecision",
     "cached_json",
