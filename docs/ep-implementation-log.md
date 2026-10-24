@@ -173,3 +173,47 @@ gate — the API contract is exercised by the integration tests); studio
 and offers script generation were verified for the contradiction gate and
 attribution via the API, not through a browser session; the recheck_at due
 list (attention_api) does not yet include research_claims.recheck_at rows.
+
+## EP-04 — Finish the browser extension (2026-10-24)
+
+The extension was a syntax-checked stub with a wrong context-menu target and
+a shared token story. It is now a real intake tool: the right-clicked LINK is
+the saved target (the page rides along as context — the audit's headline
+bug), pairing uses the dedicated revocable intake-only credential with a
+masked display, explicit revoke/reset, a `GET /whoami` health probe, https-
+validated API base (loopback-only exception), and runtime per-origin host
+grants (the manifest no longer asks for all-web access at install; the old
+origin is revoked on change — plan ref [S15]). Saves go through a durable,
+bounded offline outbox (50 entries / 14-day TTL, alarm-driven retry,
+attempt-capped) whose client idempotency key rides as `external_item_id`, so
+an offline save survives worker death and is delivered ONCE logically —
+proven on both sides: a fake-fetch unit suite in Node (25 tests, Chrome API
+stubs, wired into `verify.sh`) and the server-side contract integration test.
+Distinct statuses for saved / duplicate / queued(offline · timeout ·
+rate-limited) / auth-expired / rejected, plus restricted-tab (`chrome://`,
+store), denylist, missing-host-permission and full-outbox actions. Privacy
+fails closed: secret-shaped selections block the save, tracking parameters
+are stripped without touching canonical identity, private surfaces (webmail,
+DMs, sign-in) are excluded by default, selection is bounded at 500 chars.
+The contract test also caught a real API bug: `create_item` labeled extension
+intake as `collector` in the observation provenance because source
+resolution aliased the flag (fixed).
+
+| Work | Commit / evidence |
+|---|---|
+| Targets, pairing, host grants, outbox, statuses, privacy | `42a6f53` — `apps/extension/core.js` (pure logic) + worker/options rewrite + manifest v0.3.0 + `apps/extension/README.md` (tester install steps); 25 unit tests; `test_extension_intake_contract_idempotent_with_context` |
+| Intake provenance bug | `42a6f53` — `services/api/main.py` records `intake: extension` from the pre-resolution flag |
+
+**Checks executed for this EP** (at documentation commit): full suite
+1148 passed (incl. **156 integration** on real Postgres, migrations 001→040);
+extension `node --test` 25/25; `node --check` on
+all three JS files; manifest JSON parses; `ruff check .`, `docker compose
+config -q`, dashboard `tsc --noEmit` clean.
+
+**Still unproven:** the loaded-extension layer — a persistent-context
+Chromium E2E run against the real API and a manual Chrome/Edge smoke on a
+real profile (step-by-step smoke documented in `apps/extension/README.md`;
+Chrome-API surfaces such as `chrome.permissions.request` UI, badge painting
+and alarm cadence are stubbed in tests, not exercised in a real browser);
+no Firefox claim (Chrome MV3 only); remote CI execution still blocked by the
+owner billing lock (logged, not touched).
