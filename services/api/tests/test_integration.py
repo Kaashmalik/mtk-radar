@@ -6008,3 +6008,70 @@ def test_automation_promotion_daily_cap(auth_client):
     # Restore the default so other tests see the stock policy.
     policy["guardrails"]["auto_research_max_per_day"] = 2
     auth_client.put("/automation/policy", headers=AUTH, json={"policy": policy})
+
+
+def test_extension_intake_contract_idempotent_with_context(client):
+    """EP-04 contract: the extension's durable outbox retries every save with
+    the SAME client idempotency key (external_item_id). The server must turn
+    that into the SAME inbox row — created once, duplicate thereafter — and
+    persist the right-clicked-link CONTEXT (page url + context type) and the
+    selection end-to-end."""
+    import json as _json
+
+    key = f"ext-{uuid.uuid4().hex}"
+    link = f"https://paper.example.org/study/{uuid.uuid4().hex}"
+    body = {
+        "external_item_id": key,
+        "url": link,
+        "title": "Paper: two-week memory protocol",
+        "selection": "Participants recalled 12% more words."[:500],
+        "observed_at": "2026-10-24T10:00:00Z",
+        "extra": {
+            "source_kind": "extension_save",
+            "context_type": "link",
+            "context_url": "https://blog.example.com/roundup",
+        },
+    }
+    # No source_id: the extension resolves to the shared 'browser-extension'
+    # Tier-B source (main._resolve_source_id).
+    first = client.post("/items", json=body)
+    assert first.status_code == 201, first.text
+    created = first.json()
+    assert created["created"] is True and created["duplicate"] is False
+
+    # The outbox retry (worker restart, offline spell, timeout) resends the
+    # SAME payload with the SAME key — it must never create a second row.
+    for _ in range(3):
+        again = client.post("/items", json=body)
+        assert again.status_code == 201, again.text
+        assert again.json()["duplicate"] is True
+        assert again.json()["id"] == created["id"]
+
+    # The retry with a FRESH idempotency key but same URL+text still dedupes
+    # through the canonical-URL + text-hash key (migration 031).
+    rebased = {**body, "external_item_id": key + "-retry2"}
+    still = client.post("/items", json=rebased)
+    assert still.json()["duplicate"] is True
+    assert still.json()["id"] == created["id"]
+
+    row = _run(
+        """
+        SELECT i.selection, i.account_handle, i.text, s.adapter,
+               i.story_key
+        FROM items i JOIN sources s ON s.id = i.source_id
+        WHERE i.id = $1
+        """,
+        uuid.UUID(created["id"]),
+    )
+    assert row, "the saved item must exist"
+    assert row[0]["selection"].startswith("Participants recalled 12%")
+    assert row[0]["adapter"] == "extension"  # the browser-extension source
+    # context persisted in the G07 observation ledger
+    obs = _run(
+        "SELECT excerpt, provenance::text AS provenance FROM source_observations "
+        "WHERE external_id = $1 ORDER BY observed_at DESC LIMIT 1",
+        key,
+    )
+    assert obs and obs[0]["excerpt"].startswith("Participants recalled 12%")
+    provenance = _json.loads(obs[0]["provenance"])
+    assert provenance["intake"] == "extension"

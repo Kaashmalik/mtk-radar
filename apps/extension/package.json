@@ -1,0 +1,1 @@
+{"name": "mtk-radar-extension", "private": true, "type": "module", "description": "MTK RADAR AI save-page intake extension (Manifest V3). Unit tests run under Node's built-in test runner: npm test (or node --test tests/*.test.js).", "scripts": {"test": "node --test tests/*.test.js"}}

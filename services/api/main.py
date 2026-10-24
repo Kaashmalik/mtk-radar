@@ -359,6 +359,9 @@ async def create_item(item: ItemIn) -> dict:
     Re-submissions return the existing item with `created: false, duplicate: true`.
     """
     pool = db.get()
+    # EP-04: provenance must record WHERE the candidate came from — resolve
+    # (extension saves omit source_id) can never contaminate this flag.
+    from_extension = item.source_id is None
     resolved = await _resolve_source_id(pool, item.source_id)
     if item.source_id is None:
         item.source_id = resolved
@@ -440,7 +443,7 @@ async def create_item(item: ItemIn) -> dict:
                 or None,
                 _json({
                     "source_kind": (item.extra or {}).get("source_kind"),
-                    "intake": "collector" if item.source_id else "extension",
+                    "intake": "extension" if from_extension else "collector",
                 }),
             )
 
