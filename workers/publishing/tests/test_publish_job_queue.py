@@ -41,6 +41,14 @@ class FakeResponse:
 class FakeAdapter:
     def __init__(self):
         self.uploads = []
+        self.confirmations = []
+
+    def confirm_publication(self, remote_id, *, expected_privacy,
+                            timeout_s=300, interval_s=5.0):
+        # G02: reconciliation is part of a real upload, so the fake does it too.
+        self.confirmations.append((remote_id, expected_privacy))
+        return {"confirmed": True, "processing_state": "ready",
+                "remote_url": "https://example.test/v/remote-1"}
 
     def upload(self, path, meta, privacy=None, idempotency_key=None):
         self.uploads.append((path, meta, privacy, idempotency_key))

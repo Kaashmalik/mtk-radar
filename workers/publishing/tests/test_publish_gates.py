@@ -67,6 +67,15 @@ class FakeAPI:
 class FakeAdapter:
     def __init__(self):
         self.uploads = []
+        self.confirmations = []
+
+    # G02: a fake that reports real uploads must reconcile them like the real
+    # platform adapters — an accepted upload id is not a confirmed post.
+    def confirm_publication(self, remote_id, *, expected_privacy,
+                            timeout_s=300, interval_s=5.0):
+        self.confirmations.append((remote_id, expected_privacy))
+        return {"confirmed": True, "processing_state": "ready",
+                "remote_url": "https://example.test/v/remote-1"}
 
     def upload(self, path, meta, privacy=None, idempotency_key=None):
         self.uploads.append((str(path), privacy, idempotency_key, meta))
@@ -288,12 +297,18 @@ def test_existing_remote_upload_that_is_still_unconfirmed_stays_held():
 def test_remote_post_without_a_confirmation_api_is_never_reuploaded():
     render = _render("APPROVED")
     p = _publisher(_healthy_offer(), [render])
-    adapter = FakeAdapter()
+
+    class NoConfirmationAdapter:
+        """An adapter that uploads but cannot reconcile remote status (G02):
+        the worker must hold and never duplicate."""
+        def upload(self, path, meta, privacy=None, idempotency_key=None):
+            return "remote-1"
+
+    adapter = NoConfirmationAdapter()
     post = _post(render)
     post["remote_post_id"] = "remote-1"
 
     assert p._publish(post, {"youtube": adapter}) is False
-    assert adapter.uploads == []
     assert "will not upload again" in _result_calls(p.api)[0][2]["detail"]
 
 

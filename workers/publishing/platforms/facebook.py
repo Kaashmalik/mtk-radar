@@ -6,6 +6,7 @@ means a dead session → TokenExpiredError. Test uploads post UNPUBLISHED
 (published=false) unless privacy=public.
 """
 
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -113,6 +114,69 @@ class FacebookAdapter(PublishAdapter):
                 raise TokenExpiredError(str(exc)) from exc
             resp.raise_for_status()
         return str(payload["id"])
+
+    # ------------------------------------------------------------ reconciliation
+
+    def confirm_publication(self, video_id: str, *, expected_privacy: str,
+                            timeout_s: int = 300, interval_s: float = 5.0) -> dict:
+        """G02: poll the Graph video object until the upload is actually
+        processed AND visible as scheduled. An accepted upload id is NOT
+        confirmed publication: an unpublished draft (`published=false`) or a
+        still-processing video must stay unconfirmed — the worker reports a
+        held failure, never success."""
+        deadline = time.monotonic() + max(0, int(timeout_s))
+        last: dict = {}
+        while True:
+            resp = self._http.get(
+                f"{VIDEO_ENDPOINT}{video_id}",
+                params={
+                    "fields": "status,published,permalink_url",
+                    "access_token": self.page_access_token,
+                },
+            )
+            if resp.status_code == 401:
+                raise TokenExpiredError("graph video read rejected the page token")
+            if resp.status_code == 429:
+                raise RateLimited("graph video read throttled (HTTP 429)",
+                                  retry_after_from_response(resp))
+            if resp.status_code == 404:
+                # The object does not exist (yet/again) — keep polling to the
+                # deadline; a wrong id then fails as 'never confirmed'.
+                last = {}
+            else:
+                resp.raise_for_status()
+                payload = self._payload(resp)
+                status = payload.get("status") or {}
+                video_status = str(status.get("video_status") or "").lower()
+                published = bool(payload.get("published"))
+                last = {
+                    "video_status": video_status,
+                    "published": published,
+                    "remote_url": payload.get("permalink_url"),
+                }
+                if video_status in ("error", "failed"):
+                    return {**last, "confirmed": False,
+                            "error": f"remote terminal state: video_status={video_status}"}
+                # Visibility must match the schedule: 'public' ⇒ a published
+                # video; private/unlisted ⇒ an unpublished draft is the
+                # platform's supported equivalent (NOT hidden success).
+                visibility_ok = published if expected_privacy == "public" else not published
+                if video_status == "ready" and visibility_ok:
+                    return {**last, "confirmed": True, "processing_state": "ready"}
+            if time.monotonic() >= deadline:
+                detail = last or {"video_status": "unknown"}
+                return {**detail, "confirmed": False,
+                        "error": "facebook video is still processing or its visibility "
+                                 "does not match the schedule — verify on the Page "
+                                 "before retrying (an upload id is not a confirmed post)"}
+            time.sleep(max(0.1, interval_s))
+
+    @staticmethod
+    def _payload(resp: httpx.Response) -> dict:
+        try:
+            return resp.json()
+        except Exception:  # noqa: BLE001
+            return {}
 
     # ------------------------------------------------------------- analytics
 

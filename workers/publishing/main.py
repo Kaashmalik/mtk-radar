@@ -1079,9 +1079,10 @@ class Publisher:
                                        or post.get("language") or "en"),
                 )
 
-            # Remote confirmation is mandatory for adapters that expose it
-            # (YouTube). "Uploaded" is not "published": processing + privacy
-            # must be verified. A timeout is a HELD failure, not success.
+            # Remote confirmation is mandatory for EVERY adapter (G02,
+            # evidence-to-video plan). "Uploaded" is not "published":
+            # processing + visibility must be reconciled against the platform.
+            # A timeout is a HELD failure, not success.
             if hasattr(adapter, "confirm_publication"):
                 timeout_s = int(os.environ.get("MTK_YOUTUBE_CONFIRM_TIMEOUT_S", "300"))
                 confirmation = adapter.confirm_publication(
@@ -1091,11 +1092,19 @@ class Publisher:
                     interval_s=float(os.environ.get("MTK_YOUTUBE_CONFIRM_INTERVAL_S", "5")),
                 )
             else:
+                # G02: an adapter that cannot reconcile remote status must
+                # never be reported as confirmed — that lie is exactly how an
+                # accepted upload id becomes a phantom post. Hold for the
+                # operator; the remote id stays recorded above for manual
+                # reconciliation, and re-upload must never be attempted.
                 confirmation = {
-                    "confirmed": True,
+                    "confirmed": False,
                     "processing_state": "accepted",
                     "privacy": post.get("privacy", "private"),
                     "remote_url": public_media_url(video_path),
+                    "error": (f"{platform} adapter does not reconcile remote "
+                              "publication status (no confirm_publication) — "
+                              "an accepted upload id is not a confirmed post"),
                 }
 
             remote_metadata = {**package, "confirmation": confirmation}
