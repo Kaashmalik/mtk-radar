@@ -162,15 +162,101 @@ def test_smooth_velocity_guards_and_ema():
         round(0.6 * 1.0 + 0.4 * (-40 / 4), 3)
 
 
-def test_velocity_and_corroboration_bump_demand_with_caps():
-    from trend_engine import corroboration_bump, velocity_bump
+def test_engagement_rate_is_raw_count_delta_over_time():
+    """G08 acceptance: HN 100→160 points over 2 h MUST yield raw 30 points/h
+    — no smoothing, no score in the loop."""
+    from datetime import timedelta
+
+    from trend_engine import engagement_rate
+
+    t0 = datetime(2026, 10, 24, 10, 0, tzinfo=timezone.utc)
+    samples = [
+        (t0, {"points": 100.0, "comments": 5.0}),
+        (t0 + timedelta(hours=2), {"points": 160.0, "comments": 9.0}),
+    ]
+    rate = engagement_rate(samples)
+    assert rate["known"] is True
+    assert rate["metric"] == "points"
+    assert rate["per_h"] == 30.0
+    assert rate["delta"] == 60.0
+    assert rate["window_h"] == 2.0
+
+
+def test_engagement_rate_flat_unknown_and_cooling():
+    from datetime import timedelta
+
+    from trend_engine import engagement_rate
+
+    t0 = datetime(2026, 10, 24, 10, 0, tzinfo=timezone.utc)
+    # Unchanged fields cannot fake a rising trend: same counts → flat.
+    flat = engagement_rate([
+        (t0, {"points": 100.0}), (t0 + timedelta(hours=3), {"points": 100.0})])
+    assert flat["known"] and flat["per_h"] == 0.0
+    # Missing measurement stays unknown — never interpolated to zero.
+    gap = engagement_rate([
+        (t0, {"points": 100.0}), (t0 + timedelta(hours=3), {"comments": 9.0})])
+    assert gap["known"] is False
+    single = engagement_rate([(t0, {"points": 100.0})])
+    assert single["known"] is False
+    # A falling count is honest cooling, sign included.
+    cool = engagement_rate([
+        (t0, {"points": 160.0}), (t0 + timedelta(hours=2), {"points": 100.0})])
+    assert cool["known"] and cool["per_h"] == -30.0
+
+
+def test_engagement_bump_caps_and_unknown_is_zero():
+    from trend_engine import engagement_bump
+
+    assert engagement_bump(None) == 0.0
+    assert engagement_bump({"known": False}) == 0.0  # unknown ≠ popularity
+    assert engagement_bump({"known": True, "per_h": 0}) == 0.0  # flat
+    assert engagement_bump({"known": True, "per_h": -5}) == 0.0  # cooling
+    assert 0 < engagement_bump({"known": True, "per_h": 30}) <= 15.0
+    assert engagement_bump({"known": True, "per_h": 10_000}) == 15.0  # capped
+
+
+def test_velocity_no_longer_bumps_demand_but_stays_recorded():
+    """G08: internal score movement must not dress a candidate up as popular.
+    Velocity remains a recorded diagnostic; ONLY observed engagement moves
+    demand."""
+    from trend_engine import score_item
+
+    cold = dict(item(title="A page", url="https://example.com/x",
+                     source_category=None, trust_tier=None, country_scope=[],
+                     text=""))
+    base = score_item(cold, now=NOW)
+    velocity_only = score_item(cold, now=NOW, velocity=99.0)
+    assert velocity_only["score"] == base["score"], \
+        "score-velocity is a diagnostic — it must not move demand"
+    assert velocity_only["signals"]["velocity"] == 99.0, \
+        "velocity is still recorded for observability"
+
+    engagement_only = score_item(
+        cold, now=NOW, velocity=0.0,
+        engagement={"known": True, "metric": "points", "per_h": 30.0,
+                    "window_h": 2.0, "delta": 60.0})
+    assert engagement_only["score"] > base["score"]
+    assert any("engagement rising 30" in d
+               for d in engagement_only["score_reason"]["why_now"])
+    # Momentum still respects the same overall cap: max demand is 100.
+    assert engagement_only["demand_score"] <= 100.0
+    # Flat engagement bumps nothing.
+    flat = score_item(cold, now=NOW,
+                      engagement={"known": True, "metric": "points",
+                                  "per_h": 0.0})
+    assert flat["score"] == base["score"]
+    # Negative rate (cooling) never adds demand.
+    cooled = score_item(cold, now=NOW,
+                        engagement={"known": True, "metric": "points",
+                                    "per_h": -30.0})
+    assert cooled["score"] == base["score"]
+    assert any("cooling" in r for r in cooled["score_reason"]["risks"])
+
+
+def test_corroboration_bump_demand_with_caps():
+    from trend_engine import corroboration_bump, score_item
 
     # Bounded, explainable bumps.
-    assert velocity_bump(3.0) == 12.0
-    assert velocity_bump(10.0) == 15.0   # capped
-    assert velocity_bump(-2.0) == 0.0    # cooling never adds demand
-    assert velocity_bump(0) == 0.0
-
     assert corroboration_bump(1) == 0.0  # a single source is not corroboration
     assert corroboration_bump(3) == 6.0
     assert corroboration_bump(9) == 10.0  # capped
@@ -180,21 +266,25 @@ def test_velocity_and_corroboration_bump_demand_with_caps():
                      source_category=None, trust_tier=None, country_scope=[],
                      text=""))
     base = score_item(cold, now=NOW)
-    rising = score_item(cold, now=NOW, velocity=4.0, corroborating_sources=3)
-    assert rising["score"] > base["score"]
-    assert rising["demand_score"] == min(
-        100.0, base["demand_score"] + velocity_bump(4.0) + corroboration_bump(3))
-    assert any("rising on the radar" in d for d in rising["score_reason"]["why_now"])
-    assert any("independent sources" in d for d in rising["score_reason"]["why_now"])
-    assert rising["signals"]["velocity"] == 4.0
-    assert rising["signals"]["corroborating_sources"] == 3
+    corroborated = score_item(cold, now=NOW, corroborating_sources=3)
+    assert corroborated["score"] > base["score"]
+    assert corroborated["demand_score"] == min(
+        100.0, base["demand_score"] + corroboration_bump(3))
+    assert any("independent sources" in d
+               for d in corroborated["score_reason"]["why_now"])
+    assert corroborated["signals"]["corroborating_sources"] == 3
 
 
 def test_cooling_story_records_a_risk_not_a_bonus():
-    falling = score_item(item(), now=NOW, velocity=-3.0)
+    falling = score_item(item(), now=NOW, velocity=-3.0,
+                         engagement={"known": True, "metric": "points",
+                                     "per_h": -12.0})
     base = score_item(item(), now=NOW)
     assert falling["score"] == base["score"]  # no demand change
-    assert any("momentum is fading" in r for r in falling["score_reason"]["risks"])
+    assert any("cooling" in r for r in falling["score_reason"]["risks"])
+    # Score-history cooling alone is recorded too (diagnostic), silently.
+    diag = score_item(item(), now=NOW, velocity=-3.0)
+    assert diag["score"] == base["score"]
 
 
 def test_research_papers_and_trend_signal_categories_score_deliberately():

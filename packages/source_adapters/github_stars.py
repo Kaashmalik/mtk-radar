@@ -3,10 +3,11 @@
 Release feeds say *what changed*; star velocity says *how fast the world is
 adopting it* — a strong, money-free trend signal for repo-adjacent topics.
 
-Change-only ingestion: ``external_item_id`` embeds the star count, so an
-unchanged repo dedupes to nothing and a star change produces exactly one new
-candidate. A repo's item series in the inbox is therefore a usable velocity
-curve for the radar (WP-B) without the collector keeping any state.
+Entity-stable ingestion (G08): ``external_item_id`` is the repo — NOT the
+star count — so re-polls dedupe to the same story while every poll's typed
+star count lands in ``extra`` and becomes one timestamped row of the
+append-only ``source_observations`` series. The radar's momentum is computed
+from that series' deltas, never from item churn or title changes.
 
 G14 [S12]: the optional GitHub token is actually SENT (it used to be
 accepted and dropped, so every poll counted against anonymous limits), as a
@@ -110,8 +111,10 @@ def fetch_github_stars(
             description = re.sub(r"\s+", " ", str(data.get("description") or "")).strip()
             items.append(
                 RawItem(
-                    # New item ONLY when the count changes (UNIQUE at the API).
-                    external_item_id=f"gh-stars:{repo}:{stars}",
+                    # Stable entity id (G08): the star SERIES lives in
+                    # source_observations; an unchanged repo must dedupe to
+                    # the same story, not churn a new item per poll.
+                    external_item_id=f"gh-stars:{repo}",
                     url=f"https://github.com/{repo}",
                     title=f"{repo} — {stars} GitHub stars",
                     text=(

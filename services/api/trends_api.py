@@ -34,6 +34,7 @@ from pagination import (
 from settings_store import audit
 from trend_engine import (
     apply_competitor_evidence,
+    engagement_rate,
     radar_bands,
     score_item,
     smooth_velocity,
@@ -102,6 +103,7 @@ async def list_trends(
                feasibility_score, competition_gap, audience_fit, monetization,
                score, velocity, peak_score::float8 AS peak_score, corroboration,
                score_reason::text AS score_reason, signals::text AS signals,
+               engagement::text AS engagement,
                status, created_at, updated_at
         FROM trend_candidates
         WHERE ($1::text IS NULL OR status = $1)
@@ -231,19 +233,36 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
             ) or 1
         corroborating = max(1, int(corroborating or 1))
 
-        # Pass 1: the content-only score (no momentum bump), so velocity
-        # measures how the story itself moved between observations.
-        raw = score_item(data, existing_offer_count=int(existing_offers or 0),
-                         duplicate_count=max(0, int(duplicates or 0) - 1),
-                         corroborating_sources=corroborating)
-        velocity = smooth_velocity(
-            data.get("prev_score"), raw["score"], data.get("prev_updated_at"),
-            now, data.get("prev_velocity") or 0.0,
+        # G08: momentum = OBSERVED engagement growth (raw count deltas with
+        # timestamps from source_observations). Unknown/flat engagement
+        # bumps nothing — a retitle or an unchanged page can never fake a
+        # rising trend via internal score movement.
+        eng_rows = await pool.fetch(
+            """
+            SELECT observed_at, measurements
+            FROM source_observations
+            WHERE url = $1
+            ORDER BY observed_at DESC
+            LIMIT 6
+            """,
+            data["url"],
         )
-        # Pass 2: the stored score, with the measured momentum bump applied.
+        engagement = engagement_rate([
+            (r["observed_at"], json.loads(r["measurements"]))
+            for r in eng_rows
+        ])
         scored = score_item(data, existing_offer_count=int(existing_offers or 0),
                             duplicate_count=max(0, int(duplicates or 0) - 1),
-                            velocity=velocity, corroborating_sources=corroborating)
+                            corroborating_sources=corroborating,
+                            engagement=engagement)
+        # Score-velocity is still RECORDED (a diagnostic of the candidate's
+        # own re-scoring history), but it no longer moves demand.
+        velocity = smooth_velocity(
+            data.get("prev_score"), scored["score"], data.get("prev_updated_at"),
+            now, data.get("prev_velocity") or 0.0,
+        )
+        scored["signals"]["velocity"] = round(velocity, 3)
+        scored["signals"]["engagement"] = engagement
         peak = max(float(data.get("prev_peak") or 0.0), float(scored["score"]))
         row = await pool.fetchrow(
             """
@@ -252,9 +271,10 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
                  country_scope, language, demand_score, freshness_score,
                  feasibility_score, competition_gap, audience_fit, monetization,
                  score, velocity, peak_score, corroboration,
-                 score_reason, signals, status)
+                 score_reason, signals, engagement, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15, $16, $17, $18::jsonb, $19::jsonb, 'radar')
+                    $14, $15, $16, $17, $18::jsonb, $19::jsonb,
+                    $20::jsonb, 'radar')
             ON CONFLICT (url) DO UPDATE SET
                 title = EXCLUDED.title,
                 source_provider = EXCLUDED.source_provider,
@@ -272,6 +292,7 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
                 corroboration = EXCLUDED.corroboration,
                 score_reason = EXCLUDED.score_reason,
                 signals = EXCLUDED.signals,
+                engagement = EXCLUDED.engagement,
                 updated_at = now()
             RETURNING id, (xmax = 0) AS inserted
             """,
@@ -283,6 +304,7 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
             scored["monetization"], scored["score"],
             float(scored["signals"]["velocity"]), peak, corroborating,
             json.dumps(scored["score_reason"]), json.dumps(scored["signals"]),
+            json.dumps(engagement, default=str),
         )
         if row["inserted"]:
             created += 1

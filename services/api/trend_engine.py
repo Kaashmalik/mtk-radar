@@ -18,6 +18,7 @@ to an operator. Discovery proposes; verification still proves.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Final, Iterable
 
@@ -67,12 +68,17 @@ VELOCITY_MIN_GAP_H: Final[float] = 1.0
 #: Past this gap the previous velocity says nothing about "now" — the instant
 #: rate alone is used, no smoothing.
 VELOCITY_STALE_H: Final[float] = 48.0
-#: Demand bonus caps. A fast riser can add up to 15 demand points, a story
-#: observed by 4+ independent sources up to 10. Deterministic, explainable.
-VELOCITY_BUMP_PER_UNIT: Final[float] = 4.0
-VELOCITY_BUMP_CAP: Final[float] = 15.0
 CORROBORATION_BUMP_PER_SOURCE: Final[float] = 3.0
 CORROBORATION_BUMP_CAP: Final[float] = 10.0
+
+# ------------------------------------------------- observed engagement (G08)
+#: Momentum must come from OBSERVED engagement (raw count deltas with
+#: timestamps) — never from internal score movement, which mixes in freshness
+#: and keyword facets and could dress a retitle up as a rising trend.
+ENGAGEMENT_METRIC_PRIORITY: Final[tuple[str, ...]] = (
+    "points", "upvotes", "stars", "comments")
+ENGAGEMENT_BUMP_BASE: Final[float] = 6.0
+ENGAGEMENT_BUMP_CAP: Final[float] = 15.0
 
 # ------------------------------------------------- typed measurements (G07/G08)
 #: Adapter payload keys (RawItem.extra) that carry OBSERVED engagement
@@ -113,6 +119,77 @@ def measurement_from_extra(extra: Any) -> dict[str, float]:
     return out
 
 
+def engagement_rate(samples: list[tuple[Any, dict[str, Any]]]) -> dict[str, Any]:
+    """Raw engagement delta per hour between the two most recent observations
+    of the same entity (G08).
+
+    `samples` is any-order list of ``(observed_at, measurements_dict)``.
+    Only OBSERVED source counts drive momentum: a missing measurement stays
+    unknown (no interpolation), identical counts stay flat (unchanged fields
+    cannot fake a rising trend), and a falling count is honest cooling.
+
+    Returns ``{known, metric, per_h, window_h, delta}`` — ``known: False``
+    whenever momentum cannot be measured from real data.
+    """
+    unknown = {"known": False, "metric": None, "per_h": None,
+               "window_h": None, "delta": None}
+    clean: list[tuple[datetime, dict[str, float]]] = []
+    for observed_at, measurements in samples or []:
+        if isinstance(observed_at, str):
+            try:
+                observed_at = datetime.fromisoformat(
+                    str(observed_at).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if not isinstance(observed_at, datetime):
+            continue
+        if not isinstance(measurements, dict):
+            continue
+        clean.append((observed_at, measurements))
+    if len(clean) < 2:
+        return {**unknown, "reason": "fewer than two observations"}
+
+    clean.sort(key=lambda s: s[0])
+    (t_prev, m_prev), (t_last, m_last) = clean[-2], clean[-1]
+    window_h = (t_last - t_prev).total_seconds() / 3600.0
+    if window_h <= 0:
+        return {**unknown, "reason": "non-positive observation window"}
+
+    for metric in ENGAGEMENT_METRIC_PRIORITY:
+        prev_v, last_v = m_prev.get(metric), m_last.get(metric)
+        try:
+            prev_v = float(prev_v)          # type: ignore[arg-type]
+            last_v = float(last_v)          # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue  # metric missing (or textual) in either sample → unknown
+        delta = last_v - prev_v
+        return {
+            "known": True,
+            "metric": metric,
+            "per_h": round(delta / window_h, 3),
+            "window_h": round(window_h, 3),
+            "delta": round(delta, 3),
+        }
+    return {**unknown, "reason": "no shared measurable metric"}
+
+
+def engagement_bump(engagement: Any) -> float:
+    """Capped demand bonus from OBSERVED engagement growth (G08).
+
+    Log-scaled against the raw rate (points/hour) so one huge spike cannot
+    dominate, and so the strongest risers hit the same cap the momentum slot
+    always had. Unknown (missing) engagement and flat/cooling counts bump
+    nothing — the absence of data is never read as popularity.
+    """
+    if not isinstance(engagement, dict) or not engagement.get("known"):
+        return 0.0
+    rate = _num(engagement.get("per_h"))
+    if rate <= 0:
+        return 0.0
+    return round(min(ENGAGEMENT_BUMP_CAP,
+                     ENGAGEMENT_BUMP_BASE * math.log10(1.0 + rate)), 3)
+
+
 def smooth_velocity(
     prev_score: Any,
     new_score: Any,
@@ -149,11 +226,6 @@ def smooth_velocity(
     if hours > VELOCITY_STALE_H or prev_velocity <= 0:
         return round(instant, 3)
     return round(0.6 * prev_velocity + 0.4 * instant, 3)
-
-
-def velocity_bump(velocity: Any) -> float:
-    return min(VELOCITY_BUMP_CAP, max(0.0, _num(velocity)) * VELOCITY_BUMP_PER_UNIT) \
-        if _num(velocity) > 0 else 0.0
 
 
 def corroboration_bump(corroborating_sources: Any) -> float:
@@ -379,6 +451,7 @@ def score_item(
     competitors: Iterable[Any] | None = None,
     velocity: Any = 0.0,
     corroborating_sources: int = 1,
+    engagement: Any = None,
 ) -> dict[str, Any]:
     """Return a scored candidate payload ready for `trend_candidates`.
 
@@ -386,10 +459,13 @@ def score_item(
     source_category, trust_tier, country_scope, url). `competitors` optionally
     carries the operator's 3-competitor-rule research; demand is bumped only
     when at least 3 similar 10k-100k-subscriber channels out-perform their
-    subscriber count. `velocity` (score/hour from the candidate's observation
-    history) and `corroborating_sources` (independent providers on the same
-    story) add transparent, capped demand bumps — momentum the radar saw
-    itself, never an invented signal.
+    subscriber count. `engagement` (from trend_engine.engagement_rate — raw
+    count deltas over time observed at the SOURCE) and `corroborating_sources`
+    (independent providers on the same story) add transparent, capped demand
+    bumps — momentum the radar measured, never invented. `velocity`
+    (score/hour) is recorded as a DIAGNOSTIC only: since G08 it no longer
+    moves demand, because internal score movement mixes in freshness and
+    keyword facets — a retitle must not be able to fake a rising trend.
     """
     now = now or datetime.now(timezone.utc)
     title = str(item.get("title") or item.get("canonical_url") or item.get("url") or "Untitled lead")
@@ -418,12 +494,12 @@ def score_item(
     # strengthens the demand component — never more than what was measured.
     comp = competitor_evidence(competitors)
     bump = _competitor_bump(comp)
-    # Trend Radar v2: momentum and corroboration are capped, deterministic
-    # demand signals the radar measured itself.
-    v_bump = velocity_bump(velocity)
+    # Trend Radar v2/G08: momentum = OBSERVED engagement growth only; score
+    # changes are a diagnostic of the candidate's own history.
+    e_bump = engagement_bump(engagement)
     c_bump = corroboration_bump(corroborating_sources)
-    if bump or v_bump or c_bump:
-        demand = min(100.0, demand + bump + v_bump + c_bump)
+    if bump or e_bump or c_bump:
+        demand = min(100.0, demand + bump + e_bump + c_bump)
 
     score = _composite(demand, freshness, feasibility, gap, fit, money)
 
@@ -434,8 +510,15 @@ def score_item(
         drivers.append("fresh lead (under 3 days)")
     if _SOURCE_TIER.get(str(tier or ""), 0) >= 18:
         drivers.append("provider-owned source")
-    if v_bump:
-        drivers.append(f"rising on the radar (+{_num(velocity):.2g}/hour)")
+    if _num(velocity) > 0:
+        drivers.append(
+            "score history rising (+{:.2g} score/hour, diagnostic)".format(
+                _num(velocity)))
+    if e_bump:
+        eng = engagement if isinstance(engagement, dict) else {}
+        drivers.append(
+            f"observed engagement rising {_num(eng.get('per_h')):g} "
+            f"{eng.get('metric')}/hour at the source")
     if c_bump:
         drivers.append(
             f"{int(corroborating_sources)} independent sources observed this story")
@@ -454,7 +537,10 @@ def score_item(
     if freshness <= 42:
         risks.append("lead may be stale — recheck the official page")
     if velocity < 0:
-        risks.append("cooling on the radar — momentum is fading")
+        risks.append("score history falling (diagnostic)")
+    if isinstance(engagement, dict) and engagement.get("known") \
+            and _num(engagement.get("per_h")) < 0:
+        risks.append("observed engagement is cooling at the source")
     if money < 55:
         risks.append("value angle is weak")
     if gap < 40:
@@ -497,6 +583,7 @@ def score_item(
             "existing_offers": existing_offer_count,
             "duplicates": duplicate_count,
             "velocity": round(_num(velocity), 3),
+            "engagement": engagement if isinstance(engagement, dict) else None,
             "corroborating_sources": int(_num(corroborating_sources)),
             "competitor_evidence": {
                 "provided": comp["provided"],
