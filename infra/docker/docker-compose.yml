@@ -142,6 +142,20 @@ services:
       # §7.F.2: the YouTube-derived composite growth score stays disabled
       # until a compliance review approves it. Set to 1 only after that review.
       MTK_ENABLE_GROWTH_SCORE: ${MTK_ENABLE_GROWTH_SCORE:-0}
+      # G13 (costs WP-F): the API owns the ledger and budget gate — it needs
+      # the endpoint config it PROBES (Settings → Costs) and the price table
+      # behind every USD ESTIMATE. The workers receive their spending knobs
+      # separately (verification: VERIFY_LLM_*; render: TTS_*).
+      VERIFY_LLM_BASE_URL: ${VERIFY_LLM_BASE_URL:-}
+      VERIFY_LLM_API_KEY: ${VERIFY_LLM_API_KEY:-}
+      VERIFY_LLM_MODEL: ${VERIFY_LLM_MODEL:-}
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_MODEL: ${TTS_MODEL:-}
+      TTS_VOICE: ${TTS_VOICE:-}
+      COST_LLM_INPUT_PER_MTOK: ${COST_LLM_INPUT_PER_MTOK:-0.15}
+      COST_LLM_OUTPUT_PER_MTOK: ${COST_LLM_OUTPUT_PER_MTOK:-0.60}
+      COST_TTS_PER_MCHAR: ${COST_TTS_PER_MCHAR:-15.0}
     volumes:
       - storage-data:/data
     ports:
@@ -226,6 +240,16 @@ services:
       TIKTOK_CLIENT_KEY: ${TIKTOK_CLIENT_KEY:-}
       TIKTOK_CLIENT_SECRET: ${TIKTOK_CLIENT_SECRET:-}
       TIKTOK_REFRESH_TOKEN: ${TIKTOK_REFRESH_TOKEN:-}
+      # G13: Instagram Graph publishing (v0.19) + public media URL + Meta
+      # long-lived token refresh (WP-G) — documented in .env.example, consumed
+      # here (and INSTAGRAM_* also by the metrics adapters below).
+      INSTAGRAM_USER_ID: ${INSTAGRAM_USER_ID:-}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      MTK_PUBLIC_MEDIA_BASE_URL: ${MTK_PUBLIC_MEDIA_BASE_URL:-}
+      MTK_TOKEN_REFRESH_CADENCE_D: ${MTK_TOKEN_REFRESH_CADENCE_D:-45}
+      MTK_TOKEN_REFRESH_MARGIN_D: ${MTK_TOKEN_REFRESH_MARGIN_D:-14}
     command: >
       python workers/publishing/main.py --api http://api:8000
     depends_on:
@@ -249,6 +273,16 @@ services:
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
       MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
       MTK_REQUIRE_TOS_ATTESTATION: ${MTK_REQUIRE_TOS_ATTESTATION:-1}
+      # G13: LLM extraction (§5.6.3 + costs WP-F) — the API probes the SAME
+      # endpoint configuration for Settings → Costs, so both sides receive
+      # the same documented values. Unset ⇒ deterministic rules path only.
+      VERIFY_LLM_BASE_URL: ${VERIFY_LLM_BASE_URL:-}
+      VERIFY_LLM_API_KEY: ${VERIFY_LLM_API_KEY:-}
+      VERIFY_LLM_MODEL: ${VERIFY_LLM_MODEL:-}
+      VERIFY_LLM_TIMEOUT_S: ${VERIFY_LLM_TIMEOUT_S:-45}
+      VERIFY_LLM_MAX_ATTEMPTS: ${VERIFY_LLM_MAX_ATTEMPTS:-3}
+      VERIFY_LLM_MAX_CALLS_PER_RUN: ${VERIFY_LLM_MAX_CALLS_PER_RUN:-12}
+      VERIFY_LLM_MAX_OUTPUT_TOKENS: ${VERIFY_LLM_MAX_OUTPUT_TOKENS:-2000}
     command: >
       python workers/verification/main.py
     depends_on:
@@ -268,11 +302,17 @@ services:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      # G13: the trend adapters' shared payload cache (same Redis as the API).
+      # The collector also runs fine without it — in-process memory only —
+      # but a value documented in .env.example implies the container gets it.
+      REDIS_URL: redis://redis:6379/0
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     command: >
       python workers/collectors/main.py --api http://api:8000
     depends_on:
       api:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   batch:
@@ -319,6 +359,17 @@ services:
       MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
       MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
       MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+      # G13: TTS narration (optional; falls back to capture audio when unset
+      # or the daily char budget is exhausted). Language overrides follow the
+      # TTS_<KEY>_<LANGCODE> convention documented in .env.example.
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_MODEL: ${TTS_MODEL:-tts-1}
+      TTS_VOICE: ${TTS_VOICE:-onyx}
+      TTS_BASE_URL_UR: ${TTS_BASE_URL_UR:-}
+      TTS_API_KEY_UR: ${TTS_API_KEY_UR:-}
+      TTS_MODEL_UR: ${TTS_MODEL_UR:-}
+      TTS_VOICE_UR: ${TTS_VOICE_UR:-}
       # v0.29 measured QC — see docs/render-qc.md. Blank inherits the code default.
       MTK_RENDER_QC_TARGET_LUFS: ${MTK_RENDER_QC_TARGET_LUFS:-}
       MTK_RENDER_QC_LUFS_TOLERANCE: ${MTK_RENDER_QC_LUFS_TOLERANCE:-}
@@ -401,6 +452,10 @@ services:
       YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:-}
       FACEBOOK_PAGE_ID: ${FACEBOOK_PAGE_ID:-}
       FACEBOOK_PAGE_ACCESS_TOKEN: ${FACEBOOK_PAGE_ACCESS_TOKEN:-}
+      # G13: the metrics adapters read Instagram insights with the SAME
+      # credential references as publishing (§6).
+      INSTAGRAM_USER_ID: ${INSTAGRAM_USER_ID:-}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
     command: >
       sh -c "python workers/metrics/main.py --api http://api:8000 --interval ${MTK_METRICS_INTERVAL:-3600}"
     depends_on:
