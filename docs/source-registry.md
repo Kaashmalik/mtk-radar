@@ -21,7 +21,15 @@ Every source is registered here before any collector may poll it (master plan §
 
 Seeded trend-signal collector sources (Trend Radar v2, WP-A —
 [enhancement plan 2026-10-24](enhancement-plan-2026-10-24-trends-automation.md)).
-Every signal feeds the radar's scoring; none can verify an offer:
+Every signal feeds the radar's scoring; none can verify an offer.
+**Last registry check: 2026-10-24** (WP-A adapters live in
+`packages/source_adapters/`: `hf_papers`, `hn_algolia`, `reddit_new`,
+`github_stars`, `google_trends` — all fixture-tested, egress/permission-checked).
+Policy note: trend signals are **Tier-B leads, never evidence** — even an
+official-looking trend row must be re-verified on the provider's own domain
+(Tier A path) before it supports any offer claim. Topic clustering/velocity
+(WP-B) uses these signals for ranking only; scoring stays deterministic and
+cite-able.
 
 | Source | Category | Collection | Cadence | Notes |
 |---|---|---|---|---|
