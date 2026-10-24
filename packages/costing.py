@@ -28,7 +28,12 @@ from typing import Any, Optional
 
 log = logging.getLogger("costing")
 
-DEFAULT_API_URL = os.environ.get("API_URL", "http://localhost:8000")
+# G12 (evidence-to-video plan): match the workers' conventions. Workers speak
+# MTK_API_URL + MTK_WORKER_TOKEN; the legacy API_URL/API_TOKEN names stay as
+# fallbacks so nothing breaks mid-migration, but the documented names win.
+DEFAULT_API_URL = (os.environ.get("MTK_API_URL")
+                   or os.environ.get("API_URL")
+                   or "http://localhost:8000")
 
 #: Shared-cache TTLs per namespace (documented in the plan §5.5).
 TTL_S = {
@@ -77,6 +82,7 @@ class CostClient:
                  token: str | None = None, timeout: float = 5.0):
         self.api_url = (api_url or DEFAULT_API_URL).rstrip("/")
         self.token = (token
+                      or os.environ.get("MTK_WORKER_TOKEN")
                       or os.environ.get("MTK_API_TOKEN")
                       or os.environ.get("API_TOKEN")
                       or "").strip()
@@ -84,7 +90,9 @@ class CostClient:
 
     @classmethod
     def from_env(cls) -> "CostClient":
-        return cls(os.environ.get("API_URL", DEFAULT_API_URL))
+        return cls(os.environ.get("MTK_API_URL")
+                   or os.environ.get("API_URL")
+                   or DEFAULT_API_URL)
 
     # ------------------------------------------------------------- transport
 
@@ -114,9 +122,15 @@ class CostClient:
                   provider: str = "", model: str = "",
                   ref_type: str | None = None, ref_id: str | None = None,
                   meta: dict[str, Any] | None = None) -> bool:
-        """FAIL-CLOSED money check. Only an explicit API denial returns
-        False; an unreachable API cannot be checked and does not block the
-        stage (the alternative would stop verification entirely)."""
+        """Truly FAIL-CLOSED money check (G03).
+
+        Only an explicit `allowed: true` from the budget service permits paid
+        work. An unreachable API, a non-200 answer, or a payload without a
+        boolean `allowed` all deny: unknown budget = zero paid calls. NO paid
+        call may run on an unchecked budget. Callers route a False to the
+        deterministic/no-cost fallback (extraction rules path, capture audio)
+        and the block is recorded so Needs-You surfaces it.
+        """
         body: dict[str, Any] = {"kind": kind, "units": int(units or 0),
                                 "provider": provider, "model": model,
                                 "meta": meta or {}}
@@ -128,8 +142,9 @@ class CostClient:
             body["ref_id"] = ref_id
         result = self._post("/costs/check", body)
         if result is None:
-            return True
-        return bool(result.get("allowed", True))
+            log.warning("budget check for %s unavailable — failing CLOSED", kind)
+            return False
+        return result.get("allowed") is True
 
     # ----------------------------------------------------------------- cache
 
