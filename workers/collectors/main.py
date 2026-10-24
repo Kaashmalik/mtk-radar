@@ -142,7 +142,8 @@ def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -
     elif adapter == "github_stars":
         # Change-only star snapshots: velocity series without worker state.
         raw = fetch_github_stars(
-            config.get("repos"), fetcher=fetcher, token=GITHUB_TOKEN
+            config.get("repos"), fetcher=fetcher, token=GITHUB_TOKEN,
+            cache=cache,
         )
     elif adapter == "reddit_new":
         raw = fetch_reddit_new(

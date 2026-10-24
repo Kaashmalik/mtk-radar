@@ -201,6 +201,98 @@ GH_ROUTES = {
 }
 
 
+class GHFakeFetcher:
+    """Per-repo scripted httpx responses WITH real headers (G14).
+
+    Mirrors Fetcher.fetch_policy's contract: non-2xx raises
+    httpx.HTTPStatusError carrying the reconstructed response (headers
+    included, per the G14 egress change).
+    """
+
+    def __init__(self, responses: dict[str, list[httpx.Response]]):
+        self.responses = responses  # url -> queue of canned responses
+        self.calls: list[tuple[str, dict]] = []
+
+    def fetch_policy(self, url, *, headers=None, params=None, policy=None):
+        self.calls.append((url, dict(headers or {})))
+        queue = self.responses[url]
+        if not queue:
+            raise AssertionError(f"unexpected extra call to {url}")
+        resp = queue.pop(0)
+        if resp.status_code >= 400:
+            request = httpx.Request("GET", url, headers=dict(headers or {}))
+            raise httpx.HTTPStatusError(
+                f"HTTP {resp.status_code}", request=request, response=resp)
+        return resp
+
+
+def _gh_response(body, status=200, headers=None):
+    return httpx.Response(status, headers=headers or {},
+                          content=body if isinstance(body, bytes)
+                          else json.dumps(body).encode())
+
+
+class TestGithubStarsAuthG14:
+    def test_token_is_actually_sent_as_bearer(self):
+        fetcher = GHFakeFetcher({
+            "https://api.github.com/repos/ollama/ollama": [
+                _gh_response({"stargazers_count": 5, "description": "x"}),
+            ],
+        })
+        fetch_github_stars(["ollama/ollama"], fetcher=fetcher, token="ghp_test")
+        url, headers = fetcher.calls[0]
+        assert headers["Authorization"] == "Bearer ghp_test"
+
+    def test_conditional_requests_304_short_circuits_and_etags_are_cached(self):
+        monkey_cache = JsonCache(namespace="g14", clock=lambda: NOW)
+        etag_hdrs = {"etag": 'W/"abc123"', "x-ratelimit-remaining": "4000"}
+        fetcher = GHFakeFetcher({
+            "https://api.github.com/repos/ollama/ollama": [
+                _gh_response({"stargazers_count": 5}, headers=etag_hdrs),
+                _gh_response(b"", status=304, headers=etag_hdrs),
+            ],
+        })
+        items = fetch_github_stars(["ollama/ollama"], fetcher=fetcher,
+                                   cache=monkey_cache)
+        assert len(items) == 1
+        assert monkey_cache.get_text("gh-stars:etag:ollama/ollama") == 'W/"abc123"'
+        # Second sweep: conditional request with the stored etag, 304 → no
+        # item, no full-body fetch wasted.
+        items2 = fetch_github_stars(["ollama/ollama"], fetcher=fetcher,
+                                    cache=monkey_cache)
+        assert items2 == []
+        assert len(fetcher.calls) == 2
+        assert fetcher.calls[1][1].get("If-None-Match") == 'W/"abc123"'
+
+    def test_primary_rate_limit_stops_the_run_fail_closed(self):
+        fetcher = GHFakeFetcher({
+            "https://api.github.com/repos/ollama/ollama": [
+                _gh_response({"stargazers_count": 5},
+                             headers={"x-ratelimit-remaining": "0",
+                                      "x-ratelimit-reset": "1735689600"}),
+            ],
+            "https://api.github.com/repos/ggml-org/llama.cpp": [
+                _gh_response({"stargazers_count": 6}),
+            ],
+        })
+        with pytest.raises(RuntimeError, match="1735689600"):
+            fetch_github_stars(["ollama/ollama", "ggml-org/llama.cpp"],
+                               fetcher=fetcher)
+        # Stopped BEFORE hammering the refused quota: only the first call.
+        assert len(fetcher.calls) == 1
+
+    def test_http_429_refusal_surfaces_retry_after(self):
+        import httpx as _hx
+
+        fetcher = GHFakeFetcher({
+            "https://api.github.com/repos/ollama/ollama": [
+                _gh_response(b"", status=429, headers={"retry-after": "60"}),
+            ],
+        })
+        with pytest.raises(RuntimeError, match="retry after 60s"):
+            fetch_github_stars(["ollama/ollama"], fetcher=fetcher)
+
+
 class TestGithubStars:
     def test_change_only_ids(self):
         fetcher = FakeFetcher(GH_ROUTES)

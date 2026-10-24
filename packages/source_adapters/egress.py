@@ -88,6 +88,11 @@ class FetchResult:
     body: bytes
     redirects: tuple[str, ...]
     fetched_at: datetime
+    #: Final-response headers (G14): adapters need ETag / x-ratelimit-* /
+    #: Retry-After to do conditional requests and honor rate limits. Stored
+    #: as-is so multi-value headers survive; default keeps old constructors
+    #: (tests, earlier callers) valid.
+    headers: tuple[tuple[str, str], ...] = ()
 
     @property
     def raw_sha256(self) -> str:
@@ -311,6 +316,7 @@ def safe_fetch(
                     body=b"".join(chunks),
                     redirects=tuple(redirects),
                     fetched_at=fetched_at,
+                    headers=tuple(response.headers.items()),
                 )
         raise EgressError(
             f"too many redirects (limit {policy.max_redirects})"
