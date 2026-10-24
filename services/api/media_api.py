@@ -231,22 +231,83 @@ class MediaGcIn(BaseModel):
     retention_days: int = Field(default=MEDIA_RETENTION_DAYS, ge=1, le=3650)
 
 
-async def _gc_candidates(pool, cutoff_days: int) -> list[dict[str, Any]]:
-    """Artifacts past retention that are NOT pinned.
+#: G27 (evidence-to-video plan): schedule/package creation and media GC
+#: serialize on THIS advisory lock. A sweep holds it (transaction-scoped) from
+#: its second pin re-check through the deletions; a new schedule takes it
+#: around the package INSERT. So a package can never gain a reference to a
+#: render/cover artifact between the pin check and the file delete — the
+#: classic mark-and-sweep race is closed instead of merely narrowed.
+MEDIA_GC_LOCK_KEY = -7_324_118_204_335_577_601  # fixed signed bigint
 
-    Pinned (exempt) = referenced by a schedule whose state is NOT cancelled
-    or failed — every state that can still publish or is live pins its exact
-    package. Renders keep their own columns; a capture's video does too.
+
+async def _pinned_refs(conn) -> set[str]:
+    """EVERY artifact ref string a live schedule can still need (G27).
+
+    'Not just rows': distinct schedule rows may reference the SAME file
+    (cover exported from a shared render, or several schedules on one
+    render), so pinning is by ref VALUE as well as by row id. Anything a
+    schedule that is not `cancelled` points at is pinned — including failed
+    and paused (held) schedules: their evidence must survive for human
+    review and the retry decision, and uncertain/owed uploads must not lose
+    their artifacts.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ref FROM (
+            SELECT r.video_path AS ref
+            FROM renders r
+            JOIN schedules s ON s.render_id = r.id
+            WHERE s.state::text <> 'cancelled'
+            UNION
+            SELECT r.captions_path
+            FROM renders r
+            JOIN schedules s ON s.render_id = r.id
+            WHERE s.state::text <> 'cancelled' AND r.captions_path IS NOT NULL
+            UNION
+            SELECT r.cover_path
+            FROM renders r
+            JOIN schedules s ON s.render_id = r.id
+            WHERE s.state::text <> 'cancelled' AND r.cover_path IS NOT NULL
+            UNION
+            SELECT s.cover_path
+            FROM schedules s
+            WHERE s.state::text <> 'cancelled' AND s.cover_path IS NOT NULL
+            UNION
+            SELECT c.video_path
+            FROM capture_sessions c
+            JOIN renders r ON r.capture_id = c.id
+            JOIN schedules s ON s.render_id = r.id
+            WHERE s.state::text <> 'cancelled' AND c.video_path IS NOT NULL
+        ) refs
+        """
+    )
+    return {r["ref"] for r in rows}
+
+
+async def _gc_candidates(pool, cutoff_days: int) -> list[dict[str, Any]]:
+    """Artifacts past retention that are NOT pinned (G27 mark-and-sweep).
+
+    A pin (exempt) is ANY live reference: a schedule in any state except
+    `cancelled` — draft, needs_approval, approved, scheduled, published,
+    failed, paused — pins its exact render row (and therefore ALL of that
+    render's artifacts) plus its own cover file; captures behind pinned
+    renders are pinned. References are matched by artifact ref string too,
+    so a file shared between a pinned and an unpinned row survives.
+
     Legacy plain paths are returned as-is; managed refs (local://, s3://)
-    carry their scheme.
+    carry their scheme. Accepts a pool OR a connection (the apply path runs
+    the same query inside its lock-holding transaction for the second pin
+    check).
     """
     rows = await pool.fetch(
         """
         WITH pinned_renders AS (
+            -- ONLY a cancelled schedule releases its render; failed/paused/
+            -- published/draft schedules all pin (G27).
             SELECT DISTINCT s.render_id AS id
             FROM schedules s
             WHERE s.render_id IS NOT NULL
-              AND s.state::text NOT IN ('cancelled', 'failed')
+              AND s.state::text <> 'cancelled'
         ),
         pinned_captures AS (
             SELECT DISTINCT r.capture_id AS id
@@ -266,6 +327,18 @@ async def _gc_candidates(pool, cutoff_days: int) -> list[dict[str, Any]]:
           AND r.id NOT IN (SELECT id FROM pinned_renders)
           AND r.captions_path IS NOT NULL
         UNION ALL
+        SELECT 'render_cover', r.id::text, r.cover_path, r.created_at
+        FROM renders r
+        WHERE r.created_at < now() - make_interval(days => $1)
+          AND r.id NOT IN (SELECT id FROM pinned_renders)
+          AND r.cover_path IS NOT NULL
+        UNION ALL
+        SELECT 'schedule_cover', s.id::text, s.cover_path, s.created_at
+        FROM schedules s
+        WHERE s.created_at < now() - make_interval(days => $1)
+          AND s.state::text = 'cancelled'
+          AND s.cover_path IS NOT NULL
+        UNION ALL
         SELECT 'capture_video', c.id::text, c.video_path, c.created_at
         FROM capture_sessions c
         WHERE c.created_at < now() - make_interval(days => $1)
@@ -275,7 +348,11 @@ async def _gc_candidates(pool, cutoff_days: int) -> list[dict[str, Any]]:
         """,
         cutoff_days,
     )
-    return [dict(r) for r in rows]
+    candidates = [dict(r) for r in rows]
+    # Shared-file guard: even an unpinned ROW's artifact survives when the
+    # SAME ref string is referenced by a pinned schedule/render (G27).
+    pinned_refs = await _pinned_refs(pool)
+    return [c for c in candidates if str(c["ref"]) not in pinned_refs]
 
 
 def _delete_ref(ref: str) -> bool:
@@ -332,8 +409,10 @@ async def media_gc(body: MediaGcIn, request: Request) -> dict:
         raise HTTPException(status_code=403, detail=(
             "media GC is reviewer-only: a robot must not delete artifacts"))
     pool = db.get()
-    candidates = await _gc_candidates(pool, body.retention_days)
     if body.dry_run:
+        # Dry run = the MARK phase: list only. Nothing is touched, so no lock
+        # is taken and concurrent scheduling is never delayed by a listing.
+        candidates = await _gc_candidates(pool, body.retention_days)
         return {
             "mode": "dry_run", "retention_days": body.retention_days,
             "candidates": len(candidates),
@@ -343,25 +422,39 @@ async def media_gc(body: MediaGcIn, request: Request) -> dict:
                 for c in candidates
             ],
         }
+    # APPLY (sweep) — G27 hardening, in ONE advisory-locked transaction:
+    #   1. the lock serializes against schedule/package creation (any new pin
+    #      waits for the sweep, and vice versa);
+    #   2. the candidate set is RECOMPUTED inside the lock (second pin check)
+    #      — anything pinned since the dry run, or by a concurrent commit
+    #      before the lock was granted, silently drops out;
+    #   3. retention age is the grace period: nothing newer than
+    #      `retention_days` is ever touched, so an artifact under an active
+    #      review/decision cannot be swept.
     deleted, failed = 0, []
     removed_refs: list[str] = []
-    for c in candidates:
-        ref = str(c["ref"])
-        try:
-            if _delete_ref(ref):
-                deleted += 1
-                removed_refs.append(ref)
-        except Exception as exc:  # noqa: BLE001 — one bad object never stops a GC run
-            failed.append({"ref": ref, "error": str(exc)[:300]})
-    await pool.execute(
-        "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
-        "VALUES ($1, $2, $3, NULL, $4::jsonb)",
-        "system:media_gc", "media:gc", "media",
-        json.dumps({
-            "mode": "apply", "retention_days": body.retention_days,
-            "deleted": deleted, "failed": failed, "removed_refs": removed_refs,
-        }, default=str),
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", MEDIA_GC_LOCK_KEY)
+            candidates = await _gc_candidates(conn, body.retention_days)
+            for c in candidates:
+                ref = str(c["ref"])
+                try:
+                    if _delete_ref(ref):
+                        deleted += 1
+                        removed_refs.append(ref)
+                except Exception as exc:  # noqa: BLE001 — one bad object never stops a GC run
+                    failed.append({"ref": ref, "error": str(exc)[:300]})
+            await conn.execute(
+                "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
+                "VALUES ($1, $2, $3, NULL, $4::jsonb)",
+                "system:media_gc", "media:gc", "media",
+                json.dumps({
+                    "mode": "apply", "retention_days": body.retention_days,
+                    "deleted": deleted, "failed": failed,
+                    "removed_refs": removed_refs,
+                }, default=str),
+            )
     return {
         "mode": "apply", "retention_days": body.retention_days,
         "deleted": deleted, "failed": failed,
