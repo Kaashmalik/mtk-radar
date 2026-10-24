@@ -10,7 +10,7 @@ URL = "https://example.com/terms"
 def test_every_section_is_passed_to_the_extractor(monkeypatch):
     seen = []
 
-    def fake(text, url):
+    def fake(text, url, **kwargs):
         seen.append(text)
         return {}, [], None
 

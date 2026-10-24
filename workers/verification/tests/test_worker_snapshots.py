@@ -78,7 +78,7 @@ def exercise(monkeypatch, *, complete=True, evidence_status=201, final_url=URL, 
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
     if extract_fn is None:
-        monkeypatch.setattr(worker_main, "extract_document", lambda section_text, url: (
+        monkeypatch.setattr(worker_main, "extract_document", lambda section_text, url, **kwargs: (
             {
                 "promo_code": {"value": "SAVE2026", "evidence_url": url,
                                "excerpt": section_text[-60:]},
@@ -287,7 +287,7 @@ def test_verification_fetch_uses_the_egress_policy(monkeypatch):
         return [RawItem(external_item_id="s", url=URL, text=TEXT)]
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", fetch)
-    monkeypatch.setattr(worker_main, "extract_document", lambda text, url: ({}, [], None, 1))
+    monkeypatch.setattr(worker_main, "extract_document", lambda text, url, **kwargs: ({}, [], None, 1))
     allow_robots(monkeypatch)
     posts = []
 
@@ -338,7 +338,7 @@ def test_conflict_is_retained_when_best_page_lacks_that_field(monkeypatch):
 
     monkeypatch.setattr(worker_main, "fetch_page_snapshot", lambda url, **kwargs: [
         RawItem(external_item_id=url, url=url, text="Official terms")])
-    monkeypatch.setattr(worker_main, "extract_document", lambda text, url: (
+    monkeypatch.setattr(worker_main, "extract_document", lambda text, url, **kwargs: (
         proposals[pages.index(url)], [], None, 1))
     allow_robots(monkeypatch)
     worker = object.__new__(worker_main.Verifier)

@@ -75,6 +75,11 @@ _DEFAULT_GUARDRAILS: Final[dict[str, Any]] = {
     "auto_retry": True,
     "retry_max_attempts": 3,
     "retry_base_seconds": 300,
+    # WP-F (§5.5): hard money caps, checked by the workers BEFORE spending.
+    # Exhausted → the stage degrades (rules-only extraction / capture audio)
+    # and shows in Needs-You — never a surprise bill.
+    "max_llm_cost_per_day_usd": 0.5,
+    "max_tts_chars_per_day": 50_000,
 }
 
 _STAGE_PRESETS: Final[dict[str, dict[str, str]]] = {
@@ -91,7 +96,8 @@ _STAGE_PRESETS: Final[dict[str, dict[str, str]]] = {
 }
 
 _PRESET_GUARDRAILS: Final[dict[str, dict[str, Any]]] = {
-    "manual": {"auto_retry": False, "auto_publish_max_per_day": 0},
+    "manual": {"auto_retry": False, "auto_publish_max_per_day": 0,
+               "max_llm_cost_per_day_usd": 0, "max_tts_chars_per_day": 0},
     "assisted": {},
     "autopilot": {"auto_publish_max_per_day": 2, "auto_schedule_privacy": "private"},
 }
@@ -204,6 +210,10 @@ def _normalize_guardrails(raw: Any, base: dict[str, Any]) -> dict[str, Any]:
             out[key] = _as_int(value, key, minimum=0, maximum=10)
         elif key == "retry_base_seconds":
             out[key] = _as_int(value, key, minimum=30, maximum=86_400)
+        elif key == "max_llm_cost_per_day_usd":
+            out[key] = _as_float(value, key, minimum=0.0, maximum=1_000.0)
+        elif key == "max_tts_chars_per_day":
+            out[key] = _as_int(value, key, minimum=0, maximum=5_000_000)
     return out
 
 

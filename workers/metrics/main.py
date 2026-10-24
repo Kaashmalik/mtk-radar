@@ -190,6 +190,7 @@ class MetricsWorker:
             log.error("published-post lookup returned an unexpected payload — metrics skipped")
             return 0
         measured = 0
+        quota_units = 0  # WP-F: YouTube API cost, visible on the Costs card
         for post in posts:
             if not post.get("remote_post_id"):
                 continue
@@ -205,6 +206,12 @@ class MetricsWorker:
                 log.warning("schedule %s: no adapter for pinned %s account %s — skipped",
                             post["id"], platform, account_id or "(legacy default)")
                 continue
+            if platform == "youtube":
+                # Documented YouTube API quota cost: videos.list and the
+                # analytics reports each bill 1 unit per call — counted even
+                # when the pull fails afterwards, the quota is spent either
+                # way (wrong-channel skips above never reach here).
+                quota_units += 1
             try:
                 snapshot = self._measure(platform, adapter, post["remote_post_id"])
             except PermissionError as exc:
@@ -234,6 +241,15 @@ class MetricsWorker:
             else:
                 log.warning("schedule %s: metrics write refused (%s)",
                             post["id"], resp.status_code)
+        if quota_units:
+            try:  # WP-F: usage ledger — fire-and-forget, never breaks a sweep
+                self.api.post("/costs/usage", json={"events": [{
+                    "kind": "youtube_quota", "units": quota_units,
+                    "unit_type": "quota_units", "provider": "youtube",
+                    "meta": {"endpoints": ["videos.list", "reports.query"]},
+                }]})
+            except httpx.HTTPError:
+                pass
         log.info("metrics sweep: %d/%d measured", measured, len(posts))
         return measured
 

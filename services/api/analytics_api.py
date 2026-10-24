@@ -252,6 +252,11 @@ async def analytics() -> dict:
 
     generated_at = await pool.fetchval("SELECT now()")
 
+    # Cost per published video (WP-F §5.5): spend over output — the one
+    # money number a productivity decision actually needs.
+    from costs_store import spend_summary as _cost_summary
+    costs = await _cost_summary(pool)
+
     body = {
         "items_total": funnel[0]["n"] if funnel else 0,
         "offers_by_state": offers_by_state,
@@ -268,6 +273,9 @@ async def analytics() -> dict:
         "language_performance": language_performance,
         "experiments": experiments,
         "trend_summary": dict(trend_summary or {}),
+        "cost_usd_30d": costs["usd_30d"],
+        "cost_per_published_video_usd_30d":
+            costs["cost_per_published_video_usd_30d"],
         "generated_at": generated_at,
         "cached": False,
     }

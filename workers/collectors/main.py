@@ -291,7 +291,16 @@ class Collector:
                 self.next_due[sid] = time.time() + cadence
 
     async def _poll(self, source: dict) -> None:
-        payloads = await asyncio.to_thread(collect, source, self.fetcher, self.trend_cache)
+        payloads = await asyncio.to_thread(collect, source, self.fetcher,
+                                           self.trend_cache)
+        # Usage ledger (WP-F): how many network fetches this poll actually
+        # made vs served from the trend cache. Fail-open; zero USD either way.
+        stats = self.trend_cache.take_stats()
+        if stats["misses"] or stats["hits"]:
+            self._emit_usage("trend_fetch", units=stats["misses"],
+                             provider=source.get("provider") or "",
+                             meta={"adapter": source.get("adapter") or "",
+                                   "cache_hits": stats["hits"]})
         created = 0
         for payload in payloads:
             resp = self.client.post(
@@ -315,6 +324,18 @@ class Collector:
             )
         except httpx.HTTPError:
             log.warning("failed to report poll result for source %s", sid)
+
+    def _emit_usage(self, kind: str, *, units: int, provider: str = "",
+                    meta: Optional[dict] = None) -> None:
+        """Fire-and-forget usage emission (WP-F); never breaks a poll."""
+        try:
+            self.client.post(
+                f"{self.api_url}/costs/usage",
+                json={"events": [{"kind": kind, "units": units,
+                                  "provider": provider, "meta": meta or {}}]},
+            )
+        except httpx.HTTPError:
+            pass
 
 
 # ---------------------------------------------------------- graceful stop

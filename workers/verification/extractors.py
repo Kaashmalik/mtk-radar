@@ -18,6 +18,17 @@ from typing import Any, Optional
 
 from document_sections import MAX_SECTION_CHARS, split_sections
 
+# Shared cost client (packages/costing.py). The worker entrypoint puts the
+# repo's packages/ dir on sys.path; the fallback keeps standalone test
+# contexts working.
+try:
+    import costing
+except ImportError:  # pragma: no cover — direct import in test contexts
+    import sys as _sys
+    _sys.path.insert(0, os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "packages")))
+    import costing
+
 # ---------------------------------------------------------------------------
 # Rule-based extractor (deterministic baseline)
 
@@ -219,9 +230,19 @@ def extract_fields_llm(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    cost: Optional[Any] = None,
+    ref_offer_id: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Extract fields with an OpenAI-compatible LLM. Returns None on any
-    failure — verification must never depend on the LLM being available."""
+    failure — verification must never depend on the LLM being available.
+
+    Cost engine (WP-F): with a `cost` client attached, the result is served
+    from the shared `extract:{content-hash}:{model}` cache first (a
+    re-verification of an unchanged page emits 0 tokens), the DAILY LLM
+    BUDGET is checked BEFORE the call (denied → None — the deterministic
+    rules path in extract() stays), and actual token usage is reported to
+    the ledger afterwards.
+    """
     import httpx
 
     base = (base_url or os.environ.get("VERIFY_LLM_BASE_URL", "")).rstrip("/")
@@ -229,6 +250,20 @@ def extract_fields_llm(
     model_id = model or os.environ.get("VERIFY_LLM_MODEL", "gpt-4o-mini")
     if not base or not key:
         return None
+
+    if cost is not None:
+        cache_key = costing.extraction_cache_key(model_id, text)
+        cached = cost.cache_lookup("extract", cache_key)
+        if cached is not None:
+            cost.report("llm_extract", units=0, provider="openai-compatible",
+                        model=model_id, unit_type="tokens",
+                        ref_type="offer", ref_id=ref_offer_id,
+                        meta={"cache_hit": True})
+            return cached
+        if not cost.budget_ok("llm_extract", provider="openai-compatible",
+                              model=model_id, ref_type="offer",
+                              ref_id=ref_offer_id):
+            return None
 
     system = (
         "You extract structured offer data for a verification desk. "
@@ -254,10 +289,21 @@ def extract_fields_llm(
             timeout=45,
         )
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        payload = resp.json()
+        content = payload["choices"][0]["message"]["content"]
         data = json.loads(content)
         if not isinstance(data.get("fields"), dict):
             return None
+        if cost is not None:
+            usage = payload.get("usage") or {}
+            tokens_in = int(usage.get("prompt_tokens") or 0)
+            tokens_out = int(usage.get("completion_tokens") or 0)
+            cost.cache_store("extract", cache_key, data)
+            cost.report("llm_extract", units=tokens_in + tokens_out,
+                        provider="openai-compatible", model=model_id,
+                        unit_type="tokens", ref_type="offer",
+                        ref_id=ref_offer_id,
+                        meta={"tokens_in": tokens_in, "tokens_out": tokens_out})
         return data
     except Exception:  # noqa: BLE001 — LLM failure must never block verification
         return None
@@ -266,6 +312,9 @@ def extract_fields_llm(
 def extract(
     text: str,
     evidence_url: str,
+    *,
+    cost: Optional[Any] = None,
+    ref_offer_id: Optional[str] = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], Optional[str]]:
     """Combined extraction. Returns (fields, conflicts, model_used).
 
@@ -279,7 +328,8 @@ def extract(
     fields = rules
 
     if llm_configured():
-        llm = extract_fields_llm(text, evidence_url)
+        llm = extract_fields_llm(text, evidence_url, cost=cost,
+                                 ref_offer_id=ref_offer_id)
         if llm is not None:
             model_used = os.environ.get("VERIFY_LLM_MODEL", "gpt-4o-mini")
             llm_fields = llm.get("fields", {})
@@ -302,6 +352,8 @@ def extract_document(
     evidence_url: str,
     *,
     max_chars: int = MAX_SECTION_CHARS,
+    cost: Optional[Any] = None,
+    ref_offer_id: Optional[str] = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], Optional[str], int]:
     """Sectioned extraction over the whole document (WP01 slice 8).
 
@@ -319,7 +371,8 @@ def extract_document(
     model_used: Optional[str] = None
 
     for section in sections:
-        section_fields, section_conflicts, model = extract(section.text, evidence_url)
+        section_fields, section_conflicts, model = extract(
+            section.text, evidence_url, cost=cost, ref_offer_id=ref_offer_id)
         model_used = model or model_used
         for name, field in section_fields.items():
             if name not in fields:

@@ -139,7 +139,18 @@ async def _trend_keywords_for_offer(pool, offer_id: uuid.UUID) -> list[str]:
     """Trend-bridged hashtag keywords (WP-E): from the production-queue row's
     trend, only when the trend is still RISING (velocity > 0) — a cooled story
     must not keep shipping its hype tags. Every keyword cites the trend row;
-    nothing is invented here."""
+    nothing is invented here.
+
+    Cached under `hashtags:{offer}` for 6 h (WP-F shared cache: memory →
+    Redis → Postgres) — scheduling 5 platforms in one click queries once."""
+    cache_key = f"hashtags:{offer_id}"
+    try:
+        from costs_store import cache_get, cache_put
+        cached = await cache_get(pool, cache_key)
+        if isinstance(cached, list):
+            return [str(k) for k in cached][:6]
+    except Exception:  # noqa: BLE001 — cache is an optimization
+        pass
     try:
         rows = await pool.fetch(
             """
@@ -160,7 +171,12 @@ async def _trend_keywords_for_offer(pool, offer_id: uuid.UUID) -> list[str]:
         )
     except Exception:  # noqa: BLE001 — packaging must never fail on cosmetics
         return []
-    return [str(r["keyword"]) for r in rows if r["keyword"]][:6]
+    keywords = [str(r["keyword"]) for r in rows if r["keyword"]][:6]
+    try:
+        await cache_put(pool, cache_key, keywords, 6 * 3600)
+    except Exception:  # noqa: BLE001 — cache is an optimization
+        pass
+    return keywords
 
 
 async def _hashtag_performance(pool, platform: str) -> dict[str, dict[str, Any]]:

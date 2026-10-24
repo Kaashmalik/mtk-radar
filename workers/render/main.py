@@ -135,6 +135,13 @@ class RenderJob:
                  language: str = "en", motion_template: str = "studio"):
         self.offer_id = offer_id
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"), headers=_api_auth_headers())
+        # Cost engine (WP-F): TTS cache + char budget + usage ledger.
+        import sys as _sys
+        _pkg = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "packages"))
+        if _pkg not in _sys.path:
+            _sys.path.insert(0, _pkg)
+        import costing as _costing
+        self.cost = _costing.CostClient(api_url)
         self.project = project_mod.project_dir(out_root, offer_id)
         self.script_version: int | None = None
         self.capture_id: str | None = None
@@ -327,6 +334,7 @@ class RenderJob:
                 sources["script"]["markdown"])
             narration = narration_mod.synthesize_all(
                 narration_texts, narration_dir, language=language,
+                cost=self.cost,
             )
             if narration["used"]:
                 # v0.14: mix per-segment files into ONE track and USE it in the

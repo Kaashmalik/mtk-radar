@@ -390,6 +390,41 @@ async def build_attention(pool=None) -> dict[str, Any]:
     else:
         add("budget", 0, [])
 
+    # ---- daily cost budgets (WP-F §5.5) ----------------------------------
+    # The workers checked these BEFORE spending; anything they blocked shows
+    # here with the exact degradation so a silent rules-only/fallback day is
+    # impossible.
+    try:
+        from costs_store import budget_state
+        money = await budget_state(pool)
+    except Exception:  # noqa: BLE001 — a costs failure never breaks attention
+        money = None
+    cost_items: list[dict[str, Any]] = []
+    if money:
+        if money["llm"]["exhausted"]:
+            cost_items.append(_item(
+                kind="costs", entity_id="llm", severity="warning",
+                title="Daily LLM budget exhausted",
+                detail=(f"${money['llm']['used_usd_today']:.2f} of "
+                        f"${money['llm']['limit_usd_per_day']:.2f} today — "
+                        "extraction is on the deterministic rules path "
+                        f"({money['llm']['blocked_today']} blocked calls)."),
+                href="/settings", action="Adjust cost budget",
+                at=datetime.now(timezone.utc),
+            ))
+        if money["tts"]["exhausted"]:
+            cost_items.append(_item(
+                kind="costs", entity_id="tts", severity="warning",
+                title="Daily TTS character budget exhausted",
+                detail=(f"{money['tts']['chars_today']} of "
+                        f"{money['tts']['limit_chars_per_day']} chars today — "
+                        "renders fall back to capture audio "
+                        f"({money['tts']['blocked_today']} blocked calls)."),
+                href="/settings", action="Adjust cost budget",
+                at=datetime.now(timezone.utc),
+            ))
+    add("costs", len(cost_items), cost_items)
+
     # ---- worker liveness -------------------------------------------------
     workers = await worker_snapshot(pool)
     worker_items = worker_attention_items(workers)

@@ -27,6 +27,7 @@ from pagination import (
 )
 from attention_api import router as attention_router
 from automation_api import router as automation_router
+from costs_api import router as costs_router
 from captures_api import router as captures_router
 import health_api
 from health_api import router as health_router
@@ -98,6 +99,7 @@ app.include_router(renders_router)
 app.include_router(schedules_router)
 app.include_router(settings_router)
 app.include_router(automation_router)
+app.include_router(costs_router)
 app.include_router(health_router)
 app.include_router(locks_router)
 app.include_router(jobs_router)
