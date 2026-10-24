@@ -5,11 +5,15 @@ import ScheduleActions from "./ScheduleActions";
 import { apiFetch } from "@/lib/api";
 
 /**
- * Content calendar (week 9, master plan §17): per-platform schedules displayed
- * in Asia/Karachi by default, with operator pause/cancel controls and the
- * reapproval rule surfaced on hash mismatch.
- * Week 10 (§6): publishing account health — credential references only, token
- * expiry surfaced so the operator can recover dead sessions.
+ * Content calendar (week 9, master plan §17; WP-H polish 2026-10-24).
+ *
+ * WP-H: the week grid groups schedules per platform/day in publish windows,
+ * SAME-PLATFORM-SAME-WINDOW conflicts are flagged BEFORE a human approves
+ * (server-side `_annotate_conflicts` — same platform within an hour on the
+ * same local day), and measured best-time suggestions (post_metrics rollup)
+ * are offered without ever silently re-timing a reviewed package.
+ * Display timezone stays Asia/Karachi by default; account health (credential
+ * references only, token expiry) stays on the page.
  */
 
 const DISPLAY_TZ = "Asia/Karachi";
@@ -28,6 +32,9 @@ type ScheduleRow = {
   version_hash: string | null;
   remote_post_id: string | null;
   outcome_detail: string | null;
+  /** WP-H: same-platform publish-window conflict, annotated by the API. */
+  conflict?: boolean;
+  conflict_with?: string[];
 };
 
 export const dynamic = "force-dynamic";
@@ -36,10 +43,63 @@ async function getSchedules(): Promise<ScheduleRow[] | null> {
   try {
     const res = await apiFetch(`/schedules?limit=200`, { cache: "no-store" });
     if (!res.ok) return null;
+    const rows = (await res.json()) as ScheduleRow[];
+    // Defense-in-depth: older APIs may not annotate conflicts — compute the
+    // same flag client-side so the calendar never silently loses the warning.
+    return annotateConflicts(rows);
+  } catch {
+    return null;
+  }
+}
+
+type BestTimes = {
+  suggestions: Record<string, { local_hour: number; sample_posts: number; avg_engagement: number }[]>;
+};
+
+async function getBestTimes(): Promise<BestTimes | null> {
+  try {
+    const res = await apiFetch(`/schedules/best-times`, { cache: "no-store" });
+    if (!res.ok) return null;
     return await res.json();
   } catch {
     return null;
   }
+}
+
+/** Client-side mirror of the API rule (schedules_api._annotate_conflicts):
+ *  same platform, same local day, within 60 minutes → conflict. */
+function annotateConflicts(rows: ScheduleRow[]): ScheduleRow[] {
+  const WINDOW_MIN = 60;
+  const active = rows.filter((r) =>
+    ["needs_approval", "approved", "scheduled"].includes(r.state),
+  );
+  const slot = (r: ScheduleRow) => {
+    const d = new Date(r.local_time);
+    const day = d.toLocaleDateString("en-CA", { timeZone: r.timezone || DISPLAY_TZ });
+    const parts = d.toLocaleTimeString("en-GB", {
+      timeZone: r.timezone || DISPLAY_TZ, hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    const [h, m] = parts.split(":").map(Number);
+    return { day, minute: h * 60 + m };
+  };
+  const buckets = new Map<string, { row: ScheduleRow; minute: number }[]>();
+  for (const row of rows) row.conflict = false;
+  for (const row of active) {
+    const { day, minute } = slot(row);
+    const key = `${row.platform}|${day}`;
+    buckets.set(key, [...(buckets.get(key) ?? []), { row, minute }]);
+  }
+  for (const entries of buckets.values()) {
+    for (const a of entries) {
+      for (const b of entries) {
+        if (a.row.id !== b.row.id && Math.abs(a.minute - b.minute) <= WINDOW_MIN) {
+          a.row.conflict = true;
+          a.row.conflict_with = [...(a.row.conflict_with ?? []), b.row.id];
+        }
+      }
+    }
+  }
+  return rows;
 }
 
 type AccountRow = {
@@ -73,8 +133,10 @@ const STATE_COLORS: Record<string, string> = {
   paused: "#f0883e",
 };
 
+/** Day grouping key + grid label: the ISO local date (en-CA is ISO-like), so
+ *  days sort chronologically instead of DD/MM/YYYY string order. */
 function dayKey(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-GB", { timeZone: DISPLAY_TZ });
+  return new Date(iso).toLocaleDateString("en-CA", { timeZone: DISPLAY_TZ });
 }
 
 function timeLabel(iso: string): string {
@@ -85,15 +147,46 @@ function timeLabel(iso: string): string {
   });
 }
 
-export default async function CalendarPage() {
-  const [rows, accounts] = await Promise.all([getSchedules(), getAccounts()]);
+/** Week grouping (Mon–Sun) in the display timezone (WP-H week grid). */
+function weekKey(iso: string): { key: string; monday: Date } {
+  // The local date as YYYY-MM-DD (en-CA is the ISO-like locale) so the
+  // weekday is derived from the DISPLAY-TZ date, never the host's zone.
+  const [y, m, day] = new Date(iso)
+    .toLocaleDateString("en-CA", { timeZone: DISPLAY_TZ })
+    .split("-")
+    .map(Number);
+  // Rebuild as UTC noon: a fixed clock time keeps the calendar date stable
+  // regardless of the host's timezone when formatting back later.
+  const localNoon = Date.UTC(y, m - 1, day, 12);
+  const weekday = new Date(localNoon).getUTCDay(); // 0 = Sun … 6 = Sat
+  const shift = weekday === 0 ? 6 : weekday - 1; // days since Monday
+  const monday = new Date(localNoon - shift * 86_400_000);
+  return { key: monday.toISOString().slice(0, 10), monday };
+}
 
-  const byDay = new Map<string, ScheduleRow[]>();
+function hourLabel(h: number): string {
+  return `${String(h).padStart(2, "0")}:00`;
+}
+
+export default async function CalendarPage() {
+  const [rows, accounts, best] = await Promise.all([
+    getSchedules(),
+    getAccounts(),
+    getBestTimes(),
+  ]);
+
+  // ---- week grid: group rows by week, then by day within the week
+  const weeks = new Map<string, { monday: Date; days: Map<string, ScheduleRow[]> }>();
   for (const row of rows ?? []) {
-    const key = dayKey(row.local_time);
-    byDay.set(key, [...(byDay.get(key) ?? []), row]);
+    const { key: wk, monday } = weekKey(row.local_time);
+    const week = weeks.get(wk) ?? { monday, days: new Map() };
+    const day = dayKey(row.local_time);
+    week.days.set(day, [...(week.days.get(day) ?? []), row]);
+    weeks.set(wk, week);
   }
-  const days = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const sortedWeeks = [...weeks.entries()].sort(([a], [b]) => a.localeCompare(b));
+
+  const bestEntries = Object.entries(best?.suggestions ?? {});
 
   return (
     <main className="page">
@@ -101,9 +194,36 @@ export default async function CalendarPage() {
       <a href="/analytics" className="back" style={{ marginLeft: "0.9rem" }}>Analytics →</a>
       <h1>Content calendar</h1>
       <p className="tagline">
-        Per-platform schedules · {DISPLAY_TZ} display timezone · pause/resume with
-        hash revalidation (edited content stays paused until reapproved).
+        Week grid · per-platform/day publish windows · conflicts (same platform
+        within an hour) flagged BEFORE approve · {DISPLAY_TZ} display timezone.
       </p>
+
+      {bestEntries.length > 0 && (
+        <section className="card" id="best-times">
+          <h2>Measured best times</h2>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            From your own published posts&apos; metrics (views + 2×(likes +
+            comments)), grouped by the actual local publish hour. Suggestions
+            only — moving a reviewed package still goes through approval and
+            the release gate; hours with &lt; 2 measured posts are never shown.
+          </p>
+          <div style={{ display: "flex", gap: "1.2rem", flexWrap: "wrap" }}>
+            {bestEntries.map(([platform, hours]) => (
+              <div key={platform} className="small">
+                <strong>{platform}</strong>
+                <ul style={{ margin: "0.2rem 0 0", paddingLeft: "1.1rem" }}>
+                  {hours.map((h) => (
+                    <li key={h.local_hour}>
+                      {hourLabel(h.local_hour)} · {h.sample_posts} posts · engagement{" "}
+                      {h.avg_engagement.toLocaleString()}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="card">
         <h2>Publishing accounts</h2>
@@ -176,11 +296,83 @@ export default async function CalendarPage() {
           </p>
         </section>
       ) : (
-        days.map(([day, items]) => (
-          <section className="card" key={day}>
-            <h2>{day}</h2>
-            <div style={{ display: "grid", gap: "0.7rem" }}>
-              {items.map((s) => {
+        sortedWeeks.map(([weekStart, week]) => (
+          <section className="card" key={weekStart}>
+            <h2>
+              Week of {week.monday.toLocaleDateString("en-GB", {
+                timeZone: DISPLAY_TZ, day: "2-digit", month: "short",
+              })}
+            </h2>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))",
+                gap: "0.8rem",
+              }}
+            >
+              {[...week.days.entries()].sort(([a], [b]) => a.localeCompare(b)).map(
+                ([day, items]) => (
+                  <div
+                    key={day}
+                    style={{
+                      border: "1px solid var(--border, #333)",
+                      borderRadius: 8,
+                      padding: "0.5rem",
+                      minWidth: 0,
+                    }}
+                  >
+                    <strong className="small">{day}</strong>
+                    <div style={{ display: "grid", gap: "0.5rem", marginTop: "0.4rem" }}>
+                      {items
+                        .slice()
+                        .sort((a, b) => a.local_time.localeCompare(b.local_time))
+                        .map((s) => (
+                          <div
+                            key={s.id}
+                            style={{
+                              border: s.conflict ? "2px solid #f85149" : "1px solid transparent",
+                              borderRadius: 6,
+                              padding: "0.35rem 0.4rem",
+                            }}
+                          >
+                            <div>
+                              <span className="time">{timeLabel(s.local_time)}</span>{" "}
+                              <strong>{s.platform}</strong>
+                            </div>
+                            <a className="small" href={`/offers/${s.offer_id}`}>
+                              {s.offer_title}
+                            </a>
+                            {s.conflict && (
+                              <div className="small" style={{ color: "#f85149" }}>
+                                ⚠ {s.platform} posts again within an hour — move one BEFORE
+                                approving (double-posting reads as spam to the audience and
+                                the platform).
+                              </div>
+                            )}
+                            <div
+                              className="small"
+                              style={{ marginTop: "0.2rem" }}
+                            >
+                              <span
+                                className="badge"
+                                style={{
+                                  color: STATE_COLORS[s.state] ?? "#8b949e",
+                                  borderColor: STATE_COLORS[s.state] ?? "#8b949e",
+                                }}
+                              >
+                                {s.state}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                ),
+              )}
+            </div>
+            {/* Full controls stay under each week for actionable states */}
+            <div style={{ display: "grid", gap: "0.7rem", marginTop: "0.9rem" }}>
+              {[...week.days.values()].flat().sort((a, b) => a.local_time.localeCompare(b.local_time)).map((s) => {
                 let outcome: string | null = null;
                 let held = false;
                 let openAttempt = false;
@@ -188,12 +380,7 @@ export default async function CalendarPage() {
                   try {
                     const parsed = JSON.parse(s.outcome_detail);
                     outcome = parsed?.detail ?? null;
-                    // v0.23: a held post waits for a human (unknown upload
-                    // outcome) — it must be obvious on the calendar.
                     held = Boolean(parsed?.hold);
-                    // v0.31: an attempt marker without a result means the worker
-                    // may have uploaded before dying. It is equally unsafe to
-                    // retry until a human reconciles it.
                     openAttempt = Boolean(parsed?.attempt);
                   } catch {}
                 }
@@ -210,6 +397,13 @@ export default async function CalendarPage() {
                           {s.remote_post_id && <> · post {s.remote_post_id}</>}
                           {outcome && <> · {outcome}</>}
                         </div>
+                        {s.conflict && (
+                          <div className="small" style={{ color: "#f85149" }}>
+                            ⚠ {s.platform} posts again within an hour — move one BEFORE
+                            approving (double-posting reads as spam to the audience and
+                            the platform).
+                          </div>
+                        )}
                         {(held || openAttempt) && (
                           <div className="small" style={{ color: "#f0883e" }}>
                             ⚠ {held ? "HELD" : "UNKNOWN UPLOAD"} — needs operator review:
