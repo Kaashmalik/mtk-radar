@@ -31,6 +31,9 @@ type Candidate = RadarCandidate & {
     age_hours?: number | null;
   } | null;
   signals: { keyword_hits?: string[]; source_tier?: string | null } | null;
+  velocity: number;
+  peak_score: number;
+  corroboration: number;
   updated_at: string;
 };
 
@@ -53,6 +56,54 @@ function scoreTone(score: number): string {
   if (score >= 78) return "tag-hot";
   if (score >= 55) return "tag-accent";
   return "";
+}
+
+/**
+ * Momentum chips (Trend Radar v2): the radar measured these itself — score
+ * delta per hour between re-scores, how many independent sources observed the
+ * story, and the all-time peak. Nothing here is invented: a lead with no
+ * re-score history simply shows no chip.
+ */
+function momentumChips(candidate: Candidate): { label: string; tone: string; title: string }[] {
+  const chips: { label: string; tone: string; title: string }[] = [];
+  const velocity = Number(candidate.velocity ?? 0);
+  if (velocity > 0) {
+    chips.push({
+      label: `▲ ${formatVelocity(velocity)}/h`,
+      tone: "tag-accent",
+      title: "Score gained per hour between the last two radar observations",
+    });
+  } else if (velocity < 0) {
+    chips.push({
+      label: `▼ ${formatVelocity(Math.abs(velocity))}/h`,
+      tone: "tag",
+      title: "Score fading between the last two radar observations",
+    });
+  }
+  const corroborating = Number(candidate.corroboration ?? 0);
+  if (corroborating >= 2) {
+    chips.push({
+      label: `${corroborating} sources`,
+      tone: "tag-accent",
+      title: "Independent sources that observed this story",
+    });
+  }
+  const score = Number(candidate.score ?? 0);
+  const peak = Number(candidate.peak_score ?? 0);
+  if (peak > score + 0.05) {
+    chips.push({
+      label: `peak ${peak.toFixed(0)}`,
+      tone: "tag",
+      title: "Highest score this lead ever reached on the radar",
+    });
+  }
+  return chips;
+}
+
+function formatVelocity(velocity: number): string {
+  if (velocity >= 10) return velocity.toFixed(0);
+  if (velocity >= 1) return velocity.toFixed(1);
+  return velocity.toFixed(2);
 }
 
 function scoreRow(label: string, value: number) {
@@ -130,6 +181,13 @@ export default async function RadarPage() {
               <p className="small muted" style={{ marginTop: 0 }}>
                 {top.source_provider ?? "unknown source"} · {top.language} · {top.status}
               </p>
+              <div className="chip-row" style={{ marginTop: "0.3rem" }}>
+                {momentumChips(top).map((chip) => (
+                  <span key={chip.label} className={`tag ${chip.tone}`} title={chip.title}>
+                    {chip.label}
+                  </span>
+                ))}
+              </div>
               <ul className="reason-list">
                 {(top.score_reason?.why_now ?? []).map((reason) => <li key={reason}>{reason}</li>)}
               </ul>
@@ -180,6 +238,13 @@ export default async function RadarPage() {
                       {(candidate.country_scope ?? []).join(", ") || "region unknown"} ·{" "}
                       {candidate.score_reason?.keywords?.slice(0, 4).join(" · ") || "no keyword signal"}
                     </p>
+                    <div className="chip-row" style={{ marginTop: 4 }}>
+                      {momentumChips(candidate).map((chip) => (
+                        <span key={chip.label} className={`tag ${chip.tone}`} title={chip.title}>
+                          {chip.label}
+                        </span>
+                      ))}
+                    </div>
                     <ul className="reason-list">
                       {(candidate.score_reason?.why_now ?? []).slice(0, 2).map((reason) => (
                         <li key={reason}>{reason}</li>

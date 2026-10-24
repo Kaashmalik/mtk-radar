@@ -32,13 +32,15 @@ class FakeResponse:
 
 class FakeAPI:
     def __init__(self, offers=None, scripts=None, script_status=201,
-                 captures=None, candidates=None, schedules=None, policy=None):
+                 captures=None, candidates=None, schedules=None, policy=None,
+                 renders=None):
         self.offers = offers or []
         self.scripts = scripts or {}
         self.script_status = script_status
         self.captures = captures or []
         self.candidates = candidates or []
         self.schedules = schedules or []
+        self.renders = renders or []
         self.policy = policy
         self.posts = []
 
@@ -56,6 +58,8 @@ class FakeAPI:
             return FakeResponse(self.captures)
         if path == "/render-candidates":
             return FakeResponse(self.candidates)
+        if path == "/renders":
+            return FakeResponse(self.renders)
         if path == "/schedules":
             return FakeResponse(self.schedules)
         if path.startswith("/offers/") and path.endswith("/scripts"):
@@ -156,7 +160,47 @@ def test_manual_policy_does_not_script_or_approve():
     b = _batch(api)
     report = b.run_once()
     assert report["scripts_created"] == 0
+    assert report["trends_scanned"] is False  # collection stage stays human
     assert api.posts == []
+
+
+def test_autopilot_claims_the_trend_scan_job_and_reports_the_result():
+    class TrendAPI(FakeAPI):
+        def post(self, path, json=None, params=None):
+            # record the request BODY (not params) for the assertion below
+            self.posts.append((path, json))
+            if path == "/jobs/claim":
+                return FakeResponse({"claimed": True, "id": "job-1"})
+            if path == "/trends/scan":
+                return FakeResponse({"created": 1, "updated": 2, "rescored": 2})
+            return FakeResponse({"rearmed": True})
+
+    api = TrendAPI(offers=[_offer()], policy=_policy("autopilot"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["trends_scanned"] is True
+    trend_posts = [p for p, _ in api.posts if p.startswith("/trends")]
+    assert trend_posts == ["/trends/scan", "/trends/scan-result"]
+    reported = [j for p, j in api.posts if p == "/trends/scan-result"]
+    assert reported and reported[0]["ok"] is True
+
+
+def test_trend_scan_failure_still_reports_so_the_job_retries():
+    class FailingScanAPI(FakeAPI):
+        def post(self, path, json=None, params=None):
+            self.posts.append((path, json))  # record the body, not params
+            if path == "/jobs/claim":
+                return FakeResponse({"claimed": True, "id": "job-1"})
+            if path == "/trends/scan":
+                raise httpx.ConnectError("scan refused")
+            return FakeResponse({"rearmed": True})
+
+    api = FailingScanAPI(offers=[_offer()], policy=_policy("autopilot"))
+    b = _batch(api)
+    report = b.run_once()
+    assert report["trends_scanned"] is False
+    reported = [j for p, j in api.posts if p == "/trends/scan-result"]
+    assert reported and reported[0]["ok"] is False and reported[0]["detail"]
 
 
 def test_assisted_policy_scripts_but_leaves_approval_to_a_human():
@@ -166,7 +210,10 @@ def test_assisted_policy_scripts_but_leaves_approval_to_a_human():
     assert report["scripts_created"] == 1
     assert report["offers_auto_approved"] == 0
     assert report["posts_auto_scheduled"] == 0
-    assert [p for p, _ in api.posts] == ["/offers/off-1/script"]
+    # The trend-scan claim may precede it (assisted collects automatically);
+    # scripting is the only state-CHANGING post, approval stays human.
+    changing = [p for p, _ in api.posts if p not in ("/jobs/claim", "/trends/scan-result")]
+    assert changing == ["/offers/off-1/script"]
 
 
 def test_api_unreachable_does_not_crash_the_batch():

@@ -1,4 +1,4 @@
-"""Batch worker — the nightly pipeline step (v0.19, master plan §10
+"""Batch worker — the periodic pipeline step (v0.19, master plan §10
 "nightly batch: collect → verify → script", §18 week 10).
 
 The pipeline's human gates are deliberate and stay human:
@@ -8,9 +8,11 @@ The pipeline's human gates are deliberate and stay human:
   - publish approval (§17) — a human approves the exact script version
 Everything AROUND those gates is automatable, and this worker automates it:
 
-  1. Script generation — deterministic (no LLM), so a verified offer with
+  1. Trend radar scan — the durable `trend_scan` job claims this worker;
+     a cadence fallback keeps the radar alive when the queue is unavailable.
+  2. Script generation — deterministic (no LLM), so a verified offer with
      official evidence and no script gets one generated automatically.
-  2. Readiness report — counts what is waiting on whom (verification desk,
+  3. Readiness report — counts what is waiting on whom (verification desk,
      redaction reviews, render candidates, approvals, metrics backlog).
 
 Usage:
@@ -35,6 +37,11 @@ from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
 
+#: The Trend Radar v2 re-scan cadence. The durable `trend_scan` job (armed by
+#: migration 032) is the primary trigger; this cadence is the fail-open
+#: fallback when the job queue is unreachable or predates it.
+TREND_SCAN_INTERVAL_S = max(300, int(os.environ.get("MTK_TREND_SCAN_INTERVAL_S", "1800")))
+
 log = logging.getLogger("batch")
 
 _API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
@@ -51,6 +58,7 @@ class Batch:
     def __init__(self, api_url: str = API_URL_DEFAULT):
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"),
                                 headers=_api_auth_headers())
+        self._scan_due = 0.0  # monotonic deadline for the fallback cadence scan
 
     # ------------------------------------------------------------ policy
 
@@ -78,6 +86,75 @@ class Batch:
     @staticmethod
     def _limits(policy: Optional[dict]) -> dict:
         return (policy or {}).get("guardrails") or {}
+
+    # ----------------------------------------------------- trend radar v2
+
+    def scan_trends_once(self) -> bool:
+        """One radar scan + report. The API re-checks everything; this worker
+        only decides WHEN, never WHETHER an item is worth a video."""
+        ok = False
+        detail = None
+        try:
+            resp = self.api.post("/trends/scan", params={"limit": 200})
+            ok = resp.status_code < 300
+            if ok:
+                body = resp.json() or {}
+                log.info("trend scan: +%d new, %d updated, %d re-scored",
+                         body.get("created", 0), body.get("updated", 0),
+                         body.get("rescored", 0))
+            else:
+                detail = f"scan refused: HTTP {resp.status_code}"[:1900]
+        except (httpx.HTTPError, ValueError) as exc:
+            detail = f"scan failed: {exc}"[:1900]
+        # Report the outcome either way: a healthy scan re-arms the recurring
+        # `trend_scan` job at its interval; a failed one retries in 300s
+        # (research the dead-letter in /attention after 5 straight failures).
+        try:
+            self.api.post("/trends/scan-result",
+                          json={"ok": ok, "detail": detail})
+        except httpx.HTTPError:
+            log.warning("could not report trend scan result")
+        return ok
+
+    def _claim_trend_scan(self) -> str:
+        """"claimed" / "empty" / "unavailable" — mirrors the collector."""
+        try:
+            resp = self.api.post(
+                "/jobs/claim",
+                json={"worker": "batch", "lease_s": 900, "kinds": ["trend_scan"]},
+            )
+        except httpx.HTTPError:
+            return "unavailable"
+        if resp.status_code == 404:
+            return "unavailable"  # older API without the job queue
+        if resp.status_code >= 300:
+            return "unavailable"
+        try:
+            body = resp.json()
+        except ValueError:
+            return "unavailable"
+        return "claimed" if body.get("claimed") else "empty"
+
+    def maybe_scan_trends(self, policy: Optional[dict]) -> bool:
+        """Job-driven first (durable owed work), then the cadence fallback for
+        an API that predates the queue.
+
+        Trend scanning is Tier-B signal intake: it honors the `collect` stage
+        (auto by default when no policy exists) and stops for paused/dry-run
+        like every other unattended step — a manual operator scans explicitly
+        from the dashboard instead."""
+        if not self._stage_auto(policy, "collect", default=True):
+            return False
+        state = self._claim_trend_scan()
+        if state == "claimed":
+            return self.scan_trends_once()
+        if state == "empty":
+            return False  # the queue says the next scan is not due yet
+        now_m = time.monotonic()
+        if now_m < self._scan_due:
+            return False
+        self._scan_due = now_m + TREND_SCAN_INTERVAL_S
+        return self.scan_trends_once()
 
     # ------------------------------------------------------------- steps
 
@@ -334,6 +411,7 @@ class Batch:
                     "offers_auto_approved": 0, "posts_auto_scheduled": 0}
 
         started_auto = self._stage_auto(policy, "script", default=True)
+        trends_scanned = self.maybe_scan_trends(policy)
         created = self.generate_scripts() if started_auto else 0
         approved = 0
         scheduled = 0
@@ -343,6 +421,7 @@ class Batch:
             scheduled = self.schedule_approved(policy or {})
 
         report = self.readiness()
+        report["trends_scanned"] = trends_scanned
         report["scripts_created"] = created
         report["offers_auto_approved"] = approved
         report["posts_auto_scheduled"] = scheduled

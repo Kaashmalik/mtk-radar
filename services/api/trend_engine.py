@@ -60,6 +60,70 @@ _GENERIC_TITLE_WORDS: Final[frozenset[str]] = frozenset(
 #: you are competing with established channels, not joining a wave.
 COMPETITOR_SUB_BAND: Final[tuple[float, float]] = (10_000.0, 100_000.0)
 
+# ------------------------------------------------------ velocity (WP-B)
+# A candidate re-scored at least this many hours after its previous
+# observation produces a fresh velocity sample; anything sooner is noise.
+VELOCITY_MIN_GAP_H: Final[float] = 1.0
+#: Past this gap the previous velocity says nothing about "now" — the instant
+#: rate alone is used, no smoothing.
+VELOCITY_STALE_H: Final[float] = 48.0
+#: Demand bonus caps. A fast riser can add up to 15 demand points, a story
+#: observed by 4+ independent sources up to 10. Deterministic, explainable.
+VELOCITY_BUMP_PER_UNIT: Final[float] = 4.0
+VELOCITY_BUMP_CAP: Final[float] = 15.0
+CORROBORATION_BUMP_PER_SOURCE: Final[float] = 3.0
+CORROBORATION_BUMP_CAP: Final[float] = 10.0
+
+
+def smooth_velocity(
+    prev_score: Any,
+    new_score: Any,
+    prev_observed_at: Any,
+    now: datetime,
+    prev_velocity: Any = 0.0,
+) -> float:
+    """Score delta per hour, EMA-smoothed over the previous sample.
+
+    Pure function over stored values so any number on the radar can be
+    recomputed. Before the first reliable gap (VELOCITY_MIN_GAP_H) the stored
+    velocity is kept unchanged; past VELOCITY_STALE_H the instant rate is used
+    alone.
+    """
+    prev_velocity = _num(prev_velocity)
+    prev = _num(prev_score)
+    new = _num(new_score)
+    if prev_observed_at is None:
+        return prev_velocity
+    if isinstance(prev_observed_at, str):
+        try:
+            prev_observed_at = datetime.fromisoformat(
+                str(prev_observed_at).replace("Z", "+00:00"))
+        except ValueError:
+            return prev_velocity
+    if not isinstance(prev_observed_at, datetime):
+        return prev_velocity
+    if prev_observed_at.tzinfo is None:
+        prev_observed_at = prev_observed_at.replace(tzinfo=timezone.utc)
+    hours = (now - prev_observed_at.astimezone(timezone.utc)).total_seconds() / 3600
+    if hours < VELOCITY_MIN_GAP_H:
+        return prev_velocity  # too soon for a meaningful sample
+    instant = (new - prev) / hours
+    if hours > VELOCITY_STALE_H or prev_velocity <= 0:
+        return round(instant, 3)
+    return round(0.6 * prev_velocity + 0.4 * instant, 3)
+
+
+def velocity_bump(velocity: Any) -> float:
+    return min(VELOCITY_BUMP_CAP, max(0.0, _num(velocity)) * VELOCITY_BUMP_PER_UNIT) \
+        if _num(velocity) > 0 else 0.0
+
+
+def corroboration_bump(corroborating_sources: Any) -> float:
+    sources = int(_num(corroborating_sources))
+    if sources < 2:
+        return 0.0
+    return min(CORROBORATION_BUMP_CAP, (sources - 1) * CORROBORATION_BUMP_PER_SOURCE)
+
 
 def _num(value: Any) -> float:
     if isinstance(value, bool) or value is None:
@@ -275,6 +339,8 @@ def score_item(
     existing_offer_count: int = 0,
     duplicate_count: int = 0,
     competitors: Iterable[Any] | None = None,
+    velocity: Any = 0.0,
+    corroborating_sources: int = 1,
 ) -> dict[str, Any]:
     """Return a scored candidate payload ready for `trend_candidates`.
 
@@ -282,7 +348,10 @@ def score_item(
     source_category, trust_tier, country_scope, url). `competitors` optionally
     carries the operator's 3-competitor-rule research; demand is bumped only
     when at least 3 similar 10k-100k-subscriber channels out-perform their
-    subscriber count.
+    subscriber count. `velocity` (score/hour from the candidate's observation
+    history) and `corroborating_sources` (independent providers on the same
+    story) add transparent, capped demand bumps — momentum the radar saw
+    itself, never an invented signal.
     """
     now = now or datetime.now(timezone.utc)
     title = str(item.get("title") or item.get("canonical_url") or item.get("url") or "Untitled lead")
@@ -311,8 +380,12 @@ def score_item(
     # strengthens the demand component — never more than what was measured.
     comp = competitor_evidence(competitors)
     bump = _competitor_bump(comp)
-    if bump:
-        demand = min(100.0, demand + bump)
+    # Trend Radar v2: momentum and corroboration are capped, deterministic
+    # demand signals the radar measured itself.
+    v_bump = velocity_bump(velocity)
+    c_bump = corroboration_bump(corroborating_sources)
+    if bump or v_bump or c_bump:
+        demand = min(100.0, demand + bump + v_bump + c_bump)
 
     score = _composite(demand, freshness, feasibility, gap, fit, money)
 
@@ -323,6 +396,11 @@ def score_item(
         drivers.append("fresh lead (under 3 days)")
     if _SOURCE_TIER.get(str(tier or ""), 0) >= 18:
         drivers.append("provider-owned source")
+    if v_bump:
+        drivers.append(f"rising on the radar (+{_num(velocity):.2g}/hour)")
+    if c_bump:
+        drivers.append(
+            f"{int(corroborating_sources)} independent sources observed this story")
     if fit >= 70:
         drivers.append("strong audience/region fit")
     if gap >= 65:
@@ -337,6 +415,8 @@ def score_item(
     risks = []
     if freshness <= 42:
         risks.append("lead may be stale — recheck the official page")
+    if velocity < 0:
+        risks.append("cooling on the radar — momentum is fading")
     if money < 55:
         risks.append("value angle is weak")
     if gap < 40:
@@ -378,6 +458,8 @@ def score_item(
             "source_tier": tier,
             "existing_offers": existing_offer_count,
             "duplicates": duplicate_count,
+            "velocity": round(_num(velocity), 3),
+            "corroborating_sources": int(_num(corroborating_sources)),
             "competitor_evidence": {
                 "provided": comp["provided"],
                 "in_band": comp["in_band"],
