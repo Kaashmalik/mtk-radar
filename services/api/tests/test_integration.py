@@ -5682,3 +5682,73 @@ def test_queue_evidence_component_claims_independence_and_safety_gate(client):
     # Ordering follows the evidence: the supported row outranks the stale one.
     order = [q["title"] for q in listed]
     assert order.index(f"row-supported {marker}") < order.index(f"row-stale {marker}")
+
+
+# ------------- EP-03 G17: detail and list share one ranked SQL code path
+
+def test_queue_detail_matches_list_rank_and_never_500s(client):
+    """G17: GET /queue/{id} used to re-derive the rank in its own GROUP BY
+    that omitted `t.freshness_score` and `q.preset_fit` (and later the `ev`
+    lateral) — a guaranteed 500 against real Postgres that unit mocks could
+    not catch. The detail must now equal the list's rank for the same row,
+    including offer-only rows (no trend → freshness/fit neutrals) and rows
+    whose offer fell out of the eligible states (detail still answers, but
+    `ready_now` is false)."""
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+
+    # Row WITH a trend (freshness_score IS NULL on _mk_trend rows — the
+    # neutral-50 COALESCE branch must flow through the shared SQL too).
+    with_trend = _run(
+        "INSERT INTO production_queue (trend_id, title) VALUES ($1, $2) "
+        "RETURNING id",
+        _mk_trend(marker + "-tr"), f"row-with-trend {marker}",
+    )[0]["id"]
+
+    # Offer-only row, no trend at all.
+    offer = _run(
+        "INSERT INTO offers (title, provider, category, offer_type, state) "
+        "VALUES ($1, 'Acme', 'domains_hosting', 'free_trial', 'candidate') "
+        "RETURNING id",
+        f"Detail offer {marker}",
+    )[0]["id"]
+    offer_only = _run(
+        "INSERT INTO production_queue (offer_id, title) VALUES ($1, $2) "
+        "RETURNING id",
+        offer, f"row-offer-only {marker}",
+    )[0]["id"]
+
+    listed = client.get("/production-queue").json()["queue"]
+    by_id = {q["id"]: q for q in listed}
+    assert str(with_trend) in by_id and str(offer_only) in by_id
+
+    for row_id in (with_trend, offer_only):
+        detail = client.get(f"/queue/{row_id}")
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert body["rank"] == by_id[str(row_id)]["rank"], \
+            "detail and list must share ONE rank computation"
+        assert body["ready_now"] is True
+        assert body["evidence_score"] == by_id[str(row_id)]["evidence_score"]
+
+    # Same row after its offer leaves the eligible states: detail still
+    # answers (shows why it left) while the list excludes it.
+    _run("UPDATE offers SET state = 'expired' WHERE id = $1", offer)
+    after = client.get(f"/queue/{offer_only}")
+    assert after.status_code == 200
+    assert after.json()["ready_now"] is False, \
+        "expired offers must not read as ready, whatever their rank"
+    ready = client.get("/production-queue").json()["queue"]
+    assert all(q["id"] != str(offer_only) for q in ready)
+
+    # A trend-side freshness variation keeps detail == list (the exact column
+    # the old detail GROUP BY dropped).
+    _run("UPDATE trend_candidates SET freshness_score = 21 "
+         "WHERE url = 'https://example.com/trend-' || $1", marker + "-tr")
+    relisted = client.get("/production-queue").json()["queue"]
+    redetail = client.get(f"/queue/{with_trend}").json()
+    assert redetail["trend_freshness"] == 21.0
+    assert redetail["rank"] == next(
+        q["rank"] for q in relisted if q["id"] == str(with_trend)), \
+        "freshness change must move detail and list rank identically"

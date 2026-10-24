@@ -105,24 +105,16 @@ _ORDER_SQL = """
          ELSE {_RANK_SQL} END
 """.format(_RANK_SQL=_RANK_SQL)
 
-
-@router.get("/production-queue")
-async def list_production_queue(
-    response: Response,
-    limit: int = Query(default=50, ge=1, le=200),
-    cursor: Optional[str] = Query(default=None),
-) -> dict:
-    """The ranked "videos to make" list (keyset-paginated, archived excluded).
-
-    Order: operator pins first (ascending `rank_pinned`), then computed rank.
-    """
-    pool = db.get()
-    parts = decode_cursor(cursor, 2)
-    before_order = float(parts[0]) if parts else None
-    before_id = decode_uuid(parts[1]) if parts else None
-
-    rows = await pool.fetch(
-        f"""
+#: G17: the ranked projection + joins are ONE code path shared by the list
+#: endpoint and the detail endpoint. The detail query used to re-derive the
+#: rank with its own GROUP BY that omitted `t.freshness_score` and
+#: `q.preset_fit` (and, after G15, the `ev` lateral the rank references) — a
+#: guaranteed 500 at runtime that unit mocks could never catch. Both endpoints
+#: now render the same subquery; only the outer filter differs. ``
+#: `_RANKED_SELECT_READY` keeps the G15 list semantics (status 'ready' + hard
+#: eligibility gate); `_RANKED_SELECT_ANY` exists so the DETAIL endpoint can
+#: still answer for archived/demoted rows — showing WHY a row left the queue.
+_RANKED_SELECT_TEMPLATE = """
         WITH ranked AS (
             SELECT q.id, q.offer_id, q.trend_id, q.title, q.provider, q.category,
                    q.kind, q.preset_fit, q.trend_snapshot::text AS trend_snapshot,
@@ -180,10 +172,49 @@ async def list_production_queue(
                   AND COALESCE(e.robots_allowed, TRUE)
                   AND (e.fetch_status IS NULL OR e.fetch_status = 200)
             ) ev ON TRUE
-            WHERE q.status = 'ready'
-              -- G15: safety is a hard eligibility gate, not a rank input.
-              AND (o.id IS NULL OR o.state::text IN {ELIGIBLE_OFFER_STATES!r})
+            WHERE {_VISIBILITY_SQL}
         )
+"""
+
+_RANKED_SELECT_READY = _RANKED_SELECT_TEMPLATE.format(
+    _RANK_SQL=_RANK_SQL,
+    _ORDER_SQL=_ORDER_SQL,
+    _REQUIRED_CLAIMS_SQL=_REQUIRED_CLAIMS_SQL,
+    EVIDENCE_FRESH_DAYS=EVIDENCE_FRESH_DAYS,
+    ELIGIBLE_OFFER_STATES=ELIGIBLE_OFFER_STATES,
+    _VISIBILITY_SQL=(
+        "q.status = 'ready'\n"
+        "              -- G15: safety is a hard eligibility gate, not a rank input.\n"
+        "              AND (o.id IS NULL OR o.state::text IN "
+        + repr(ELIGIBLE_OFFER_STATES) + ")"),
+)
+_RANKED_SELECT_ANY = _RANKED_SELECT_TEMPLATE.format(
+    _RANK_SQL=_RANK_SQL,
+    _ORDER_SQL=_ORDER_SQL,
+    _REQUIRED_CLAIMS_SQL=_REQUIRED_CLAIMS_SQL,
+    EVIDENCE_FRESH_DAYS=EVIDENCE_FRESH_DAYS,
+    ELIGIBLE_OFFER_STATES=ELIGIBLE_OFFER_STATES,
+    _VISIBILITY_SQL="TRUE",
+)
+
+
+@router.get("/production-queue")
+async def list_production_queue(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = Query(default=None),
+) -> dict:
+    """The ranked "videos to make" list (keyset-paginated, archived excluded).
+
+    Order: operator pins first (ascending `rank_pinned`), then computed rank.
+    """
+    pool = db.get()
+    parts = decode_cursor(cursor, 2)
+    before_order = float(parts[0]) if parts else None
+    before_id = decode_uuid(parts[1]) if parts else None
+
+    rows = await pool.fetch(
+        _RANKED_SELECT_READY + """
         SELECT * FROM ranked
         WHERE ($2::float8 IS NULL OR (order_val, id) < ($2::float8, $3::uuid))
         ORDER BY order_val DESC, id DESC
@@ -284,25 +315,57 @@ async def reorder_queue(body: QueueReorderIn, request: Request) -> dict:
 
 @router.get("/queue/{row_id}")
 async def get_queue_row(row_id: uuid.UUID) -> dict:
+    """Detail for one row (any status) with the SAME rank math as the list.
+
+    G17: recomputes the rank through the shared ranked subquery instead of a
+    hand-rolled GROUP BY that omitted joined columns and 500'd in production
+    SQL — the list and the detail can never disagree about a rank again.
+    """
     pool = db.get()
     row = await pool.fetchrow(
-        f"""
-        SELECT q.*, o.state::text AS offer_state,
-               t.score::float8 AS trend_score,
-               t.velocity, t.corroboration,
-               {_RANK_SQL} AS rank
-        FROM production_queue q
-        LEFT JOIN offers o ON o.id = q.offer_id
-        LEFT JOIN trend_candidates t ON t.id = q.trend_id
-        LEFT JOIN evidence e ON e.offer_id = q.offer_id
-        WHERE q.id = $1
-        GROUP BY q.id, o.state, t.score, t.velocity, t.corroboration
+        _RANKED_SELECT_ANY + """
+        SELECT * FROM ranked WHERE id = $1
         """,
         row_id,
     )
     if not row:
         raise HTTPException(status_code=404, detail="queue row not found")
-    return dict(row)
+    rank = float(row["rank"]) if row["rank"] is not None else None
+    order_val = float(row["order_val"]) if row["order_val"] is not None else None
+    return {
+        "id": str(row["id"]),
+        "offer_id": str(row["offer_id"]) if row["offer_id"] else None,
+        "trend_id": str(row["trend_id"]) if row["trend_id"] else None,
+        "title": row["title"],
+        "provider": row["provider"],
+        "category": row["category"],
+        "kind": row["kind"],
+        "preset_fit": row["preset_fit"],
+        "trend_snapshot": row["trend_snapshot"],
+        "expires_at": row["expires_at"].isoformat() if row["expires_at"] else
+                      (row["offer_expires_at"].isoformat()
+                       if row["offer_expires_at"] else None),
+        "offer_state": row["offer_state"],
+        "trend_score": row["trend_score"],
+        "trend_freshness": row["trend_freshness"],
+        "velocity": row["velocity"],
+        "corroboration": row["corroboration"],
+        "evidence_count": row["evidence_count"] or 0,
+        "evidence_score": float(row["evidence_score"] or 0),
+        "has_current_evidence": row["has_current_evidence"],
+        "rank_pinned": row["rank_pinned"],
+        "status": row["status"],
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "rank": rank,
+        # readiness = the list's own gate: a row may exist in ANY status, but
+        # `ready_now` answers "does it qualify for the ready list right now"
+        # under the same G15 eligibility rule (expired/corrected/demoted
+        # offers never count as ready, whatever their rank).
+        "ready_now": row["status"] == "ready" and (
+            row["offer_id"] is None or row["offer_state"] in ELIGIBLE_OFFER_STATES),
+        "_order_val": order_val,
+    }
 
 
 @router.post("/production-queue/expire")
