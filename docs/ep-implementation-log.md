@@ -114,3 +114,62 @@ now applies (config asserted statically + `compose config`, not started here);
 story_key clustering quality on real-world headline corpora (conservative by
 design — distinct stories must not merge, but recall on real syndication
 title variants beyond the tested patterns is operator-observed territory).
+
+## EP-03 — Research briefs & content-type gates (G17–G18, 2026-10-24)
+
+A promoted topic is now RESEARCH material, not an offer-shaped placeholder.
+Migration `040` adds versioned `research_briefs` (viewer question / angle /
+audience / sources / counterevidence / limitations, one row per VERSION — a
+new version supersedes, never rewrites), the `research_claims` ledger
+(class-tagged: `author_reported` / `independently_reproduced` /
+`tested_by_mtk` / `editorial_analysis` — a preprint is not peer review; a
+claimed sentence resolves to its supporting excerpt, source and scope; status
+`supported` / `contradicted` / `unknown` with permitted wording and recheck
+policy), and `production_queue.content_type`. The offer container itself is
+unchanged: promotion still lands as state `candidate` and "promoted" still
+never means "verified".
+
+- G17 (queue detail 500): the DETAIL endpoint was rewritten onto the SAME
+  ranked SQL as the list (`_RANKED_SELECT_READY` / `_RANKED_SELECT_ANY`
+  compiled from one template) — commit `c8f2893`. Detail rank == list rank;
+  archived/demoted rows still answer (`ready_now` computed under the SAME
+  eligibility rule as the list).
+- G18: `research_api.py` (brief versions with version+1 under one tx; claim
+  PATCH is HUMAN-ONLY — automation actors get 403, the reviewer identity is
+  recorded on the claim and audited); `promote_trend` creates brief v1 + the
+  queue row's track in the promotion transaction; scriptgen runs a fail-closed
+  contradiction gate (a standing `contradicted` claim blocks copy in EVERY
+  track until a human resolves it), a content_type→format matrix (a research
+  explainer cannot borrow first-person formats), per-class attribution
+  blocks (EN + Urdu: "The authors report…" is sourcing, "Our analysis…" is
+  labeled analysis, unconfirmed claims say so verbatim), and research tracks
+  never render coupon/price fields (a stray `promo_code` cannot leak into a
+  paper; the 'offer' track keeps its legacy wording, regression-guarded).
+  Automation promotion is bounded by the new `auto_research_max_per_day`
+  guardrail (advisory-locked daily count in the promotion tx — the same
+  TOCTOU defense as the approval budget; human promotions are never
+  capped; automation-marked briefs flag `auto_shortlisted`).
+
+| Gap | Commit / evidence |
+|---|---|
+| G17 queue detail SQL/readiness | `c8f2893` — shared `_RANKED_SELECT_TEMPLATE`; detail reuses the list's ranked projection (no GROUP BY anywhere in queue reads); `test_queue_detail_matches_list_rank_and_never_500s` |
+| G18 research tracks + claim ledger | `995c4ad` — migration 040 + `research_api.py` + promote/brief wiring + scriptgen gates/attribution + guardrail; unit `test_scriptgen_research.py` (12 tests), integration: `test_promote_creates_research_brief_v1_and_queue_content_type`, `test_research_brief_versioning_and_human_only_claim_status`, `test_paper_explainer_script_is_attributed_and_coupon_free`, `test_automation_promotion_daily_cap` |
+
+**Checks executed for this EP** (at documentation commit): full suite
+1147 passed (unit + **155 API integration tests** against local Postgres 16,
+migrations 001→040 applied by the real migration runner); `ruff check .`
+clean; `docker compose config -q` clean; dashboard `tsc --noEmit` clean;
+extension `node --check` clean. EP-03 plan acceptance is covered: a paper
+becomes an accurately attributed explainer without invented coupon/price
+fields; every substantive sentence in the attribution block resolves to the
+ledger's source or is labeled analysis (UNKNOWN claims are explicitly marked
+"not yet independently confirmed"); conflicting evidence blocks unsupported
+copy until a human reviewer resolves the contradiction.
+
+**Still unproven:** remote CI execution (owner billing lock — logged, not
+touched); the dashboard's queue/offer UIs do not yet surface `content_type`
+or the brief/claim editor (API-complete; UI work was not part of this EP's
+gate — the API contract is exercised by the integration tests); studio
+and offers script generation were verified for the contradiction gate and
+attribution via the API, not through a browser session; the recheck_at due
+list (attention_api) does not yet include research_claims.recheck_at rows.
