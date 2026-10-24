@@ -17,7 +17,9 @@ source fails at registration time instead of silently polling nothing.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,37 @@ ADAPTERS: dict[str, AdapterSpec] = {
 
 #: Stable ordering for UI dropdowns and docs (polled kinds first).
 ADAPTER_KINDS: tuple[str, ...] = tuple(ADAPTERS)
+
+#: G22 (EP-02) [S10]: adapters that must stay OFF until their access/use is
+#: approved and documented. Public visibility or robots compliance is NOT a
+#: license — low volume does not make anonymous reading permitted. The API
+#: refuses to create an *enabled* source of these kinds and the collector
+#: refuses to poll them; the seeds record them disabled. Setting the listed
+#: env var to "1" for the api/collector processes lifts the gate once the
+#: approval is documented in the source-registry doc.
+APPROVAL_PENDING: dict[str, dict[str, str]] = {
+    "reddit_new": {
+        "reason": (
+            "reddit adapter is disabled pending documented access/use "
+            "approval (public visibility is not a license)"
+        ),
+        "lift_env": "MTK_ENABLE_REDDIT_ADAPTER",
+    },
+}
+
+
+def approval_denial(kind: str) -> Optional[str]:
+    """Reason string when `kind` is gated by an unmet approval, else None."""
+    if kind not in ADAPTERS:
+        return f"unknown adapter kind {kind!r}"
+    gate = APPROVAL_PENDING.get(kind)
+    if gate is None:
+        return None
+    return None if os.environ.get(gate["lift_env"]) == "1" else gate["reason"]
+
+
+def approval_lift_env(kind: str) -> Optional[str]:
+    return APPROVAL_PENDING.get(kind, {}).get("lift_env")
 
 
 def get(kind: str) -> AdapterSpec:

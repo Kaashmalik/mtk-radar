@@ -17,6 +17,7 @@ from pydantic import ValidationError
 import schemas
 
 from source_adapters.registry import ADAPTERS, ADAPTER_KINDS, AdapterSpec
+from source_adapters.registry import APPROVAL_PENDING
 
 _REPO = Path(__file__).resolve().parents[3]
 
@@ -48,15 +49,18 @@ def test_registry_kinds_are_unique_and_described():
         assert spec.label and spec.description
 
 
-def test_every_registered_kind_is_creatable_via_the_api():
-    """The acceptance criterion: `POST /sources` can create each adapter kind
-    (SourceIn validation with the minimal required config)."""
+def test_every_registered_kind_is_creatable_via_the_api(monkeypatch):
+    """The acceptance criterion: the API validates and can create each
+    adapter kind. Approval-pending kinds (G22) are recordable DISABLED until
+    their lift env is set."""
+    monkeypatch.delenv("MTK_ENABLE_REDDIT_ADAPTER", raising=False)
     for kind, spec in ADAPTERS.items():
         config = {key: f"test-{key}" for key in spec.config_required}
         if kind == "github_stars":
             config["repos"] = ["owner/name"]
         source = schemas.SourceIn(
-            provider="Registry Probe", category="test", adapter=kind, config=config)
+            provider="Registry Probe", category="test", adapter=kind,
+            config=config, enabled=kind not in APPROVAL_PENDING)
         assert source.adapter == kind
 
 
@@ -114,9 +118,77 @@ def test_collector_dispatches_every_polled_kind_and_rejects_unknown():
 
     # Every polled kind at least runs its dispatch path: missing required
     # config raises the adapter's own ValueError instead of returning [].
-    for kind in polled:
+    # (Approval-pending kinds stop earlier, at the approval gate — covered by
+    # the dedicated G22 tests below.)
+    for kind in polled - set(APPROVAL_PENDING):
         spec = ADAPTERS[kind]
         if not spec.config_required:
             continue
         with pytest.raises(ValueError):
             collector.collect({"adapter": kind, "config": {}}, FakeFetcher())
+
+
+# ------------------------------------------------- G22 [S10]: reddit is OFF
+
+def test_reddit_is_approval_pending_and_off_by_default(monkeypatch):
+    from source_adapters.registry import APPROVAL_PENDING, approval_denial
+
+    monkeypatch.delenv("MTK_ENABLE_REDDIT_ADAPTER", raising=False)
+    assert "reddit_new" in APPROVAL_PENDING, \
+        "G22: reddit must be approval-pending in the registry"
+    assert approval_denial("reddit_new") is not None
+    assert approval_denial("rss") is None
+
+
+def test_enabled_reddit_source_is_refused_disabled_is_recordable(monkeypatch):
+    monkeypatch.delenv("MTK_ENABLE_REDDIT_ADAPTER", raising=False)
+    with pytest.raises(ValidationError, match="disabled pending"):
+        schemas.SourceIn(
+            provider="Reddit r/X", category="trend_signals", adapter="reddit_new",
+            config={"subreddit": "x"}, enabled=True)
+    # Recording the intent ahead of approval stays allowed…
+    disabled = schemas.SourceIn(
+        provider="Reddit r/X", category="trend_signals", adapter="reddit_new",
+        config={"subreddit": "x"}, enabled=False)
+    assert disabled.enabled is False
+    # …and an operator lift re-enables creation.
+    monkeypatch.setenv("MTK_ENABLE_REDDIT_ADAPTER", "1")
+    schemas.SourceIn(
+        provider="Reddit r/X", category="trend_signals", adapter="reddit_new",
+        config={"subreddit": "x"}, enabled=True)
+
+
+def test_collector_refuses_approval_pending_adapters(monkeypatch):
+    collector = _load_collector()
+    monkeypatch.delenv("MTK_ENABLE_REDDIT_ADAPTER", raising=False)
+    with pytest.raises(PermissionError, match="approval"):
+        collector.collect(
+            {"adapter": "reddit_new",
+             "config": {"subreddit": "localllama"}},
+            fetcher=None)
+    monkeypatch.setenv("MTK_ENABLE_REDDIT_ADAPTER", "1")
+
+    class NetRefuser:
+        def fetch_policy(self, url, **kwargs):
+            raise AssertionError(f"network fetch attempted: {url}")
+
+    # Lifted: the approval gate passes and dispatch proceeds (the fake
+    # fetcher refuses any actual network access — never an approval denial).
+    with pytest.raises(AssertionError, match="network fetch"):
+        collector.collect(
+            {"adapter": "reddit_new", "config": {"subreddit": "localllama"}},
+            fetcher=NetRefuser())
+
+
+def test_seed_records_reddit_disabled_but_valid():
+    """Seed rows pass SourceIn (G06) AND reddit ships disabled (G22): the
+    approval, not a schema bypass, is the only missing step."""
+    spec = importlib.util.spec_from_file_location(
+        "mtk_seed_sources_test_g22", _REPO / "services" / "api" / "scripts" /
+        "seed_sources.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    reddit = [s for s in module.SOURCES if s["adapter"] == "reddit_new"]
+    assert reddit, "seed list must still record the reddit intent"
+    assert all(s.get("enabled") is False for s in reddit), \
+        "G22: seeded reddit sources must ship disabled"

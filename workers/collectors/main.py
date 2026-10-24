@@ -43,6 +43,7 @@ from source_adapters import (  # noqa: E402
     fetch_rss,
 )
 from source_adapters.registry import ADAPTERS as REGISTRY  # noqa: E402
+from source_adapters.registry import approval_denial  # noqa: E402
 from source_adapters.registry import get as spec_for  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
@@ -100,6 +101,11 @@ def collect(source: dict, fetcher: Fetcher, cache: Optional[JsonCache] = None) -
     if not spec_for(adapter).collector_polled:
         # 'manual' and 'extension' sources are not collector-polled.
         return []
+    # G22 [S10]: approval-pending adapters are not polled even if an old row
+    # (pre-dating the creation gate) is still enabled — defense in depth.
+    denial = approval_denial(adapter)
+    if denial:
+        raise PermissionError(denial)
 
     if adapter == "rss":
         feed_url = config.get("feed_url")

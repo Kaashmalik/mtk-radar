@@ -20,6 +20,7 @@ if str(_PACKAGES) not in sys.path:
     sys.path.insert(0, str(_PACKAGES))
 
 from source_adapters.registry import missing_config as _adapter_missing_config  # noqa: E402
+from source_adapters.registry import approval_denial as _adapter_approval_denial  # noqa: E402
 from source_adapters.registry import ADAPTER_KINDS as _ADAPTER_KINDS  # noqa: E402
 
 TrustTier = Literal["A_provider_owned", "B_discovery_lead", "C_excluded"]
@@ -97,6 +98,14 @@ class SourceIn(BaseModel):
         if absent:
             raise ValueError(
                 f"adapter {self.adapter!r} requires config key(s): {', '.join(absent)}")
+        # G22 [S10]: approval-pending adapters (currently Reddit) are off by
+        # default — public visibility or robots compliance is not a license.
+        # Only an explicit operator lift (registry `lift_env`) may create an
+        # ENABLED source; recording it disabled ahead of approval stays allowed.
+        if self.enabled:
+            denial = _adapter_approval_denial(self.adapter)
+            if denial:
+                raise ValueError(denial)
         return self
 
 
