@@ -53,13 +53,20 @@ def test_urdu_metadata_contains_urdu_and_regional_hashtags():
                           website_url="https://mtk.example/guide")
     assert meta["language"] == "ur"
     assert any("\u0600" <= char <= "\u06ff" for char in meta["caption"])
-    assert "#اردو" in meta["hashtags"]
+    # v0.36: hashtags are evidence-traceable — the Urdu tag derives from the
+    # verified offer category, never from an invented broad pool.
+    urdu_tags = [t for t in meta["hashtags"]
+                 if any("\u0600" <= ch <= "\u06ff" for ch in t)]
+    assert urdu_tags, f"expected an Arabic-script (Urdu) hashtag, got {meta['hashtags']}"
 
 
 def test_hashtags_are_deduplicated_and_respect_count_order():
     tags = build_hashtags(OFFER, "instagram", language="en", limit=8)
-    assert len(tags) == 8
-    assert len({tag.lower() for tag in tags}) == 8
+    # The 2026 capability table (3–5 per platform) beats the old 8-tag pool:
+    # counts are documented limits, casing is CamelCase, dedup is caseless.
+    assert 3 <= len(tags) <= 5
+    assert len({tag.lower() for tag in tags}) == len(tags)
+    assert all(tag.startswith("#") and tag[1:].isascii() for tag in tags)
 
 
 def test_ab_variants_differ_for_title_platforms():

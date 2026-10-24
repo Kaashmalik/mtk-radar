@@ -20,7 +20,7 @@ import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -135,6 +135,55 @@ class ScheduleResultIn(BaseModel):
 # ---------------------------------------------------------------- create
 
 
+async def _trend_keywords_for_offer(pool, offer_id: uuid.UUID) -> list[str]:
+    """Trend-bridged hashtag keywords (WP-E): from the production-queue row's
+    trend, only when the trend is still RISING (velocity > 0) — a cooled story
+    must not keep shipping its hype tags. Every keyword cites the trend row;
+    nothing is invented here."""
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT kv.value AS keyword
+            FROM production_queue q
+            JOIN trend_candidates t ON t.id = q.trend_id
+            CROSS JOIN LATERAL (
+                SELECT jsonb_array_elements_text(
+                           COALESCE(t.score_reason->'keywords', '[]'::jsonb)) AS value
+                UNION ALL
+                SELECT jsonb_array_elements_text(
+                           COALESCE(t.signals->'keywords', '[]'::jsonb))
+            ) kv
+            WHERE q.offer_id = $1 AND t.velocity > 0
+            LIMIT 6
+            """,
+            offer_id,
+        )
+    except Exception:  # noqa: BLE001 — packaging must never fail on cosmetics
+        return []
+    return [str(r["keyword"]) for r in rows if r["keyword"]][:6]
+
+
+async def _hashtag_performance(pool, platform: str) -> dict[str, dict[str, Any]]:
+    """The `hashtag_performance` feedback rollup (WP-E): tags that
+    consistently underperform drop down the generation pool."""
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT tag, posts, impressions_total::float8
+            FROM hashtag_performance WHERE platform = $1
+            """,
+            platform,
+        )
+    except Exception:  # noqa: BLE001 — table may predate migration 034
+        return {}
+    return {
+        r["tag"]: {"posts": int(r["posts"]),
+                   "avg_impressions": (float(r["impressions_total"]) / int(r["posts"]))
+                   if int(r["posts"]) else 0.0}
+        for r in rows
+    }
+
+
 async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
                                actor: str) -> dict:
     """Create ONE platform schedule. Every release gate lives here and is
@@ -186,8 +235,7 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
     # v0.27: the render must match the language being scheduled; falling back to a
     # different-language render would put the wrong narration/captions on a post.
     preferred_preset = _PREFERRED_RENDER_PRESET.get(body.platform) or ""
-    render = await pool.fetchrow(
-        """
+    render = await pool.fetchrow(        """
         SELECT r.id, r.preset, r.video_path, r.language, r.cover_path, r.captions_path,
                r.duration_s, r.video_sha256, r.cover_sha256, r.captions_sha256,
                r.script_version_hash, r.status, r.qc_status,
@@ -304,6 +352,13 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
         scheduled_variant_key = variant["variant_key"]
     else:
         correction_base = os.environ.get("MTK_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        # Trend-bridged hashtags (WP-E): keywords from the trend row that
+        # produced this topic — cited, never invented — plus the measured
+        # hashtag performance rollup so underperforming tags sink.
+        trend_keywords, hashtag_perf = await asyncio.gather(
+            _trend_keywords_for_offer(pool, offer_id),
+            _hashtag_performance(pool, body.platform),
+        )
         metadata = platform_metadata(
             body.platform, dict(offer), [r["url"] for r in evidence],
             json.loads(render["disclosure"]) if render["disclosure"] else {},
@@ -313,6 +368,8 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
             # language even when the voiceover is Urdu.
             language=language_policy["metadata_language"],
             variant=body.metadata_variant,
+            trend_keywords=trend_keywords,
+            hashtag_performance=hashtag_perf,
         )
 
     # Captions can legitimately differ from the voiceover language: the
@@ -1452,6 +1509,54 @@ async def result(schedule_id: uuid.UUID, body: ScheduleResultIn) -> dict:
 # ------------------------------------------------- audience metrics (v0.18)
 
 
+async def _rollup_hashtag_performance(conn, platform: str) -> None:
+    """Recompute the per-tag feedback rollup for this platform (WP-E).
+
+    Derived entirely from `schedules.metadata->'hashtags' ⋈ post_metrics` —
+    recomputable, never incrementally drifted. Tags on posts without metrics
+    still count as posts (they were shipped); impressions only accrue from
+    measured snapshots."""
+    await conn.execute(
+        """
+        WITH tagged AS (
+            SELECT s.id, s.platform, kv.value AS tag
+            FROM schedules s
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(s.metadata->'hashtags') = 'array'
+                     THEN s.metadata->'hashtags' ELSE '[]'::jsonb END
+            ) AS kv
+            WHERE s.platform = $1::text
+        ),
+        measured AS (
+            SELECT pm.schedule_id,
+                   MAX(pm.impressions) AS impressions,
+                   MAX(pm.views) AS views
+            FROM post_metrics pm
+            WHERE pm.platform = $1::text
+            GROUP BY pm.schedule_id
+        )
+        INSERT INTO hashtag_performance
+            (platform, tag, posts, impressions_total, views_total,
+             last_seen_at, updated_at)
+        SELECT t.platform, t.tag,
+               COUNT(m.schedule_id)::int,
+               COALESCE(SUM(m.impressions), 0)::bigint,
+               COALESCE(SUM(m.views), 0)::bigint,
+               now(), now()
+        FROM tagged t LEFT JOIN measured m ON m.schedule_id = t.id
+        GROUP BY t.platform, t.tag
+        ON CONFLICT (platform, tag) DO UPDATE
+        SET posts = EXCLUDED.posts,
+            impressions_total = EXCLUDED.impressions_total,
+            views_total = EXCLUDED.views_total,
+            last_seen_at = EXCLUDED.last_seen_at,
+            updated_at = now()
+        """,
+        platform,
+    )
+
+
+
 class MetricsIn(BaseModel):
     """One audience-metrics snapshot from the metrics worker (master plan §7).
     Normalized fields feed analytics; `raw` keeps the provider payload."""
@@ -1514,6 +1619,10 @@ async def ingest_metrics(schedule_id: uuid.UUID, body: MetricsIn) -> dict:
                 body.report_start, body.report_end, body.metric_definition,
                 body.degraded, body.degradation_detail, body.retention_3s_estimated,
             )
+            # Feedback rollup (WP-E): fold this snapshot into per-tag
+            # performance. Recomputed from source-of-truth tables so a
+            # corrected snapshot can never drift the rollup.
+            await _rollup_hashtag_performance(conn, body.platform)
     latest = await pool.fetchrow(
         "SELECT views, likes, comments, shares, impressions, avg_watch_s, "
         "avg_view_duration_s, avg_view_percentage, ctr, retention_3s, link_clicks, "

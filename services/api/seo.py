@@ -116,37 +116,34 @@ def hashtagify(value: str) -> str:
 
 
 def build_hashtags(offer: dict[str, Any], platform: str, *,
-                   language: str = "en", limit: int | None = None) -> list[str]:
-    """Broad + niche + provider + regional hashtags, deduplicated."""
-    category = str(offer.get("category") or "").lower()
-    niche_key = _CATEGORY_TAGS.get(category, "broad")
-    tags: list[str] = []
-    tags.extend(_DEFAULT_HASHTAGS.get("broad", ()))
-    tags.extend(_DEFAULT_HASHTAGS.get(niche_key, ()))
-    provider_tag = hashtagify(str(offer.get("provider") or ""))
-    if provider_tag:
-        tags.append(provider_tag)
-    if language == "ur":
-        tags.extend(_DEFAULT_HASHTAGS["urdu"])
-    countries = offer.get("eligibility", {}).get("countries") if isinstance(offer.get("eligibility"), dict) else None
-    if countries:
-        tags.append(hashtagify(str(countries[0])))
-    # Platform-specific ceiling. YouTube has a character cap rather than a tag
-    # count, so callers pass a conservative count (30) and the adapter truncates.
-    ceiling = limit if limit is not None else (
-        30 if platform == "instagram" else 12 if platform == "tiktok" else 15
+                   language: str = "en", limit: int | None = None,
+                   trend_keywords: list[str] | None = None,
+                   performance: dict[str, dict[str, Any]] | None = None) -> list[str]:
+    """Evidence-traceable hashtags within the platform's documented limits
+    (v0.36 delegates to the hashtags.py capability table).
+
+    Every tag cites its source (provider/category/trend/eligibility); nothing
+    is invented. `trend_keywords` come from the trend row that produced the
+    topic; `performance` is the `hashtag_production`-style feedback rollup.
+    """
+    import hashtags as hashtags_mod
+
+    eligibility = offer.get("eligibility") if isinstance(offer.get("eligibility"), dict) else {}
+    countries = eligibility.get("countries") if isinstance(eligibility.get("countries"), list) else []
+    items = hashtags_mod.generate_hashtags(
+        platform,
+        provider=str(offer.get("provider") or ""),
+        category=str(offer.get("category") or ""),
+        title=str(offer.get("title") or ""),
+        countries=[str(c) for c in countries],
+        trend_keywords=trend_keywords,
+        language=language,
+        performance=performance,
     )
-    seen: set[str] = set()
-    out: list[str] = []
-    for tag in tags:
-        normalized = tag.strip()
-        if not normalized or normalized.lower() in seen:
-            continue
-        seen.add(normalized.lower())
-        out.append(normalized)
-        if len(out) >= ceiling:
-            break
-    return out
+    tags = [item["tag"] for item in items]
+    if limit is not None and len(tags) > limit:
+        tags = tags[:limit]
+    return tags
 
 
 def youtube_category_keyword(category: str | None) -> str:
@@ -312,7 +309,10 @@ def build_metadata(
     variant: str = "default",
     hashtags: list[str] | None = None,
     channel_name: str | None = None,
-    *, format_hint: str | None = None,
+    *,
+    format_hint: str | None = None,
+    trend_keywords: list[str] | None = None,
+    hashtag_performance: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one platform/language metadata payload with hard limits."""
     if platform not in PLATFORMS:
@@ -384,15 +384,30 @@ def build_metadata(
     if correction_url:
         lines.append(("Corrections & updates: " if language == "en" else "تصحیح اور اپ ڈیٹس: ") + correction_url)
 
+    desc_hashtags: list[str] = []
     if platform == "youtube":
-        # Plain 5-8 search keywords; hashtags live in the description, not in
-        # the tags field.
-        tags = hashtags if hashtags is not None else build_youtube_tags(
-            offer, language=language, channel_name=channel_name)
+        # Plain 5–8 backend keywords; hashtags ride the DESCRIPTION tail
+        # (the first 3 render above the title), never the `tags` field.
+        if hashtags is not None:
+            desc_hashtags = [str(t) for t in hashtags]
+            tags = [str(t).lstrip("#").lower() for t in hashtags]
+        else:
+            desc_hashtags = build_hashtags(
+                offer, platform, language=language,
+                trend_keywords=trend_keywords, performance=hashtag_performance)
+            tags = build_youtube_tags(offer, language=language,
+                                      channel_name=channel_name)
     else:
-        tags = hashtags if hashtags is not None else build_hashtags(offer, platform, language=language)
-    if tags and platform in ("instagram", "tiktok"):
-        lines.append(" ".join(tags))
+        tags = hashtags if hashtags is not None else build_hashtags(
+            offer, platform, language=language,
+            trend_keywords=trend_keywords, performance=hashtag_performance)
+    # Hashtag placement (v0.36, WP-E capability table): YouTube in the
+    # description tail, TikTok in the caption, Instagram as the caption tail;
+    # Facebook only ever sees the 0–2 the capability table allows.
+    if desc_hashtags:
+        lines.append(" ".join(desc_hashtags[:5]))
+    if tags and platform in ("instagram", "tiktok", "facebook"):
+        lines.append(" ".join(tags[:3] if platform != "facebook" else tags[:2]))
     if evidence_urls:
         lines.append("Sources & terms (may change):" if language == "en" else "ذرائع اور شرائط (بدل سکتے ہیں):")
         lines.extend(f"- {u}" for u in evidence_urls[:3])
@@ -409,7 +424,7 @@ def build_metadata(
         "title": title,
         "caption": caption,
         "tags": tags if limits["tags"] else [],
-        "hashtags": tags,
+        "hashtags": desc_hashtags if platform == "youtube" else tags,
         "website_url": tracked_site,
         "cta": _CTA.get(language, _CTA["en"]),
         "pinned_comment": pinned,

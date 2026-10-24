@@ -19,6 +19,7 @@ import uuid
 
 from offer_freshness import freshness_problem
 from schedules_state import script_version_hash
+from hashtags import hashtag_gate_problems
 
 #: Offer states from which a release may be attempted. Anything else needs a
 #: human re-verification first — a declined/expired offer must not ship.
@@ -66,7 +67,7 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
         SELECT id, state::text AS state, offer_id, platform, language, render_id,
                version_hash, metadata_hash, cover_path, cover_sha256,
                captions_sha256, render_sha256, outcome_detail::text AS outcome_detail,
-               content_variant_id
+               content_variant_id, metadata::text AS metadata
         FROM schedules WHERE id = $1
         """,
         schedule_id,
@@ -268,6 +269,26 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
                             "YouTube tags must be plain keywords without '#' — "
                             "hashtags belong in the description",
                         ))
+                    # v0.36 (WP-E): per-platform hashtag capability table —
+                    # counts, placement and charset. Every hashtag must cite
+                    # evidence or the trend row that produced it. Below-min
+                    # counts stay advisory (blocking=False): the generator
+                    # only ships traceable tags, never filler.
+                    problems.extend(
+                        {**_problem(f"hashtag_{p['code']}", p["detail"]),
+                         "blocking": bool(p.get("blocking", True))}
+                        for p in hashtag_gate_problems(schedule["platform"], payload)
+                    )
+            else:
+                # No approved variant: the schedule's own generated metadata
+                # is the package that ships — gate it identically.
+                own = _json_value(schedule.get("metadata"), {}) or {}
+                if own:
+                    problems.extend(
+                        {**_problem(f"hashtag_{p['code']}", p["detail"]),
+                         "blocking": bool(p.get("blocking", True))}
+                        for p in hashtag_gate_problems(schedule["platform"], own)
+                    )
             cover_variant = await pool.fetchrow(
                 "SELECT payload::text AS payload FROM content_variants "
                 "WHERE offer_id = $1 AND kind = 'cover' AND status = 'approved' "
