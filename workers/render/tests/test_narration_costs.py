@@ -17,7 +17,9 @@ class FakeCost:
         self.store: dict[str, object] = {}
         self.events: list[dict] = []
         self.budget_call_count = 0
+        self.budget_calls: list[dict] = []
         self.allow = True
+        self.reservation_id: str | None = None
 
     def cache_lookup(self, namespace, key):
         return self.store.get(f"{namespace}:{key}")
@@ -28,6 +30,15 @@ class FakeCost:
     def budget_ok(self, kind, **kwargs):
         self.budget_call_count += 1
         return self.allow
+
+    def budget_check(self, kind, **kwargs):
+        """G04 interface: gate response with a reservation id."""
+        self.budget_call_count += 1
+        self.budget_calls.append({"kind": kind, **kwargs})
+        return {"allowed": self.allow,
+                "reason": None if self.allow else "budget exhausted",
+                "reservation_id": (self.reservation_id
+                                   if self.allow and self.reservation_id else None)}
 
     def report(self, kind, **kwargs):
         self.events.append({"kind": kind, **kwargs})
