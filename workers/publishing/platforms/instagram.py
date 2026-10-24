@@ -167,6 +167,52 @@ class InstagramAdapter(PublishAdapter):
             resp.raise_for_status()
         return str(payload["id"])
 
+    def confirm_publication(self, media_id: str, *, expected_privacy: str,
+                            timeout_s: int = 300, interval_s: float = 5.0) -> dict:
+        """G02: reconcile the accepted upload id against the live media object.
+
+        An accepted `media_publish` id is not confirmed publication — the media
+        object must be retrievable WITH a permalink before the post counts as
+        live. There is no per-post privacy field on Instagram (see G01); the
+        expected privacy is honored here only in the sense that unsupported
+        modes can never reach this code path (publishing refuses them first).
+        An object that never becomes retrievable stays unconfirmed: held, not
+        success.
+        """
+        deadline = time.monotonic() + max(0, int(timeout_s))
+        last: dict = {}
+        while True:
+            resp = self._http.get(
+                f"{GRAPH_ENDPOINT}{media_id}",
+                params={
+                    "fields": "permalink,timestamp,media_type",
+                    "access_token": self.access_token,
+                },
+            )
+            if resp.status_code == 401:
+                raise TokenExpiredError("graph media read rejected the Instagram token")
+            if resp.status_code == 429:
+                raise RateLimited("graph media read throttled (HTTP 429)",
+                                  retry_after_from_response(resp))
+            if resp.status_code < 400:
+                payload = self._payload(resp)
+                permalink = payload.get("permalink")
+                if permalink:
+                    return {
+                        "confirmed": True,
+                        "processing_state": "published",
+                        "remote_url": str(permalink),
+                        "published_at": payload.get("timestamp"),
+                        "media_type": payload.get("media_type"),
+                    }
+                last = {"processing_state": "accepted", "remote_url": None}
+            if time.monotonic() >= deadline:
+                return {**last, "confirmed": False,
+                        "error": "instagram media object has no permalink — the publish id "
+                                 "was accepted but the post is not confirmed live; verify "
+                                 "in the Instagram app before retrying (G02)"}
+            time.sleep(max(0.1, interval_s))
+
     def insights(self, media_id: str) -> dict:
         """Per-media reach metrics (Graph insights). Unpublished/draft media
         answers empty — callers treat that as no-data, not failure."""

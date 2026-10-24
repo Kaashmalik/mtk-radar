@@ -204,3 +204,50 @@ class TikTokAdapter(PublishAdapter):
         )
         resp.raise_for_status()
         return resp.json()
+
+    # -------------------------------------------------------- reconciliation
+
+    def confirm_publication(self, publish_id: str, *, expected_privacy: str,
+                            timeout_s: int = 300, interval_s: float = 5.0) -> dict:
+        """G02: poll the documented status endpoint until TikTok reports the
+        post PUBLISHED, FAILED, or the deadline passes — the accepted
+        `publish_id` alone is NOT confirmation. Per the evidence-to-video
+        plan (G23): TikTok's unaudited visibility restrictions mean even
+        `PUBLISH_COMPLETE` cannot be verified as publicly visible from the
+        server alone, so confirmation carries the post id from the
+        `publicaly_available_post_id` field (sic — TikTok's documented typo)
+        when present, and 'unknown visibility' stays an explicit held state
+        rather than an assumed one.
+
+        The worker treats `confirmed: false` as a held failure: no retry,
+        no duplicate upload, a human looks at the post.
+        """
+        deadline = time.monotonic() + max(0, int(timeout_s))
+        last: dict = {}
+        while True:
+            payload = self.publish_status(publish_id)
+            data = payload.get("data") or {}
+            status = str(data.get("status") or "").upper()
+            post_ids = (data.get("publicaly_available_post_id")
+                        or data.get("publicly_available_post_id") or [])
+            remote_url = ("https://www.tiktok.com/@me/video/"
+                          + str(post_ids[0])) if post_ids else None
+            last = {
+                "processing_state": status or "unknown",
+                "remote_url": remote_url,
+                "fail_reason": data.get("fail_reason"),
+            }
+            if status in ("PUBLISH_COMPLETE", "PUBLISHED") or post_ids:
+                return {**last, "confirmed": True}
+            if status in ("PUBLISH_FAILED", "FAILED", "REJECTED") \
+                    or last["fail_reason"]:
+                return {**last, "confirmed": False,
+                        "error": f"tiktok publish failed: {status} "
+                                 f"({last['fail_reason'] or 'no detail'})"}
+            if time.monotonic() >= deadline:
+                return {**last, "confirmed": False,
+                        "error": "tiktok publish status never reached a terminal or "
+                                 "complete state before the deadline — verify in the "
+                                 "TikTok app before retrying (an upload id is not a "
+                                 "confirmed post)"}
+            time.sleep(max(0.1, interval_s))
