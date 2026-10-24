@@ -74,6 +74,44 @@ VELOCITY_BUMP_CAP: Final[float] = 15.0
 CORROBORATION_BUMP_PER_SOURCE: Final[float] = 3.0
 CORROBORATION_BUMP_CAP: Final[float] = 10.0
 
+# ------------------------------------------------- typed measurements (G07/G08)
+#: Adapter payload keys (RawItem.extra) that carry OBSERVED engagement
+#: counts, mapped to their canonical measurement name. A raw count the source
+#: published is the only honest momentum input: score changes mix in
+#: freshness and keyword facets (G08), so velocity must come from deltas of
+#: THESE numbers, never from internal score movement.
+MEASUREMENT_SOURCES: Final[dict[str, str]] = {
+    "hn_points": "points",        # Hacker News story points
+    "hn_comments": "comments",    # Hacker News comment count
+    "reddit_score": "points",     # Reddit post score
+    "reddit_comments": "comments",
+    "upvotes": "upvotes",         # HF Daily Papers community upvotes
+    "stars": "stars",             # GitHub star snapshot
+}
+
+
+def measurement_from_extra(extra: Any) -> dict[str, float]:
+    """Typed numeric engagement counts from an adapter payload (G07).
+
+    Only clean numbers survive: a missing count stays missing (the radar
+    never interpolates "unknown"), and textual metrics ("approx traffic:
+    20000+") are context, not measurements.
+    """
+    if not isinstance(extra, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, name in MEASUREMENT_SOURCES.items():
+        value = extra.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if num >= 0 and num == num:  # finite, non-negative
+            out[name] = num
+    return out
+
 
 def smooth_velocity(
     prev_score: Any,

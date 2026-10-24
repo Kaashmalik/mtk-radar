@@ -192,3 +192,26 @@ def test_seed_records_reddit_disabled_but_valid():
     assert reddit, "seed list must still record the reddit intent"
     assert all(s.get("enabled") is False for s in reddit), \
         "G22: seeded reddit sources must ship disabled"
+
+
+def test_collector_forwards_adapter_extra_to_the_api():
+    """G07: RawItem.extra is the ONLY carrier of typed engagement counts
+    (hn_points, stars, upvotes); the collector used to drop it at the API
+    boundary, so the intake could never persist what was observed."""
+    collector = _load_collector()
+
+    class RSSResponse:
+        content = (b"<?xml version=\"1.0\"?><rss version=\"2.0\"><channel>"
+                   b"<item><title>T1</title><link>https://ex.com/a</link>"
+                   b"<id>a1</id></item></channel></rss>")
+
+    class RSSFetcher:
+        def fetch_policy(self, url, **kwargs):
+            return RSSResponse()
+
+    payloads = collector.collect(
+        {"adapter": "rss", "config": {"feed_url": "https://ex.com/feed.xml"}},
+        RSSFetcher())
+    assert payloads, "setup: the feed produced one item"
+    assert "extra" in payloads[0], \
+        "collect() payloads must carry RawItem.extra for observation intake"

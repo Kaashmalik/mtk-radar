@@ -164,7 +164,8 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     rows = await pool.fetch(
         """
         SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
-               i.duplicate_group, s.provider AS source_provider,
+               i.duplicate_group, i.text, i.selection,
+               s.provider AS source_provider,
                s.category AS source_category, s.trust_tier::text AS trust_tier,
                s.country_scope,
                c.id AS candidate_id,

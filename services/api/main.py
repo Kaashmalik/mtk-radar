@@ -7,6 +7,7 @@ Run locally:
     uvicorn main:app --reload --port 8000
 """
 
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ from metrics_api import router as metrics_router
 from jsonb import decode_mapping
 import tos_review
 from normalize import canonicalize_url, hash_parts
+from trend_engine import measurement_from_extra
 from offers_api import router as offers_router
 from platforms_api import router as platforms_router
 from analytics_api import router as analytics_router
@@ -50,6 +52,7 @@ from queue_api import router as queue_router
 from worker_health import router as workers_router
 from upload_sessions_api import router as upload_sessions_router
 from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
+from schemas import MAX_ITEM_CONTEXT_CHARS
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
@@ -370,25 +373,72 @@ async def create_item(item: ItemIn) -> dict:
     dupe_group = canonical
     text_hash = hash_parts(canonical, item.title, item.selection or item.text)
 
-    row = await pool.fetchrow(
-        """
-        INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
-                           observed_at, published_at, text_hash, duplicate_group)
-        VALUES ($1, $2, $3, $4, $5,
-                COALESCE($6, now()), $7, $8, $9)
-        ON CONFLICT DO NOTHING
-        RETURNING id
-        """,
-        source_id,
-        external_item_id,
-        str(item.url),
-        canonical,
-        item.title,
-        item.observed_at,
-        item.published_at,
-        text_hash,
-        dupe_group,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                                   observed_at, published_at, text_hash, duplicate_group,
+                                   text, selection, account_handle, extra)
+                VALUES ($1, $2, $3, $4, $5,
+                        COALESCE($6, now()), $7, $8, $9, $10, $11, $12, $13::jsonb)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                source_id,
+                external_item_id,
+                str(item.url),
+                canonical,
+                item.title,
+                item.observed_at,
+                item.published_at,
+                text_hash,
+                dupe_group,
+                item.text,
+                item.selection,
+                item.account_handle,
+                _json(item.extra or {}),
+            )
+
+            # G07: EVERY retrieval also appends a raw typed observation —
+            # story dedup (items UNIQUE keys) and measurement history are
+            # separate ledgers. Re-observing an unchanged entity records the
+            # (identical) measurement again; only DELTAS between rows may
+            # ever become momentum (G08), so unchanged fields cannot fake a
+            # rising trend.
+            adapter = await conn.fetchval(
+                "SELECT adapter::text FROM sources WHERE id = $1", source_id)
+            measurements = measurement_from_extra(item.extra)
+            entity_key = f"{adapter or 'unknown'}:{external_item_id}"
+            payload_hash = hash_parts(
+                canonical, json.dumps(item.extra or {}, sort_keys=True,
+                                      default=str),
+                (item.text or "")[:4000],
+            )
+            await conn.execute(
+                """
+                INSERT INTO source_observations
+                    (source_id, adapter, external_id, entity_key, url,
+                     observed_at, measurements, payload_hash, excerpt, provenance)
+                VALUES ($1, $2, $3, $4, $5,
+                        COALESCE($6, now()), $7::jsonb, $8, $9,
+                        $10::jsonb)
+                """,
+                source_id,
+                adapter or "unknown",
+                external_item_id,
+                entity_key,
+                canonical,
+                item.observed_at,
+                _json(measurements),
+                payload_hash,
+                (item.text or item.selection or "")[:MAX_ITEM_CONTEXT_CHARS]
+                or None,
+                _json({
+                    "source_kind": (item.extra or {}).get("source_kind"),
+                    "intake": "collector" if item.source_id else "extension",
+                }),
+            )
 
     if row:
         return {"id": row["id"], "created": True, "duplicate": False, "canonical_url": canonical}

@@ -5262,3 +5262,124 @@ def test_hashtag_feedback_rollup_and_gate_integration(client):
     )[0]
     assert rolled["posts"] == 1, "one post, not N ingests"
     assert rolled["impressions"] == 21000
+
+
+# ------------------------- EP-02 G07: observed context is actually persisted
+
+def test_item_intake_persists_context_and_extra(client, source):
+    """G07: the excerpt, the adapter payload and the handle must survive
+    intake — the text hash always covered them, but the body itself used to
+    be dropped so the radar could never re-score what produced a candidate."""
+    body = {
+        "source_id": source,
+        "external_item_id": "g07-context-1",
+        "url": "https://example.com/g07/context",
+        "title": "G07 context fixture",
+        "text": "twelve months free for new accounts",
+        "account_handle": "@acmedomains",
+        "extra": {"source_kind": "trend_signal", "note": "ingested by g07 test"},
+    }
+    res = client.post("/items", json=body)
+    assert res.status_code == 201, res.text
+    row = _run(
+        "SELECT text, account_handle, extra FROM items "
+        "WHERE external_item_id = 'g07-context-1'")[0]
+    assert row["text"] == body["text"]
+    assert row["account_handle"] == "@acmedomains"
+    assert json.loads(row["extra"])["note"] == "ingested by g07 test"
+
+
+def test_reingest_appends_observation_without_duplicate_story(client, source):
+    """G07/G08 acceptance seed: HN points move 100 → 160 on the SAME story —
+    the inbox must NOT grow a second candidate row, but the measurement
+    history must gain a second, timestamped observation."""
+    def _body(points):
+        return {
+            "source_id": source,
+            "external_item_id": "hn-item-4242",
+            "url": "https://news.ycombinator.com/item?id=4242",
+            "title": "G07 velocity fixture",
+            "text": "stable story body across both fetches",
+            "extra": {"hn_points": points, "hn_comments": 5,
+                      "hn_object_id": "4242", "source_kind": "trend_signal"},
+        }
+
+    first = client.post("/items", json=_body(100))
+    assert first.status_code == 201 and first.json()["created"] is True
+    second = client.post("/items", json=_body(160))
+    assert second.status_code == 201
+    assert second.json()["duplicate"] is True, "same story must dedupe"
+
+    items = _run(
+        "SELECT COUNT(*) AS n FROM items WHERE external_item_id = 'hn-item-4242'")
+    assert items[0]["n"] == 1, "re-fetch must not create a second story"
+
+    obs = _run(
+        """
+        SELECT entity_key, measurements, payload_hash
+        FROM source_observations
+        WHERE external_id = 'hn-item-4242'
+        ORDER BY observed_at, id
+        """)
+    assert len(obs) == 2, "every retrieval appends one raw observation"
+    assert json.loads(obs[0]["measurements"]) == {"points": 100, "comments": 5}
+    assert json.loads(obs[1]["measurements"]) == {"points": 160, "comments": 5}
+    assert obs[0]["entity_key"] == obs[1]["entity_key"]
+    assert obs[0]["payload_hash"] != obs[1]["payload_hash"], \
+        "different observed payloads must hash differently"
+    # Unchanged payload → identical hash (so unchanged fields cannot be
+    # mistaken for new information when G08 computes deltas).
+    again = client.post("/items", json=_body(160))
+    assert again.status_code == 201
+    obs3 = _run(
+        "SELECT measurements, payload_hash FROM source_observations "
+        "WHERE external_id = 'hn-item-4242' ORDER BY observed_at, id")
+    assert len(obs3) == 3 and obs3[2]["payload_hash"] == obs3[1]["payload_hash"]
+
+
+def test_source_observations_is_append_only(client, source):
+    """The measurement history cannot be rewritten to fake momentum: the
+    database itself refuses UPDATE and DELETE."""
+    client.post("/items", json={
+        "source_id": source,
+        "external_item_id": "hn-item-appendonly",
+        "url": "https://news.ycombinator.com/item?id=777",
+        "title": "append-only fixture",
+        "extra": {"hn_points": 10},
+    })
+    with pytest.raises(Exception, match="append-only"):
+        _run("UPDATE source_observations SET measurements = '{\"points\": 999}' "
+             "WHERE external_id = 'hn-item-appendonly'")
+    with pytest.raises(Exception, match="append-only"):
+        _run("DELETE FROM source_observations WHERE external_id = 'hn-item-appendonly'")
+
+
+def test_extra_bounds_and_non_numeric_measurements_are_rejected(client, source):
+    """The intake stays a bounded inbox, not a page dump; text metrics like
+    'approx traffic: 20000+' are context, never typed measurements."""
+    res = client.post("/items", json={
+        "source_id": source,
+        "external_item_id": "g07-bounds",
+        "url": "https://example.com/g07/bounds",
+        "text": "x" * 5000,
+    })
+    row = _run("SELECT text FROM items WHERE external_item_id = 'g07-bounds'")
+    assert len(row[0]["text"]) <= 4000, "context must be bounded at intake"
+    res2 = client.post("/items", json={
+        "source_id": source,
+        "external_item_id": "g07-bad-extra",
+        "url": "https://example.com/g07/bx",
+        "extra": {"blob": "y" * 501},
+    })
+    assert res2.status_code == 422
+    res3 = client.post("/items", json={
+        "source_id": source,
+        "external_item_id": "g07-traffic",
+        "url": "https://example.com/g07/traffic",
+        "extra": {"approx_traffic": "20000+", "source_kind": "trend_signal"},
+    })
+    assert res3.status_code == 201
+    obs = _run("SELECT measurements FROM source_observations "
+               "WHERE external_id = 'g07-traffic'")
+    assert json.loads(obs[0]["measurements"]) == {}, \
+        "text-only metrics are NOT numeric measurements"
