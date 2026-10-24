@@ -7,6 +7,8 @@
 import "./styles.css";
 import { apiFetch } from "@/lib/api";
 
+import { QueueRowActions } from "./QueueRowActions";
+
 async function getJson<T>(path: string, fallback: T): Promise<T> {
   try {
     const res = await apiFetch(path, { cache: "no-store" });
@@ -16,6 +18,82 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
     return fallback;
   }
 }
+
+// The production queue answers "what to make next" — a truncated page would
+// bury rows the operator was supposed to see. Follow X-Next-Cursor to
+// exhaustion (bounded) like every other growing collection.
+const QUEUE_MAX_PAGES = 40;
+const QUEUE_PAGE_LIMIT = 200;
+
+type QueueRow = {
+  id: string;
+  offer_id: string | null;
+  trend_id: string | null;
+  title: string;
+  provider: string | null;
+  category: string | null;
+  kind: string;
+  offer_state: string | null;
+  expires_at: string | null;
+  trend_snapshot: string;
+  trend_score: number | null;
+  velocity: number | null;
+  corroboration: number | null;
+  evidence_count: number;
+  preset_fit: number | null;
+  rank_pinned: number | null;
+  rank: number;
+};
+
+async function getQueueAll(): Promise<QueueRow[]> {
+  const rows: QueueRow[] = [];
+  let cursor: string | null = null;
+  try {
+    for (let page = 0; page < QUEUE_MAX_PAGES && cursor !== ""; page += 1) {
+      const res = await apiFetch(
+        `/production-queue?limit=${QUEUE_PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) break;
+      const body = (await res.json()) as { queue: QueueRow[] };
+      rows.push(...(body.queue ?? []));
+      cursor = res.headers.get("X-Next-Cursor");
+      if (!cursor) break;
+    }
+  } catch {
+    // fall through with what we have
+  }
+  return rows;
+}
+
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - Date.now();
+  return Math.ceil(ms / 86_400_000);
+}
+
+/** One primary action per offer state — the queue row tells the operator
+ * which human gate the topic is actually waiting on. */
+function primaryAction(row: QueueRow): { href: string; label: string } {
+  if (!row.offer_id) return { href: "/radar", label: "Find the trend ↗" };
+  switch (row.offer_state) {
+    case "candidate":
+      return { href: `/offers/${row.offer_id}`, label: "Start verification →" };
+    case "evidence_needed":
+      return { href: `/offers/${row.offer_id}`, label: "Verify evidence →" };
+    case "verified":
+      return { href: `/offers/${row.offer_id}`, label: "Prepare capture →" };
+    case "approved_for_video":
+      return { href: "/offers", label: "Check the render list →" };
+    case "published":
+      return { href: "/analytics", label: "Measure it →" };
+    case "expired":
+      return { href: `/offers/${row.offer_id}`, label: "Recheck →" };
+    default:
+      return { href: `/offers/${row.offer_id}`, label: "Open offer →" };
+  }
+}
+
 
 // The queue page answers "what still needs a person" — a truncated page
 // silently under-counts every gate. Follow X-Next-Cursor to exhaustion
@@ -112,12 +190,14 @@ function qcErrors(report: RenderDeadLetterItem["qc_report"]): string[] {
 }
 
 export default async function QueuePage() {
-  const [candidates, captures, offers, schedules, policy, deadLetter] = await Promise.all([
-    getJsonAll<Candidate>("/render-candidates", []),
-    getJsonAll<Capture>("/captures", []),
-    getJsonAll<{ id: string; title: string; state: string; official_evidence: number }>(
-      "/offers",
-      [],
+  const [queue, candidates, captures, offers, schedules, policy, deadLetter] =
+    await Promise.all([
+      getQueueAll(),
+      getJsonAll<Candidate>("/render-candidates", []),
+      getJsonAll<Capture>("/captures", []),
+      getJsonAll<{ id: string; title: string; state: string; official_evidence: number }>(
+        "/offers",
+        [],
     ),
     getJsonAll<{ id: string; state: string; platform: string }>("/schedules", []),
     getJson<{ summary?: PolicySummary }>("/automation/policy", {}),
@@ -163,6 +243,10 @@ export default async function QueuePage() {
         <h2>At a glance</h2>
         <div className="stats">
           <div>
+            <strong style={{ color: "#58a6ff" }}>{queue.length}</strong>
+            <span>videos to make</span>
+          </div>
+          <div>
             <strong style={{ color: "#58a6ff" }}>{candidates.length}</strong>
             <span>rendering automatically</span>
           </div>
@@ -185,6 +269,73 @@ export default async function QueuePage() {
             <span>render QC / failures</span>
           </div>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>Production queue — videos to make ({queue.length})</h2>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Ranked by the documented formula: 35% trend momentum + 30% evidence +
+          20% freshness + 15% preset fit — recomputed from evidence on every
+          load, never stored. Pins are operator overrides.
+        </p>
+        {queue.length === 0 ? (
+          <p className="muted small">
+            Empty. Promote a rising topic from the{" "}
+            <a href="/radar">radar</a> — an offer candidate and its queue row
+            appear together, and verification decides the rest.
+          </p>
+        ) : (
+          <div id="production-queue-list" data-ids={JSON.stringify(queue.map((q) => q.id))}>
+            {queue.map((row) => {
+              const days = daysUntil(row.expires_at);
+              const action = primaryAction(row);
+              return (
+                <div className="pq-row" key={row.id}>
+                  <span className="pq-rank">
+                    {row.rank_pinned !== null ? `📌 ${row.rank_pinned}` : row.rank.toFixed(0)}
+                  </span>
+                  <div className="pq-main">
+                    <strong>{row.title}</strong>
+                    <span className="muted small">
+                      {row.provider ?? "unknown"} · {row.kind} · rank {row.rank.toFixed(0)}
+                      {row.offer_state ? ` · ${row.offer_state}` : ""}
+                    </span>
+                    <span className="pq-chips">
+                      {(row.velocity ?? 0) > 0 && (
+                        <span className="pill pill-accent" title="Score gained per hour between radar observations">
+                          🔥 {(row.velocity as number).toFixed(1)}/h
+                        </span>
+                      )}
+                      {(row.corroboration ?? 0) >= 2 && (
+                        <span className="pill" title="Independent sources on this story">
+                          🧵 {row.corroboration} sources
+                        </span>
+                      )}
+                      {(row.evidence_count ?? 0) > 0 && (
+                        <span className="pill" style={{ color: "#3fb950" }} title="Evidence snapshots on the offer">
+                          🧪 {row.evidence_count}
+                        </span>
+                      )}
+                      {days !== null && (
+                        <span
+                          className="pill"
+                          style={{ color: days <= 3 ? "#f85149" : undefined }}
+                          title="Freshness deadline"
+                        >
+                          {days < 0 ? "⏳ overdue" : `⏳ ${days}d`}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="pq-actions">
+                    <a className="btn btn-primary" href={action.href}>{action.label}</a>
+                    <QueueRowActions id={row.id} pinned={row.rank_pinned} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="card">
