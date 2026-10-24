@@ -218,6 +218,147 @@ def test_media_gc_apply_deletes_and_audits(client):
     assert marker + "-apply" in audit
 
 
+# ------------------------------------- media GC G27: reference-aware sweep
+
+def _schedule_for_render(offer_id: str, render_id, marker: str, state: str):
+    """A schedule row in ANY given state referencing the render (pins it)."""
+    return _run(
+        """
+        INSERT INTO projects (offer_id, state) VALUES ($1, 'approved')
+        RETURNING id
+        """,
+        uuidlib.UUID(offer_id),
+    ) and _run(
+        """
+        INSERT INTO schedules (offer_id, project_id, platform, local_time,
+                               state, render_id, idempotency_key)
+        SELECT p.offer_id, p.id, 'youtube', now() + interval '1 day',
+               $3::schedule_state, $2, $4
+        FROM projects p WHERE p.offer_id = $1
+        RETURNING id
+        """,
+        uuidlib.UUID(offer_id), render_id, state, f"gc27-{marker}",
+    )[0]["id"]
+
+
+def test_media_gc_failed_paused_and_published_schedules_all_pin(client):
+    """G27: a schedule that is failed or paused (held) still pins its exact
+    render and capture artifacts — evidence for the retry decision and human
+    review must survive the retention sweep; ONLY a cancelled schedule
+    releases artifacts."""
+    for state in ("failed", "paused", "published", "approved", "draft"):
+        marker = f"{uuidlib.uuid4().hex[:8]}-{state}"
+        offer = _rendered_offer(client, marker)
+        render = _old_render(offer, marker)
+        _schedule_for_render(offer, render, marker, state)
+        refs = {i["ref"] for i in client.post(
+            "/media/gc", json={"dry_run": True, "retention_days": 90}
+        ).json()["items"]}
+        live = [ref for ref in refs if marker in ref]
+        assert live == [], (
+            f"a {state} schedule must pin its render artifacts; leaked {live}")
+
+
+def test_media_gc_cancelled_schedule_releases_its_own_cover_only(client):
+    """G27: a cancelled schedule's own cover file becomes collectible, and its
+    schedule row keeps the dangling path only as a dead record."""
+    marker = uuidlib.uuid4().hex[:8]
+    offer = _rendered_offer(client, marker)
+    _run(
+        """
+        INSERT INTO projects (offer_id, state) VALUES ($1, 'approved')
+        """,
+        uuidlib.UUID(offer),
+    )
+    rel = f"projects/gc/{marker}/cover.jpg"
+    _run(
+        """
+        INSERT INTO schedules (offer_id, project_id, platform, local_time,
+                               state, cover_path, created_at, idempotency_key)
+        SELECT p.offer_id, p.id, 'youtube', now() - interval '120 days',
+               'cancelled', $2, now() - interval '120 days', $3
+        FROM projects p WHERE p.offer_id = $1
+        """,
+        uuidlib.UUID(offer), rel, f"gc27-cov-{marker}",
+    )
+    refs = {i["ref"] for i in client.post(
+        "/media/gc", json={"dry_run": True, "retention_days": 90}).json()["items"]}
+    assert rel in refs, "a cancelled schedule's own cover is collectible"
+
+
+def test_media_gc_shared_file_reference_is_pinned_by_value_not_row(client):
+    """G27: pinning is by artifact REF STRING as well as by row id. Two
+    renders can point at the SAME cover file (shared export); GC of the
+    unpinned render must not delete a file a live schedule still needs."""
+    marker = uuidlib.uuid4().hex[:8]
+    shared = f"projects/gc/{marker}/shared-cover.jpg"
+    # offer A: pinned schedule → its render (and its cover) are pinned.
+    offer_a = _rendered_offer(client, marker + "-a")
+    render_a = _old_render(offer_a, marker + "-a")
+    _run("UPDATE renders SET cover_path = $2 WHERE id = $1",
+         render_a, shared)
+    _schedule_for_render(offer_a, render_a, marker + "-a", "scheduled")
+    # offer B: UNPINNED old render whose cover is THE SAME FILE.
+    offer_b = _rendered_offer(client, marker + "-b")
+    _run(
+        """
+        INSERT INTO renders (offer_id, preset, width, height, video_path,
+                             captions_path, cover_path, created_at)
+        VALUES ($1, 'landscape', 1920, 1080, $2, $3, $4,
+                now() - interval '120 days')
+        """,
+        uuidlib.UUID(offer_b),
+        f"projects/gc/{marker}-b/video.mp4",
+        f"projects/gc/{marker}-b/caps.vtt",
+        shared,
+    )
+    items = client.post("/media/gc",
+                        json={"dry_run": True, "retention_days": 90}).json()["items"]
+    by_ref = {i["ref"]: i["artifact"] for i in items}
+    assert shared not in by_ref, (
+        "a file shared with a pinned render must never be a GC candidate")
+    assert f"projects/gc/{marker}-b/video.mp4" in by_ref
+    assert f"projects/gc/{marker}-b/caps.vtt" in by_ref
+
+
+def test_media_gc_apply_rechecks_pins_inside_the_sweep_lock(client, tmp_path):
+    """G27: the GRACE between mark and sweep is honored by a SECOND pin check
+    inside the advisory-locked apply transaction — anything pinned after the
+    dry run (here: between mark and sweep) silently drops out, and the
+    schedule INSERT itself serializes on the same lock."""
+    marker = uuidlib.uuid4().hex[:8]
+    orphan_offer = _rendered_offer(client, marker)
+    _old_render(orphan_offer, marker)
+    # real file so a delete would be observable
+    rel = f"projects/gc/{marker}/video.mp4"
+    path = Path.cwd() / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"media-gc-g27")
+    try:
+        marked = client.post("/media/gc",
+                             json={"dry_run": True, "retention_days": 90}).json()
+        assert any(marker in i["ref"] for i in marked["items"]), \
+            "setup: the artifact is a candidate while unpinned"
+
+        # the pin arrives AFTER the dry-run mark, as a concurrent commit would
+        render_id = _run("SELECT id FROM renders WHERE video_path = $1",
+                         rel)[0]["id"]
+        _schedule_for_render(orphan_offer, render_id, marker, "scheduled")
+
+        applied = client.post("/media/gc",
+                              json={"dry_run": False, "retention_days": 90}).json()
+        assert applied["mode"] == "apply"
+        assert not any(marker in r for r in applied.get("removed_refs", [])), \
+            "the second pin check must drop a newly pinned artifact"
+        assert path.exists(), "the pinned artifact must survive the sweep"
+        # and the schedule that pins it was created through the same lock
+        # path (INSERT under MEDIA_GC_LOCK_KEY) — proven by this thread making
+        # both calls without deadlock.
+    finally:
+        import shutil
+        shutil.rmtree(Path.cwd() / f"projects/gc/{marker}", ignore_errors=True)
+
+
 # --------------------------------------------- trends summary is global (P2)
 
 def test_trends_summary_is_global_while_page_total_names_the_page(client):

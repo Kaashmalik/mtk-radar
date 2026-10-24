@@ -41,8 +41,10 @@ from api_hardening import (
 )
 from offer_freshness import freshness_problem
 
-_logger = logging.getLogger("mtk.schedules")
+from media_api import MEDIA_GC_LOCK_KEY
 from release_gate import describe as describe_problems
+
+_logger = logging.getLogger("mtk.schedules")
 from release_gate import offer_problems, release_problems
 from automation import (
     AutomationDenied,
@@ -454,25 +456,33 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
         f"{render['id']}:{account_id or ''}"
     )
     try:
-        row = await pool.fetchrow(
-            """
-            INSERT INTO schedules (offer_id, platform, local_time, timezone, privacy,
-                                   caption_variant, idempotency_key, version_hash, metadata,
-                                   language, content_variant_id, cover_path, pinned_comment,
-                                   metadata_variant, render_id, platform_account_id,
-                                   package_hash, render_sha256, metadata_hash, cover_sha256,
-                                   captions_sha256, youtube_playlist_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14,
-                    $15, $16, $17, $18, $19, $20, $21, $22)
-            ON CONFLICT (idempotency_key) DO NOTHING
-            RETURNING id, state::text AS state, idempotency_key
-            """,
-            offer_id, body.platform, body.local_time, body.timezone, body.privacy,
-            body.caption_variant, idempotency_key, version_hash, json.dumps(metadata),
-            body.language, body.content_variant_id, cover_path, pinned_comment,
-            scheduled_variant_key, render["id"], account_id, package_hash, render_sha256,
-            metadata_hash, cover_sha256, captions_sha256, body.youtube_playlist_id,
-        )
+        # G27 (evidence-to-video plan): package pinning serializes with media
+        # GC on the same advisory lock — a schedule can never gain a
+        # reference to a render/cover artifact between the GC's second pin
+        # check and its deletions (and waits for an in-flight sweep first).
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)",
+                                   MEDIA_GC_LOCK_KEY)
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO schedules (offer_id, platform, local_time, timezone, privacy,
+                                           caption_variant, idempotency_key, version_hash, metadata,
+                                           language, content_variant_id, cover_path, pinned_comment,
+                                           metadata_variant, render_id, platform_account_id,
+                                           package_hash, render_sha256, metadata_hash, cover_sha256,
+                                           captions_sha256, youtube_playlist_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14,
+                            $15, $16, $17, $18, $19, $20, $21, $22)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    RETURNING id, state::text AS state, idempotency_key
+                    """,
+                    offer_id, body.platform, body.local_time, body.timezone, body.privacy,
+                    body.caption_variant, idempotency_key, version_hash, json.dumps(metadata),
+                    body.language, body.content_variant_id, cover_path, pinned_comment,
+                    scheduled_variant_key, render["id"], account_id, package_hash, render_sha256,
+                    metadata_hash, cover_sha256, captions_sha256, body.youtube_playlist_id,
+                )
     except Exception as exc:  # noqa: BLE001
         # Never echo database error text to the caller; log it server-side.
         _logger.exception("schedule insert failed for offer %s", offer_id)
