@@ -21,7 +21,7 @@ import feedparser
 
 from .client import EgressPolicy, Fetcher
 from .models import RawItem
-from .trendcache import JsonCache, cached_json
+from .trendcache import JsonCache, cached_text
 
 _RSS = "https://trends.google.com/trending/rss"
 _GEO_RE = re.compile(r"^[A-Z]{2}$")
@@ -47,18 +47,22 @@ def fetch_google_trends_trending(
     own_fetcher = fetcher is None
     fetcher = fetcher or Fetcher()
     try:
-        def load() -> bytes:
+        def load() -> str:
             resp = fetcher.fetch_policy(
                 _RSS,
                 headers={"Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"},
                 params=params,
                 policy=policy,
             )
-            return resp.content
+            # G10: the payload is RSS/XML, not JSON — cache the exact TEXT via
+            # the typed text path. (It used to go into set_json, whose
+            # json.dumps raised TypeError on the bytes, so any configured
+            # cache broke every fetch. Live and cached parse inputs are now
+            # the same string.)
+            return resp.text
 
-        body = cached_json(cache, f"gtrends:{geo}", CACHE_TTL_S, load)
-        # A cached hit is already bytes; feedparser accepts both bytes and text.
-        parsed = feedparser.parse(body if isinstance(body, (bytes, bytearray)) else str(body).encode())
+        body = cached_text(cache, f"gtrends:{geo}", CACHE_TTL_S, load)
+        parsed = feedparser.parse(body)
 
         items: list[RawItem] = []
         for entry in parsed.entries[:30]:
