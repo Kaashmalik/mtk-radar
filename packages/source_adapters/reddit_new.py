@@ -1,10 +1,17 @@
 """Public subreddit collector (public JSON endpoint, Tier-B lead signals).
 
-Reads only what any anonymous visitor sees: ``/r/<sub>/new.json`` with a
-descriptive User-Agent, one small page per poll — squarely inside Reddit's
-polite-usage guidance and far below any quota surface. Upvote/comment counts
-give the radar a community-momentum signal. Posts are leads only: a popular
-thread proposes a topic, it never verifies an offer.
+G22 [S10]: OFF BY DEFAULT. This adapter reads only what any anonymous
+visitor sees (``/r/<sub>/new.json`` with a descriptive User-Agent, one
+small page per poll), but public visibility — or robots.txt tolerance — is
+not a license: without a documented access/use agreement this collector
+must not run. The module stays implemented and tested so approval flips a
+switch, not a rewrite: the registry's APPROVAL_PENDING gate keeps API
+creation and collection refused until MTK_ENABLE_REDDIT_ADAPTER=1 records
+the operator's lift, and the seed registers the source disabled.
+
+Upvote/comment counts give the radar a community-momentum signal. Posts
+are leads only: a popular thread proposes a topic, it never verifies an
+offer.
 """
 
 from __future__ import annotations

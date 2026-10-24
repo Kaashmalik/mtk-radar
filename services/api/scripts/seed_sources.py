@@ -140,6 +140,10 @@ SOURCES = [
                    "max_age_hours": 48, "limit": 20},
         "trust_tier": "B_discovery_lead",
         "polling_cadence": "6 hours",
+        # G22 [S10]: recorded disabled — approval is the only missing step.
+        # The API refuses to create an ENABLED reddit source until
+        # MTK_ENABLE_REDDIT_ADAPTER=1 documents the lift.
+        "enabled": False,
     },
     {
         "provider": "GitHub Stars",
@@ -197,8 +201,8 @@ async def main() -> None:
         await conn.execute(
             """
             INSERT INTO sources (provider, canonical_domain, category, adapter,
-                                 config, polling_cadence, trust_tier)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::text::interval, $7::trust_tier)
+                                 config, polling_cadence, trust_tier, enabled)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::text::interval, $7::trust_tier, $8::boolean)
             """,
             src["provider"],
             src.get("canonical_domain"),
@@ -207,6 +211,7 @@ async def main() -> None:
             json.dumps(src.get("config", {})),
             src.get("polling_cadence", "6 hours"),
             src["trust_tier"],
+            src.get("enabled", True),
         )
         created += 1
         print(f"+ registered: {src['provider']} [{src['adapter']}]")
