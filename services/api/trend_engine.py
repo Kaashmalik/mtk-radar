@@ -35,6 +35,10 @@ _AUDIENCE_CATEGORIES: Final[dict[str, int]] = {
     "student_programs": 18, "developer_tools": 14, "model_hubs": 12,
     "cloud_platforms": 14, "domains_hosting": 12, "ai_tools": 12,
     "education": 14, "startup_perks": 13, "saved_links": 7,
+    # Trend-signal sources (WP-A, enhancement plan 2026-10-24): papers score a
+    # touch higher than social feeds because an upvoted paper implies many
+    # independent researchers judged the story interesting.
+    "research_papers": 12, "trend_signals": 8,
 }
 
 _SOURCE_TIER: Final[dict[str, int]] = {

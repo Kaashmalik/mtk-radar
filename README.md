@@ -121,7 +121,9 @@ apps/dashboard/            # Web admin console (Next.js)
 apps/extension/            # Save-current-page extension (Manifest V3)
 services/api/              # API service (FastAPI + Postgres)
 services/api/db/migrations/001_init.sql
-workers/collectors/        # Source collection jobs (RSS, GitHub, page watch)
+workers/collectors/        # Source collection jobs (RSS, GitHub, page watch +
+                           # trend signals: HF papers, HN, Reddit, star velocity,
+                           # Google Trends — Tier-B leads for the radar)
 workers/verification/      # Extraction & evidence jobs
 workers/batch/             # Script generation + pipeline readiness
 workers/capture/           # Playwright capture session (human-operated)
@@ -238,6 +240,7 @@ browser step.
 
 - [`docs/implementation-wp01-2026-10-21.md`](docs/implementation-wp01-2026-10-21.md) — first implemented verification-integrity checkpoint, migration 012/API rollout notes, test coverage and explicit remaining safety limitations.
 - [`docs/automation-master-plan-2026-10-21.md`](docs/automation-master-plan-2026-10-21.md) — **dated 2026–2027 enhancement roadmap and code audit**: actual test results, implemented/remaining checklist, safety gaps, trend radar, premium video, light editor, local-model controls and ordered work packages. Use this for new enhancement work; historical completion claims below are not production certification.
+- [`docs/enhancement-plan-2026-10-24-trends-automation.md`](docs/enhancement-plan-2026-10-24-trends-automation.md) — **Trend Radar v2, research-to-video queue, one-click scheduling, evidence-based hashtags, and the cost engine** — work packages WP-A…WP-H with acceptance criteria (extends the 10-22 audit and this master plan).
 - [`docs/coding-model-handoff-2026-10-21.md`](docs/coding-model-handoff-2026-10-21.md) — compact implementation instructions and acceptance/report rules for GLM, MiniMax or other coding assistants.
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
 - [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
