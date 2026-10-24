@@ -70,3 +70,47 @@ deliberately committed a production data export (`f079d84`,
 `docs/marshmallow-contact-location-…json`) as an intentional archive — kept on
 main per the owner's decision; it contains customer contact rows, so repo
 visibility choices should account for it.
+
+## EP-02 — Discovery & observable momentum (G06–G11, G13–G16, G22)
+
+COMPLETE 2026-10-24. Every gap in the EP-02 register landed as its own
+reviewed commit; the acceptance fixtures from the plan (HN 100→160 ⇒ raw
+30 points/h with no duplicate story; unchanged fields cannot fake a rising
+trend; cached Google Trends parses; every adapter kind creatable through the
+API) are integration-tested against the real Postgres.
+
+| Gap | Commit / evidence |
+|---|---|
+| G06 adapter registry | `911069a` — `packages/source_adapters/registry.py` (AdapterSpec: kind/label/collector_polled/required config) is the single source of truth; `schemas.AdapterKind` extended to all ten kinds with import-time + guard-test sync; `SourceIn` rejects kinds whose required config is missing at creation; collector raises on unknown kinds (was silent `[]`); dashboard form + seeds validate through the same rules |
+| G22 Reddit off by default | `9d99665` — registry `APPROVAL_PENDING` gate: API refuses ENABLED reddit sources (disabled recording allowed, `MTK_ENABLE_REDDIT_ADAPTER=1` lifts), collector refuses to poll even pre-gate rows, seed ships `enabled: false` |
+| G10 Trends cache byte/JSON mismatch | `ec0a198` — symmetric TEXT cache path (`get_text`/`set_text`/`cached_text`); Google Trends caches `resp.text`; cached parse identical to live parse; `set_text` refuses non-str |
+| G11 cache hits 500 | `bbb06a6` — `cache_get_json_with_ttl` returns (value, remaining TTL); `_pg_cache_get` carries `expires_at` distance; every promoted hit keeps its original expiry (bounded 30 s fallback); outage combinations are clean misses |
+| G14 GitHub auth/conditionally | `d3e52d3` — `FetchResult.headers` carries final response headers; github_stars actually sends `Authorization: Bearer`, If-None-Match ETags (30 d TTL), fail-closed on `x-ratelimit-remaining: 0`, Retry-After surfaced on 403/429 |
+| G07 observed context + observations | `7ce1e3b` — migration 037: items.text/selection/account_handle/extra (bounded 4000/500/30) + APPEND-ONLY `source_observations` (trigger refuses UPDATE/DELETE) with entity_key, typed measurements, payload_hash, provenance; every retrieval appends one observation even when the item dedupes; collector forwards `RawItem.extra` |
+| G08 engagement momentum | `e6a4d68` — `trend_engine.engagement_rate()` (raw count delta/h; priorities points>upvotes>stars>comments; flat stays flat, missing unknown, cooling negative) + `engagement_bump()` (log-scaled, cap 15); `velocity` demoted to recorded diagnostic, `velocity_bump` deleted; migration 038 `trend_candidates.engagement`; github_stars stable entity id `gh-stars:{repo}` |
+| G09 cross-URL story clustering | `2431ca2` — `trend_engine.story_key()` (normalized headline; case/punct/whitespace-insensitive; thin titles never fabricate a cluster); migration 039 `items.story_key` + COALESCE expression index; scan computes corroboration/duplicates over the whole story cluster; items dedup rules untouched |
+| G15 queue evidence score | `b0e4c2c` — evidence component: fresh window 14 d (captured_at, robots_allowed, fetch 200/legacy); support 40 official / 25 fresh third-party / 0 stale-only; claims 30 × declared-required-claims coverage; independence 30 × min(1, distinct fresh sources/2); safety is a HARD eligibility gate (`ELIGIBLE_OFFER_STATES`) — expired/corrected/evidence_needed offers never appear ready |
+| G16 real cooling duration | `b0e4c2c` — cooling measured from last MEANINGFUL growth (`COALESCE(last_growth_at, first_at)`), so the daily rescan cadence cannot reset the clock; archive when latest velocity ≤ 0 AND cooling since > 7 days |
+| G13 compose env matrix | `4481042` — collectors +REDIS_URL; verification +VERIFY_LLM_*; api +VERIFY_LLM_*/TTS_*/COST_*; render +TTS_* incl. _UR overrides; publishing +INSTAGRAM_*/FACEBOOK_APP_*/MTK_PUBLIC_MEDIA_BASE_URL/MTK_TOKEN_REFRESH_*; metrics +INSTAGRAM_*; guard test enforces the matrix BOTH directions (documented var → container receives it; compose var → documented or explicitly internal) and re-checks itself against the code that reads each var |
+
+**Checks executed for this EP** (at documentation commit): unit suite
+951 passed, 3 skipped; **620 API integration tests green** against local
+Postgres 16 with migrations 001→039 applied by the real migration runner;
+`ruff --select E9,F63,F7,F82,F821` clean; `docker compose config -q` clean;
+dashboard `tsc --noEmit` clean (offer-schema + dashboard); extension
+`node --check` clean. New failure-path tests: identical payload hashes cannot
+fake new information, append-only trigger refuses rewrites, zero-evidence
+queue rows rank at exactly 0.35·trend+0.20·freshness+0.15·fit, 8-day cooling
+with daily fresh observations archives while 3-day cooling stays ready,
+expired offers stay off the ready list despite fresh evidence.
+
+**Still unproven:** remote CI execution (owner billing lock — run 40077225919
+blocked, logged not touched); live adapter behavior against the real HF/HN/
+Reddit/Google/GitHub endpoints and live rate-limit refusals (fixture-tested
+only — including whether GitHub's real 304/ETag flows match the fake); Redis
+path of the new text cache (memory layer covered; REDIS_URL-dependent tests
+need a live Redis); production collector runs under Docker where the matrix
+now applies (config asserted statically + `compose config`, not started here);
+story_key clustering quality on real-world headline corpora (conservative by
+design — distinct stories must not merge, but recall on real syndication
+title variants beyond the tested patterns is operator-observed territory).
