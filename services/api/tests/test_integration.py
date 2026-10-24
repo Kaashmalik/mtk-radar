@@ -264,6 +264,7 @@ from locks_api import router as _locks_router
 from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
 from trends_api import router as _trends_router
+from queue_api import router as _queue_router
 from content_studio_api import router as _studio_router
 from worker_health import EXPECTED_WORKERS
 from worker_health import router as _workers_router
@@ -317,7 +318,7 @@ def auth_client(client):
               _media_router, _settings_router, _analytics_router, _health_router,
               _locks_router, _automation_router, _studio_router, _attention_router,
               _workers_router, _upload_sessions_router, _jobs_router,
-              _metrics_router, _trends_router):
+              _metrics_router, _trends_router, _queue_router):
         app2.include_router(r)
     # /sources + poll-result are declared on the main app with @app directly,
     # not on any router — mount the SAME handlers here so the collect-job
@@ -4766,3 +4767,169 @@ def test_trend_scan_result_rearms_the_recurring_job(client):
         "SELECT status, attempts FROM jobs WHERE dedupe_key = 'trend_scan'"
     )[0]
     assert row["status"] == "pending" and row["attempts"] == 0
+
+
+# ------------------------------------------------ production queue (WP-C)
+
+def _mk_trend(marker):
+    return _run(
+        """
+        INSERT INTO trend_candidates (item_id, title, url, source_provider,
+                                      source_category, score, freshness_score,
+                                      velocity, corroboration, signals, status)
+        VALUES (NULL, $2, 'https://example.com/trend-' || $1, 'Acme Domains',
+                'domains_hosting', 80, 60, 1.5, 3,
+                '{"velocity":1.5,"corroborating_sources":3}'::jsonb, 'radar')
+        RETURNING id
+        """,
+        marker, f"Hot trend {marker}",
+    )[0]["id"]
+
+
+def test_trend_promote_creates_offer_and_queue_row_in_one_transaction(client):
+    """WP-C bridge: one click turns a radar topic into a verified-track offer
+    AND a ranked queue row — transactionally, audited, human-gated upstream
+    done inside an existing human workflow; nothing downstream bypasses a
+    gate."""
+    marker = __import__("uuid").uuid4().hex
+    trend_id = _mk_trend(marker)
+
+    promoted = client.post(f"/trends/{trend_id}/promote", headers=AUTH,
+                           json={"preset_fit": 70, "kind": "timely"})
+    assert promoted.status_code == 201, promoted.text
+    body = promoted.json()
+    assert body["offer"]["state"] == "candidate", "a trend proposes, never verifies"
+    assert body["trend"]["status"] == "promoted"
+
+    # One queue row whose trend snapshot preserved the promotion-time numbers.
+    row = _run(
+        "SELECT offer_id, trend_id, trend_snapshot::text AS snap, kind, preset_fit "
+        "FROM production_queue WHERE trend_id = $1",
+        trend_id,
+    )
+    assert row, "the queue row must exist"
+    import json as _json
+    snap = _json.loads(row[0]["snap"])
+    assert snap["score"] == 80 and snap["corroboration"] == 3
+    assert row[0]["kind"] == "timely" and row[0]["preset_fit"] == 70
+
+    # promote twice → one row only (409 on the retry), trend status final.
+    again = client.post(f"/trends/{trend_id}/promote", headers=AUTH, json={})
+    assert again.status_code == 409, again.text
+
+    listed = client.get("/production-queue").json()["queue"]
+    entry = next(q for q in listed if q["trend_id"] == str(trend_id))
+    # Documented rank formula: 0.35·trend + 0.30·evidence + 0.20·fresh + 0.15·fit
+    expected = round(0.35 * 80 + 0.30 * 0 + 0.20 * 60 + 0.15 * 70, 2)
+    assert entry["rank"] == expected, (entry["rank"], expected)
+    assert entry["corroboration"] == 3 and entry["evidence_count"] == 0
+
+    # Evidence lifts the rank on read (never a stored, drifting number).
+    _run(
+        """
+        INSERT INTO evidence (offer_id, url, content_hash, excerpt)
+        VALUES ($1, 'https://example.com/ev', 'hash-' || $2, 'official page')
+        """,
+        row[0]["offer_id"], marker,
+    )
+    relisted = client.get("/production-queue").json()["queue"]
+    entry2 = next(q for q in relisted if q["trend_id"] == str(trend_id))
+    assert entry2["rank"] == round(expected + 0.30 * 25, 2), (entry2["rank"], expected)
+    assert entry2["evidence_count"] == 1
+
+    # Operator pin outranks a higher computed rank.
+    high = _mk_trend(marker + "-b")
+    _run("UPDATE trend_candidates SET score = 95 WHERE id = $1", high)
+    client.post(f"/trends/{high}/promote", headers=AUTH, json={})
+    rows = _run(
+        "SELECT id FROM production_queue WHERE trend_id = ANY($1::uuid[]) "
+        "ORDER BY created_at",
+        [trend_id, high],
+    )
+    reordered = client.post("/queue/reorder", headers=AUTH,
+                            json={"ids": [str(rows[0]["id"]), str(rows[1]["id"])]})
+    assert reordered.status_code == 200, reordered.text
+    pinned = client.get("/production-queue").json()["queue"]
+    assert pinned[0]["trend_id"] == str(trend_id), "pinned row orders first"
+
+    # Archive with a reason; the row leaves the ready list and double-archive 404s.
+    archived = client.post(f"/queue/{rows[0]['id']}/archive", headers=AUTH,
+                           json={"reason": "covered in a previous upload"})
+    assert archived.status_code == 200, archived.text
+    ready = client.get("/production-queue").json()["queue"]
+    assert all(q["id"] != str(rows[0]["id"]) for q in ready)
+    assert ready and ready[0]["id"] == str(rows[1]["id"]), \
+        "the survivor keeps its operator pin"
+    repeat = client.post(f"/queue/{rows[0]['id']}/archive", headers=AUTH,
+                         json={"reason": "again"})
+    assert repeat.status_code == 404
+    trail = _run(
+        "SELECT action FROM audit_log WHERE entity = 'production_queue' "
+        "AND entity_id = $1 ORDER BY created_at",
+        rows[0]["id"],
+    )
+    assert {r["action"] for r in trail} >= {"queue:reorder", "queue:archive"}
+
+
+def test_production_queue_self_expires_with_reasons(client):
+    """Stale rows self-archive: offer expired, deadline passed, trend cooled
+    for 7 days — the honest answer to a dashboard that says 'refresh N stale
+    leads' forever."""
+    marker = __import__("uuid").uuid4().hex
+
+    offer_id = _run(
+        """
+        INSERT INTO offers (title, provider, category, offer_type, state)
+        VALUES ($1, 'Acme', 'domains_hosting', 'free_trial', 'expired')
+        RETURNING id
+        """,
+        f"Expired offer {marker}",
+    )[0]["id"]
+    _run(
+        "INSERT INTO production_queue (offer_id, title) VALUES ($1, $2)",
+        offer_id, f"row-offer {marker}",
+    )
+
+    _run(
+        "INSERT INTO production_queue (title, expires_at) VALUES ($1, now() - interval '1 day')",
+        f"row-deadline {marker}",
+    )
+
+    cooled_trend = _mk_trend(marker + "-cool")
+    _run(
+        "INSERT INTO trend_observations (candidate_id, score, velocity, sources, "
+        "observed_at) VALUES ($1, 40, -0.5, 1, now() - interval '8 days')",
+        cooled_trend,
+    )
+    _run("INSERT INTO production_queue (trend_id, title) VALUES ($1, $2)",
+         cooled_trend, f"row-cooled {marker}")
+
+    healthy_trend = _mk_trend(marker + "-healthy")
+    _run("INSERT INTO production_queue (trend_id, title) VALUES ($1, $2)",
+         healthy_trend, f"row-healthy {marker}")
+
+    expiry = client.post("/production-queue/expire", headers=SVC)
+    assert expiry.status_code == 200, expiry.text
+    counts = expiry.json()["reasons"]
+    assert counts["offer_expired"] == 1, counts
+    assert counts["deadline_passed"] == 1, counts
+    assert counts["trend_cooled"] == 1, counts
+
+    ready = client.get("/production-queue").json()["queue"]
+    titles = {q["title"] for q in ready}
+    assert f"row-healthy {marker}" in titles
+    assert f"row-cooled {marker}" not in titles
+
+    archived = _run(
+        "SELECT title, archived_reason FROM production_queue WHERE status = 'archived' "
+        "AND title LIKE '%' || $1",
+        marker,
+    )
+    reasons = {a["title"]: a["archived_reason"] for a in archived}
+    assert reasons[f"row-offer {marker}"] == "offer_expired"
+    assert reasons[f"row-deadline {marker}"] == "deadline_passed"
+    assert reasons[f"row-cooled {marker}"] == "trend_cooled"
+
+    # Idempotent: nothing left to expire.
+    second = client.post("/production-queue/expire", headers=SVC)
+    assert second.json()["expired"] == 0

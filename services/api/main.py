@@ -45,6 +45,7 @@ from renders_api import router as renders_router
 from schedules_api import router as schedules_router
 from settings_api import router as settings_router
 from trends_api import router as trends_router
+from queue_api import router as queue_router
 from worker_health import router as workers_router
 from upload_sessions_api import router as upload_sessions_router
 from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
@@ -103,6 +104,7 @@ app.include_router(jobs_router)
 app.include_router(platforms_router)
 app.include_router(analytics_router)
 app.include_router(trends_router)
+app.include_router(queue_router)
 app.include_router(studio_router)
 app.include_router(attention_router)
 app.include_router(workers_router)

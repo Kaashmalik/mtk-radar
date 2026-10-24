@@ -210,9 +210,11 @@ def test_assisted_policy_scripts_but_leaves_approval_to_a_human():
     assert report["scripts_created"] == 1
     assert report["offers_auto_approved"] == 0
     assert report["posts_auto_scheduled"] == 0
-    # The trend-scan claim may precede it (assisted collects automatically);
-    # scripting is the only state-CHANGING post, approval stays human.
-    changing = [p for p, _ in api.posts if p not in ("/jobs/claim", "/trends/scan-result")]
+    # The trend-scan claim + queue-expiry housekeeping may precede it
+    # (assisted collects automatically); scripting is the only state-CHANGING
+    # post, approval stays human.
+    housekeeping = {"/jobs/claim", "/trends/scan-result", "/production-queue/expire"}
+    changing = [p for p, _ in api.posts if p not in housekeeping]
     assert changing == ["/offers/off-1/script"]
 
 

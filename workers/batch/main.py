@@ -156,6 +156,22 @@ class Batch:
         self._scan_due = now_m + TREND_SCAN_INTERVAL_S
         return self.scan_trends_once()
 
+    def expire_queue(self, policy: Optional[dict]) -> int:
+        """Self-archive stale production-queue rows (offer expired, deadline
+        passed, or the trend cooled for 7 days). Read-only housekeeping with
+        a server-side reason attached — never touches a human gate."""
+        if not self._stage_auto(policy, "collect", default=True):
+            return 0
+        try:
+            resp = self.api.post("/production-queue/expire")
+            if resp.status_code >= 300:
+                log.warning("queue expiry refused: HTTP %s", resp.status_code)
+                return 0
+            return int((resp.json() or {}).get("expired", 0))
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("queue expiry skipped: %s", exc)
+            return 0
+
     # ------------------------------------------------------------- steps
 
     def generate_scripts(self) -> int:
@@ -412,6 +428,7 @@ class Batch:
 
         started_auto = self._stage_auto(policy, "script", default=True)
         trends_scanned = self.maybe_scan_trends(policy)
+        queue_expired = self.expire_queue(policy)
         created = self.generate_scripts() if started_auto else 0
         approved = 0
         scheduled = 0
@@ -422,6 +439,7 @@ class Batch:
 
         report = self.readiness()
         report["trends_scanned"] = trends_scanned
+        report["queue_expired"] = queue_expired
         report["scripts_created"] = created
         report["offers_auto_approved"] = approved
         report["posts_auto_scheduled"] = scheduled

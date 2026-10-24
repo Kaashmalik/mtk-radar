@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
@@ -407,3 +407,120 @@ async def set_trend_status(trend_id: uuid.UUID, body: TrendStatusIn) -> dict:
     await audit(pool, actor="operator", action=f"trend:{body.status}",
                 entity="trend_candidates", entity_id=trend_id)
     return {"id": str(row["id"]), "status": row["status"]}
+
+
+class TrendPromoteIn(BaseModel):
+    """Optional operator overrides at promotion time."""
+
+    title: Optional[str] = Field(default=None, max_length=300)
+    category: Optional[str] = Field(default=None, max_length=60)
+    preset_fit: Optional[int] = Field(default=None, ge=0, le=100)
+    kind: str = Field(default="timely", pattern="^(timely|evergreen)$")
+    expires_at: Optional[str] = None  # ISO date/datetime string when set
+
+
+@router.post("/{trend_id}/promote", status_code=201)
+async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
+                        request: Request) -> dict:
+    """Promote a radar topic to the production queue (offer + row, one tx).
+
+    Closes the radar dead-end: `promoted` used to be a status no endpoint
+    could set, and scored topics needed manual re-finding in the inbox. This
+    creates the offer-from-trend (state `candidate` — a proposal like any
+    other, still requiring official verification evidence) AND its production
+    queue row in ONE transaction, then marks the trend `promoted`. Every step
+    is audited; human gates downstream are untouched.
+    """
+    import datetime as _dt
+
+    import queue_api
+
+    pool = db.get()
+    actor = "operator"
+    trend = await pool.fetchrow(
+        """
+        SELECT id, title, url, source_provider, source_category,
+               score::float8 AS score, velocity, peak_score::float8 AS peak_score,
+               corroboration, freshness_score::float8 AS freshness_score,
+               status
+        FROM trend_candidates WHERE id = $1
+        """,
+        trend_id,
+    )
+    if not trend:
+        raise HTTPException(status_code=404, detail="trend candidate not found")
+    existing = await pool.fetchval(
+        "SELECT id::text FROM production_queue WHERE trend_id = $1", trend_id
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="trend already on the production queue")
+
+    expires_at = None
+    if body.expires_at is not None:
+        try:
+            expires_at = _dt.datetime.fromisoformat(str(body.expires_at).replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422,
+                                detail="expires_at must be an ISO date/datetime") from None
+
+    snapshot = {
+        "score": float(trend["score"]),
+        "velocity": float(trend["velocity"] or 0.0),
+        "peak_score": float(trend["peak_score"] or 0.0),
+        "corroboration": int(trend["corroboration"] or 0),
+        "url": str(trend["url"]),
+    }
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            offer = await conn.fetchrow(
+                """
+                INSERT INTO offers (title, provider, category, offer_type,
+                                    redemption_url, state)
+                VALUES ($1, $2, $3, 'trend_topic', $4, 'candidate')
+                RETURNING id, state::text AS state
+                """,
+                body.title or trend["title"] or str(trend["url"]),
+                trend["source_provider"] or "unknown",
+                body.category or trend["source_category"] or "trend_signals",
+                trend["url"],
+            )
+            queue_row = await conn.fetchrow(
+                """
+                INSERT INTO production_queue
+                    (offer_id, trend_id, title, provider, category, kind,
+                     preset_fit, trend_snapshot, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+                RETURNING id
+                """,
+                offer["id"], trend["id"],
+                body.title or trend["title"], trend["source_provider"],
+                body.category or trend["source_category"],
+                body.kind, body.preset_fit, _json(snapshot), expires_at,
+            )
+            await conn.execute(
+                "UPDATE trend_candidates SET status = 'promoted', updated_at = now() "
+                "WHERE id = $1",
+                trend_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO audit_log (actor, action, entity, entity_id, detail)
+                VALUES ($1, 'trend:promoted', 'production_queue', $2, $3::jsonb)
+                """,
+                actor, queue_row["id"], _json({
+                    "trend_id": str(trend["id"]),
+                    "offer_id": str(offer["id"]),
+                    "snapshot": snapshot,
+                }),
+            )
+    return {
+        "offer": {"id": str(offer["id"]), "state": offer["state"]},
+        "queue_id": str(queue_row["id"]),
+        "trend": {"id": str(trend["id"]), "status": "promoted"},
+        "message": ("Promoted to the production queue. The offer is still a "
+                    "candidate — verification evidence decides nothing else."),
+    }
+
+
+def _json(value) -> str:
+    return json.dumps(value, default=str)

@@ -85,6 +85,57 @@ export function TrendAction({ id, status }: { id: string; status: string }) {
   );
 }
 
+/** Promote a radar topic to the production queue: creates the offer
+ * (candidate) AND the queue row in one transaction — the verified track
+ * starts here, human gates downstream are untouched (WP-C). */
+export function PromoteButton({ id, status }: { id: string; status: string }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  if (status === "promoted") {
+    return <span className="tag tag-accent">on the queue</span>;
+  }
+
+  async function promote() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await clientFetch(`/trends/${id}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "timely" }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { detail?: string };
+      if (!res.ok) {
+        setMessage(body.detail ?? `HTTP ${res.status}`);
+        return;
+      }
+      setMessage("Promoted → /queue");
+      router.refresh();
+    } catch {
+      setMessage("API unreachable");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+      <button
+        type="button"
+        className="btn btn-primary"
+        style={{ padding: "0.2rem 0.55rem", fontSize: "0.72rem" }}
+        disabled={busy}
+        onClick={promote}
+      >
+        {busy ? "Promoting…" : "Promote → queue"}
+      </button>
+      {message && <span className="small muted" role="status">{message}</span>}
+    </span>
+  );
+}
+
 export function CompetitorEvidence({ id }: { id: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
