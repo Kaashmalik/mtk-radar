@@ -4,4 +4,4 @@ asyncpg==0.32.0
 pydantic==2.14.1
 pydantic-settings==2.16.1
 # optional cache layer (v0.22) — the system runs without it
-redis==5.2.1
+redis==8.1.0
