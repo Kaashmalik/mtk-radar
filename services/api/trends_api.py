@@ -1,14 +1,22 @@
-"""Trend radar API (v0.27).
+"""Trend radar API (v0.27 → v0.34 Trend Radar v2).
 
 Turns the inbox into a scored, explainable topic radar. Scanning is explicit
-(operator or scheduler), idempotent by canonical URL, and read-only with
-respect to offers: a trend is a proposal, never a verification.
+(operator or the durable `trend_scan` job), idempotent by canonical URL, and
+read-only with respect to offers: a trend is a proposal, never a verification.
+
+v2 (enhancement plan 2026-10-24, WP-B): the scan is INCREMENTAL — items are
+scored on arrival and a candidate with a stale `updated_at` is re-scored, so
+every pass appends a `trend_observations` row. Velocity (score delta per hour,
+EMA-smoothed) and corroboration (independent sources on the same story) become
+real, capped, explainable demand inputs instead of "the item is old".
 """
 
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -24,13 +32,28 @@ from pagination import (
     set_next_cursor,
 )
 from settings_store import audit
-from trend_engine import apply_competitor_evidence, radar_bands, score_item
+from trend_engine import (
+    apply_competitor_evidence,
+    radar_bands,
+    score_item,
+    smooth_velocity,
+)
 
 router = APIRouter(prefix="/trends", tags=["trends"])
+
+#: A candidate is re-scored when its previous observation is older than this.
+_RESCAN_AFTER_H = max(1, int(os.environ.get("MTK_TREND_RESCAN_H", "6")))
+#: Healthy-scan re-arm interval for the durable `trend_scan` job.
+_SCAN_INTERVAL_S = max(300, int(os.environ.get("MTK_TREND_SCAN_INTERVAL_S", "1800")))
 
 
 class TrendStatusIn(BaseModel):
     status: str = Field(pattern="^(radar|shortlisted|promoted|dismissed)$")
+
+
+class TrendScanResultIn(BaseModel):
+    ok: bool
+    detail: Optional[str] = Field(default=None, max_length=2000)
 
 
 class CompetitorIn(BaseModel):
@@ -77,7 +100,8 @@ async def list_trends(
         SELECT id, item_id, title, url, source_provider, source_category,
                country_scope, language, demand_score, freshness_score,
                feasibility_score, competition_gap, audience_fit, monetization,
-               score, score_reason::text AS score_reason, signals::text AS signals,
+               score, velocity, peak_score::float8 AS peak_score, corroboration,
+               score_reason::text AS score_reason, signals::text AS signals,
                status, created_at, updated_at
         FROM trend_candidates
         WHERE ($1::text IS NULL OR status = $1)
@@ -113,51 +137,109 @@ async def list_trends(
 
 @router.post("/scan", status_code=201)
 async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
-    """Score inbox items into the radar (idempotent on canonical URL)."""
+    """Score inbox items into the radar (idempotent on canonical URL).
+
+    v2 incremental semantics: first-time items are scored once (and leave the
+    unprocessed inbox); a candidate whose last observation is older than
+    `_RESCAN_AFTER_H` is RE-SCORED, producing a `trend_observations` row that
+    feeds velocity (score/hour) and the peak score. Re-scoring never marks the
+    item unprocessed — it is still the same candidate URL.
+    """
     pool = db.get()
+    now = datetime.now(timezone.utc)
     rows = await pool.fetch(
         """
         SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
                i.duplicate_group, s.provider AS source_provider,
                s.category AS source_category, s.trust_tier::text AS trust_tier,
-               s.country_scope
+               s.country_scope,
+               c.id AS candidate_id,
+               c.score::float8 AS prev_score,
+               c.velocity AS prev_velocity,
+               c.peak_score::float8 AS prev_peak,
+               c.updated_at AS prev_updated_at,
+               (i.processed = FALSE) AS is_new_item
         FROM items i
         LEFT JOIN sources s ON s.id = i.source_id
+        LEFT JOIN trend_candidates c ON c.url = COALESCE(i.canonical_url, i.url)
         WHERE i.processed = FALSE
+           OR (c.id IS NOT NULL
+               AND c.updated_at < now() - make_interval(hours => $2))
         ORDER BY COALESCE(i.published_at, i.observed_at) DESC
         LIMIT $1
         """,
         limit,
+        _RESCAN_AFTER_H,
     )
     created = 0
     updated = 0
-    scored_ids = []
+    rescored = 0
+    scored_new_ids = []
+    handled_candidates: set[uuid.UUID] = set()
+    handled_urls: set[str] = set()
     for item in rows:
         data = dict(item)
         data["url"] = data.get("canonical_url") or data.get("url")
         if not data["url"]:
             continue
+        if data["url"] in handled_urls or (
+            data.get("candidate_id")
+            and uuid.UUID(str(data["candidate_id"])) in handled_candidates
+        ):
+            # Same canonical URL observed by several inbox items: the first
+            # row this pass already scored the candidate (the JOIN snapshot
+            # predates the candidate this pass created). Only mark the
+            # remaining items processed instead of double-inserting history.
+            if data.get("is_new_item"):
+                scored_new_ids.append(data["id"])
+            continue
+        handled_urls.add(data["url"])
         provider = data.get("source_provider") or ""
         existing_offers = await pool.fetchval(
             "SELECT COUNT(*) FROM offers WHERE provider ILIKE $1", f"%{provider}%"
         ) if provider else 0
         duplicates = 0
+        corroborating = 1
         if data.get("duplicate_group"):
             duplicates = await pool.fetchval(
                 "SELECT COUNT(*) FROM items WHERE duplicate_group = $1",
                 data["duplicate_group"],
             ) or 0
+            corroborating = await pool.fetchval(
+                """
+                SELECT COUNT(DISTINCT s.provider)::int
+                FROM items i2
+                JOIN sources s ON s.id = i2.source_id
+                WHERE i2.duplicate_group = $1 AND s.provider IS NOT NULL
+                """,
+                data["duplicate_group"],
+            ) or 1
+        corroborating = max(1, int(corroborating or 1))
+
+        # Pass 1: the content-only score (no momentum bump), so velocity
+        # measures how the story itself moved between observations.
+        raw = score_item(data, existing_offer_count=int(existing_offers or 0),
+                         duplicate_count=max(0, int(duplicates or 0) - 1),
+                         corroborating_sources=corroborating)
+        velocity = smooth_velocity(
+            data.get("prev_score"), raw["score"], data.get("prev_updated_at"),
+            now, data.get("prev_velocity") or 0.0,
+        )
+        # Pass 2: the stored score, with the measured momentum bump applied.
         scored = score_item(data, existing_offer_count=int(existing_offers or 0),
-                            duplicate_count=max(0, int(duplicates or 0) - 1))
+                            duplicate_count=max(0, int(duplicates or 0) - 1),
+                            velocity=velocity, corroborating_sources=corroborating)
+        peak = max(float(data.get("prev_peak") or 0.0), float(scored["score"]))
         row = await pool.fetchrow(
             """
             INSERT INTO trend_candidates
                 (item_id, title, url, source_provider, source_category,
                  country_scope, language, demand_score, freshness_score,
                  feasibility_score, competition_gap, audience_fit, monetization,
-                 score, score_reason, signals, status)
+                 score, velocity, peak_score, corroboration,
+                 score_reason, signals, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15::jsonb, $16::jsonb, 'radar')
+                    $14, $15, $16, $17, $18::jsonb, $19::jsonb, 'radar')
             ON CONFLICT (url) DO UPDATE SET
                 title = EXCLUDED.title,
                 source_provider = EXCLUDED.source_provider,
@@ -170,6 +252,9 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
                 audience_fit = EXCLUDED.audience_fit,
                 monetization = EXCLUDED.monetization,
                 score = EXCLUDED.score,
+                velocity = EXCLUDED.velocity,
+                peak_score = EXCLUDED.peak_score,
+                corroboration = EXCLUDED.corroboration,
                 score_reason = EXCLUDED.score_reason,
                 signals = EXCLUDED.signals,
                 updated_at = now()
@@ -181,32 +266,81 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
             scored["freshness_score"], scored["feasibility_score"],
             scored["competition_gap"], scored["audience_fit"],
             scored["monetization"], scored["score"],
+            float(scored["signals"]["velocity"]), peak, corroborating,
             json.dumps(scored["score_reason"]), json.dumps(scored["signals"]),
         )
         if row["inserted"]:
             created += 1
         else:
             updated += 1
-        scored_ids.append(data["id"])
+            if data.get("prev_updated_at") is not None:
+                rescored += 1
+        if row["id"]:
+            handled_candidates.add(uuid.UUID(str(row["id"])))
+        await pool.execute(
+            """
+            INSERT INTO trend_observations (candidate_id, score, velocity, sources)
+            VALUES ($1, $2, $3, $4)
+            """,
+            row["id"], scored["score"],
+            float(scored["signals"]["velocity"]), corroborating,
+        )
+        if data.get("is_new_item"):
+            scored_new_ids.append(data["id"])
 
-    # Scoring an item IS its processing. Without this the same newest `limit`
-    # inbox rows were re-scanned forever and the tail never reached the radar.
-    if scored_ids:
+    # Processing an item IS its scoring (first time only). Re-scored
+    # candidates stay processed; without this the newest inbox page was
+    # re-scanned forever and the tail never reached the radar.
+    if scored_new_ids:
         await pool.execute(
             "UPDATE items SET processed = TRUE WHERE id = ANY($1::uuid[])",
-            scored_ids,
+            scored_new_ids,
         )
 
     await audit(pool, actor="operator", action="trends:scan", entity="trend_candidates",
-                detail={"created": created, "updated": updated, "scanned": len(rows),
-                        "processed": len(scored_ids)})
+                detail={"created": created, "updated": updated, "rescored": rescored,
+                        "scanned": len(rows), "processed": len(scored_new_ids)})
     return {
         "scanned": len(rows),
         "created": created,
         "updated": updated,
-        "processed": len(scored_ids),
-        "message": "Radar refreshed — shortlist a lead, then verify it like any other offer.",
+        "rescored": rescored,
+        "processed": len(scored_new_ids),
+        "rescan_after_h": _RESCAN_AFTER_H,
+        "message": ("Radar refreshed — rising candidates carry a velocity "
+                    "score; shortlist a lead, then verify it like any other offer."),
     }
+
+
+@router.post("/scan-result")
+async def trend_scan_result(result: TrendScanResultIn) -> dict:
+    """The batch worker reports back after each `trend_scan` job claim.
+
+    Same recurring-job contract as the collectors' poll-result: a healthy scan
+    re-arms the job at `_SCAN_INTERVAL_S` with a fresh attempt budget; a failed
+    scan retries in 300s and keeps its attempts, so 5 consecutive failures
+    dead-letter it into operator attention (the cadence sweep in the batch
+    worker stays as the fail-open fallback)."""
+    pool = db.get()
+    delay_s = _SCAN_INTERVAL_S if result.ok else 300
+    await pool.execute(
+        """
+        INSERT INTO jobs (kind, payload, dedupe_key, max_attempts, run_after)
+        VALUES ('trend_scan', '{}'::jsonb, 'trend_scan', 5,
+                now() + make_interval(secs => $1::int))
+        ON CONFLICT (dedupe_key) DO UPDATE
+        SET status = CASE
+                WHEN $2 THEN 'pending'
+                WHEN jobs.attempts >= 5 THEN 'dead'
+                ELSE 'pending' END,
+            run_after = now() + make_interval(secs => $1::int),
+            attempts = CASE WHEN $2 THEN 0 ELSE jobs.attempts END,
+            last_error = $3,
+            lease_holder = NULL, lease_expires_at = NULL, updated_at = now()
+        """,
+        delay_s, result.ok, (result.detail or None),
+    )
+    return {"rearmed": True, "ok": result.ok, "run_after_s": delay_s}
 
 
 @router.post("/{trend_id}/competitors")

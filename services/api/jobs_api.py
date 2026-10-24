@@ -40,7 +40,8 @@ DEFAULT_RETRY_AFTER_S = 60  # seconds — default failure backoff
 router = APIRouter(tags=["jobs"])
 
 DEFAULT_LEASE_S = 900
-JOB_KINDS = ("publish_schedule", "render_package", "collect", "recheck", "notify")
+JOB_KINDS = ("publish_schedule", "render_package", "collect", "recheck", "notify",
+             "trend_scan")
 
 
 class JobIn(BaseModel):

@@ -313,18 +313,6 @@ def auth_client(client):
 
     app2 = fastapi.FastAPI()
 
-    @app2.on_event("startup")
-    async def _own_pool():
-        # app2's TestClient runs its own event loop; the main pool belongs to
-        # the `client` fixture's loop and asyncpg pools are loop-bound.
-        import db
-        await db.init(DSN)
-
-    @app2.on_event("shutdown")
-    async def _drop_own_pool():
-        import db
-        await db.close()
-
     for r in (_offers_router, _schedules_router, _renders_router, _captures_router,
               _media_router, _settings_router, _analytics_router, _health_router,
               _locks_router, _automation_router, _studio_router, _attention_router,
@@ -346,8 +334,16 @@ def auth_client(client):
     app2.include_router(_items_router)
     api_hardening.register(app2, token="svc-token", db_url=DSN)
     app2.include_router(api_hardening.router)
-    with TestClient(app2) as c:
-        yield c
+    # Share the SESSION event loop: asyncpg pools are loop-bound, and app2
+    # booting a pool of its own (`with TestClient(app2)`) repointed the
+    # module-global pool at this fixture's loop — later plain-`client`
+    # requests then failed with asyncpg "attached to a different loop"
+    # once fastapi/starlette were bumped (fastapi 0.146, starlette 1.9).
+    # Reusing the session portal keeps every request on the loop that owns
+    # the pool; app2 needs no lifespan because that pool already exists.
+    c = TestClient(app2)
+    c.portal = client.portal
+    yield c
 
 
 def _run(sql, *args):
@@ -4581,3 +4577,192 @@ def test_job_failure_without_retry_delay_gets_default_backoff(auth_client):
                "FROM jobs WHERE id = $1", uuidlib.UUID(jid))[0]
     assert row["status"] == "failed"
     assert row["delayed"] is True, "failure without retry_after_s must back off"
+
+
+def test_trend_radar_rescans_stale_candidates_records_velocity_and_rearms_job(client, source):
+    """Trend Radar v2 (WP-B): rescan-after-6h produces real velocity math.
+
+    A candidate whose last observation is stale is RE-SCORED (never re-marked
+    unprocessed), each pass appends a trend_observations row, rising scores
+    record positive velocity alongside a corroboration count of the distinct
+    providers that saw the story, and a reported scan re-arms the durable
+    `trend_scan` job with the collector contract (healthy → cadence budget,
+    repeated failures → dead-letter).
+    """
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+    source_id = uuidlib.UUID(source)
+    other_source = _run(
+        """
+        INSERT INTO sources (provider, canonical_domain, category, adapter, config,
+                             polling_cadence, trust_tier)
+        VALUES ($1, 'example.org', 'trend_signals', 'rss', '{}'::jsonb,
+                '6 hours', 'B_discovery_lead')
+        RETURNING id
+        """,
+        f"Other Provider {marker}",
+    )[0]["id"]
+
+    # Two sources observe the SAME story (duplicate_group) → corroboration.
+    # Distinct text hashes: 031's unique (canonical_url, text_hash) index —
+    # the API-side dedup key — would silently drop the second row otherwise.
+    group = f"group-{marker}"
+    _run(
+        """
+        INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                           observed_at, text_hash, duplicate_group)
+        VALUES ($1, $5, $2, $2, $3, now(), $6, $7),
+               ($4, $8, $2, $2, $3, now(), $9, $7)
+        """,
+        source_id,
+        f"https://example.com/story-{marker}",
+        "A page",
+        other_source,
+        f"story-a-{marker}",
+        f"hash-a-{marker}",
+        group,
+        f"story-b-{marker}",
+        f"hash-b-{marker}",
+    )
+
+    first = client.post("/trends/scan", params={"limit": 50})
+    assert first.status_code == 201, first.text
+    body = first.json()
+    # The DB is shared across the session — count only OUR story's effects,
+    # never the global inbox numbers (other tests may leave unprocessed
+    # items that this scan legitimately picked up too).
+    ours = _run(
+        """
+        SELECT processed, duplicate_group FROM items
+        WHERE source_id = $1 AND external_item_id IN ($2, $3)
+        """,
+        source_id, f"story-a-{marker}", f"story-b-{marker}",
+    )
+    assert all(r["processed"] for r in ours), "both items must be processed"
+    assert {r["duplicate_group"] for r in ours} == {group}
+
+    url = f"https://example.com/story-{marker}"
+    candidates = _run(
+        """
+        SELECT id, score::float8 AS score, velocity, corroboration,
+               peak_score::float8 AS peak
+        FROM trend_candidates WHERE url = $1
+        """,
+        url,
+    )
+    assert len(candidates) == 1, "two items, one story → exactly one candidate"
+    candidate = candidates[0]
+    cand_id = candidate["id"]
+    assert candidate["corroboration"] == 2, "two independent providers saw it"
+    assert candidate["velocity"] == 0, "first observation has no delta yet"
+
+    obs = _run(
+        "SELECT COUNT(*)::int AS n FROM trend_observations WHERE candidate_id = $1",
+        cand_id,
+    )[0]["n"]
+    assert obs == 1
+
+    # Age the observation past the rescan window, then let the SAME url gain
+    # a much stronger story (keyword-rich retitle) → rising score + velocity.
+    _run(
+        "UPDATE trend_candidates SET updated_at = now() - interval '7 hours' WHERE id = $1",
+        cand_id,
+    )
+    _run(
+        """
+        INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                           observed_at, text_hash, duplicate_group)
+        VALUES ($1, $2, $3, $3, $4, now(), $5, $6)
+        """,
+        source_id,
+        f"story-c-{marker}",
+        url,
+        "Free student cloud credits with trial eligibility — huge credits offer",
+        f"hash-c-{marker}",
+        group,
+    )
+
+    second = client.post("/trends/scan", params={"limit": 50})
+    assert second.status_code == 201, second.text
+    body2 = second.json()
+    assert body2["rescored"] >= 1, body2
+    third = _run(
+        "SELECT processed FROM items WHERE source_id = $1 AND external_item_id = $2",
+        source_id, f"story-c-{marker}",
+    )
+    assert third and third[0]["processed"], "the new item leaves the inbox"
+
+    after = _run(
+        """
+        SELECT score::float8 AS score, velocity, peak_score::float8 AS peak,
+               corroboration
+        FROM trend_candidates WHERE id = $1
+        """,
+        cand_id,
+    )[0]
+    assert after["score"] > candidate["score"], "stronger story rescored higher"
+    assert after["velocity"] > 0, "rising score must record positive velocity"
+    assert after["peak"] >= after["score"] - 0.01  # REAL column vs NUMERIC readback
+    obs2 = _run(
+        "SELECT COUNT(*)::int AS n FROM trend_observations WHERE candidate_id = $1",
+        cand_id,
+    )[0]["n"]
+    assert obs2 == 2
+
+    listed = client.get("/trends", params={"limit": 5})
+    rows = listed.json()["candidates"]
+    fields = rows[0].keys()
+    assert {"velocity", "peak_score", "corroboration"} <= set(fields)
+
+
+def test_trend_scan_result_rearms_the_recurring_job(client):
+    """/trends/scan-result mirrors the collectors' poll-result contract."""
+    # The migration arms the job once.
+    row = _run(
+        "SELECT id, status, attempts FROM jobs WHERE dedupe_key = 'trend_scan'"
+    )
+    assert row and row[0]["status"] in ("pending", "leased")
+
+    # Healthy report → pending at the scan interval, attempts reset.
+    ok = client.post("/trends/scan-result", json={"ok": True})
+    assert ok.status_code == 200, ok.text
+    row = _run(
+        """
+        SELECT status, attempts,
+               EXTRACT(epoch FROM (run_after - now()))::int AS due_in
+        FROM jobs WHERE dedupe_key = 'trend_scan'
+        """
+    )[0]
+    assert row["status"] == "pending" and row["attempts"] == 0
+    assert 600 <= row["due_in"] <= 7200, row["due_in"]
+
+    # Failures keep the attempt budget so five straight ones dead-letter.
+    # The worker flow is claim (attempts+1) → report; the job re-arms 300s out
+    # after each failure, so the test travels the clock between claims.
+    for expected in range(1, 6):
+        _run(
+            "UPDATE jobs SET run_after = now() WHERE dedupe_key = 'trend_scan' "
+            "AND status = 'pending'"
+        )
+        claimed = client.post("/jobs/claim", headers=SVC,
+                              json={"worker": "batch", "lease_s": 60,
+                                    "kinds": ["trend_scan"]})
+        assert claimed.status_code == 200, claimed.text
+        if not expected == 5:
+            assert claimed.json().get("claimed") is True
+        failed = client.post("/trends/scan-result", json={"ok": False, "detail": "boom"})
+        assert failed.status_code == 200, failed.text
+        row = _run(
+            "SELECT status, attempts FROM jobs WHERE dedupe_key = 'trend_scan'"
+        )[0]
+        if row["status"] == "dead":
+            break
+    assert row["status"] == "dead" and row["attempts"] == 5, row
+
+    # A later healthy report revives it (operator fixed the cause).
+    client.post("/trends/scan-result", json={"ok": True})
+    row = _run(
+        "SELECT status, attempts FROM jobs WHERE dedupe_key = 'trend_scan'"
+    )[0]
+    assert row["status"] == "pending" and row["attempts"] == 0
