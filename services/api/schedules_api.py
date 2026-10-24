@@ -711,11 +711,125 @@ async def list_schedules(
         after_id,
     )
     out = [dict(r) for r in rows]
+    _annotate_conflicts(out)
     set_next_cursor(
         response, out, limit,
         lambda row: encode_cursor(row["local_time"], row["id"]),
     )
     return out
+
+
+#: WP-H (§6 WP-H): two posts on the SAME platform within this window on the
+#: same local day read as double-posting to the audience (and to the
+#: platform's spam signals). The calendar flags them BEFORE approve so a
+#: human moves one — the gate never silently re-times a reviewed package.
+PUBLISH_CONFLICT_WINDOW_MIN = 60
+
+#: States whose posts still WILL go out — conflict flags are for decisions
+#: ahead of the operator (approve/schedule), not for post-mortems.
+_CONFLICT_STATES = ("needs_approval", "approved", "scheduled")
+
+
+def _local_slot(row: dict) -> tuple:
+    """(local day, local minute-of-day) of a schedule in ITS display tz."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    when = row.get("local_time")
+    if not isinstance(when, _dt):
+        return ("?", 0)
+    tz = ZoneInfo(str(row.get("timezone") or "Asia/Karachi"))
+    local = when.astimezone(tz)
+    return (local.date().isoformat(), local.hour * 60 + local.minute)
+
+
+def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WINDOW_MIN) -> None:
+    """Mark same-platform-same-window schedules (WP-H).
+
+    Two (or more) posts on one platform inside `window_min` minutes of each
+    other on the same local day each carry `conflict: true` and
+    `conflict_with: [other ids]`. Pure function over the fetched page — the
+    calendar fetches up to 200 rows, falling inside one page by construction;
+    conflicts are advisory: a human decides, the release gate is unchanged.
+    """
+    active = [r for r in rows if r.get("state") in _CONFLICT_STATES]
+    for row in rows:
+        row["conflict"] = False
+        row["conflict_with"] = []
+    buckets: dict[tuple, list[dict]] = {}
+    for row in active:
+        day, minute = _local_slot(row)
+        buckets.setdefault((row.get("platform"), day), []).append(
+            (minute, row))
+    for entries in buckets.values():
+        entries.sort(key=lambda pair: pair[0])
+        for i, (minute, row) in enumerate(entries):
+            for j, (other_min, other) in enumerate(entries):
+                if i == j:
+                    continue
+                if abs(minute - other_min) <= window_min:
+                    row["conflict"] = True
+                    row["conflict_with"].append(str(other["id"]))
+
+
+@router.get("/schedules/best-times")
+async def best_times() -> dict:
+    """Data-informed publish-hour suggestions per platform (WP-H).
+
+    Measured outcomes only: published posts join their `post_metrics`
+    snapshots; each bucket is the LOCAL hour the post actually went out at
+    (the schedule's own display timezone). Engagement is views + 2×(likes +
+    comments) — deterministic and cite-able, no black-box scoring. Hours with
+    fewer than MIN_SAMPLE posts are never suggested; a platform without
+    measurements suggests nothing (no invention).
+    """
+    MIN_SAMPLE = 2
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        WITH published AS (
+            SELECT s.id, s.platform, s.timezone, s.local_time
+            FROM schedules s WHERE s.state = 'published'
+        ),
+        latest AS (
+            SELECT DISTINCT ON (m.schedule_id)
+                   m.schedule_id, m.views, m.likes, m.comments
+            FROM post_metrics m ORDER BY m.schedule_id, m.captured_at DESC
+        )
+        SELECT p.platform, p.timezone, p.local_time,
+               l.views::float8 AS views, l.likes::float8 AS likes,
+               l.comments::float8 AS comments
+        FROM published p JOIN latest l ON l.schedule_id = p.id
+        """
+    )
+    from collections import defaultdict
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    buckets: dict[tuple, list[float]] = defaultdict(list)
+    for row in rows:
+        when = row["local_time"]
+        if not isinstance(when, _dt):
+            continue
+        tz = ZoneInfo(str(row["timezone"] or "Asia/Karachi"))
+        hour = when.astimezone(tz).hour
+        engagement = (row["views"] or 0) + 2 * ((row["likes"] or 0)
+                                                + (row["comments"] or 0))
+        buckets[(row["platform"], hour)].append(engagement)
+    per_platform: dict[str, list[dict]] = defaultdict(list)
+    for (platform, hour), samples in buckets.items():
+        if len(samples) < MIN_SAMPLE:
+            continue
+        per_platform[platform].append({
+            "local_hour": hour,
+            "sample_posts": len(samples),
+            "avg_engagement": round(sum(samples) / len(samples), 1),
+        })
+    suggestions = {}
+    for platform, hours in per_platform.items():
+        hours.sort(key=lambda h: (-h["avg_engagement"], h["local_hour"]))
+        suggestions[platform] = hours[:3]
+    return {"minutes_per_slot": 60, "min_sample_posts": MIN_SAMPLE,
+            "suggestions": suggestions}
 
 
 @router.get("/schedules/{schedule_id}")

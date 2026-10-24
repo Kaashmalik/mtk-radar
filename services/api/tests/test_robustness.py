@@ -248,3 +248,117 @@ def test_trends_summary_is_global_while_page_total_names_the_page(client):
                            "WHERE status = 'shortlisted'")[0]["n"])
     assert summary["hot"] == hot
     assert summary["shortlisted"] == shortlisted
+
+
+# ------------------------------------- WP-H: conflict annotation + best-times
+
+def _sched_setup(client, marker: str) -> list[str]:
+    """One offer + project + n schedules (needs_approval) at controlled times."""
+    offer = client.post("/offers", json={
+        "provider": f"Cal {marker}", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = uuidlib.UUID(offer["id"])
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
+    project = _run(
+        "INSERT INTO projects (offer_id, state) VALUES ($1, 'approved') "
+        "RETURNING id", offer_id)[0]
+    return [offer["id"], str(project["id"])]
+
+
+def _add_schedule(marker: str, offer_id: str, project_id: str, *,
+                  platform: str, offset_min: int, state: str = "needs_approval",
+                  tz: str = "Asia/Karachi") -> str:
+    return str(_run(
+        """
+        INSERT INTO schedules (offer_id, project_id, platform, state, local_time,
+                               timezone, idempotency_key)
+        VALUES ($1, $2, $3, $4::schedule_state,
+                now() + make_interval(mins => $5), $6, $7)
+        RETURNING id
+        """,
+        uuidlib.UUID(offer_id), uuidlib.UUID(project_id), platform, state,
+        offset_min, tz, f"cal-{marker}-{offset_min}-{platform}",
+    )[0]["id"])
+
+
+def test_same_platform_within_an_hour_is_flagged_as_conflict(client):
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    a = _add_schedule(marker, offer_id, project_id, platform="youtube", offset_min=+240)
+    b = _add_schedule(marker, offer_id, project_id, platform="youtube", offset_min=+270)
+    # same time, DIFFERENT platform → not a double-post
+    c = _add_schedule(marker, offer_id, project_id, platform="facebook", offset_min=+250)
+    # same platform, 5 h away → fine
+    d = _add_schedule(marker, offer_id, project_id, platform="youtube", offset_min=+560)
+
+    rows = {r["id"]: r for r in client.get("/schedules", params={"limit": 200}).json()}
+    assert rows[a]["conflict"] is True and rows[b]["conflict"] is True
+    assert set(rows[a]["conflict_with"]) == {b}
+    assert set(rows[b]["conflict_with"]) == {a}
+    assert rows[c]["conflict"] is False and rows[c]["conflict_with"] == []
+    assert rows[d]["conflict"] is False
+
+
+def test_conflicts_are_advisory_past_and_cancelled_posts_are_ignored(client):
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    # two posts 30 min apart but one is draft (never queued) and one cancelled:
+    # no decision for the operator to make → no flag.
+    e = _add_schedule(marker, offer_id, project_id, platform="tiktok",
+                      offset_min=+120, state="draft")
+    f = _add_schedule(marker, offer_id, project_id, platform="tiktok",
+                      offset_min=+150, state="cancelled")
+    rows = {r["id"]: r for r in client.get("/schedules", params={"limit": 200}).json()}
+    assert rows[e]["conflict"] is False and rows[f]["conflict"] is False
+
+
+def test_best_times_suggests_only_measured_hours(client):
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    # Platform A: two published post in the SAME measured local hour → suggested.
+    # Platform B: published posts, NO metrics → must never be suggested.
+    # Anchor both measured posts to the SAME local hour in Karachi, one local
+    # day ago (date_trunc in the schedule's own tz → no host-timezone drift).
+    anchor = """
+        (date_trunc('hour', now() AT TIME ZONE 'Asia/Karachi')
+         AT TIME ZONE 'Asia/Karachi') - interval '24 hours' + %s
+    """
+    def measured_post(suffix, offset):
+        return str(_run(
+            """
+            INSERT INTO schedules (offer_id, project_id, platform, state,
+                                   local_time, timezone, idempotency_key)
+            VALUES ($1, $2, 'youtube', 'published', """ + anchor % offset + """,
+                    'Asia/Karachi', $3)
+            RETURNING id
+            """,
+            uuidlib.UUID(offer_id), uuidlib.UUID(project_id), f"cal-{marker}-{suffix}",
+        )[0]["id"])
+    a1 = measured_post("a1", "interval '5 minutes'")
+    a2 = measured_post("a2", "interval '35 minutes'")
+    b1 = _add_schedule(marker + "-bx", offer_id, project_id, platform="facebook",
+                       offset_min=-720, state="published")
+    b2 = _add_schedule(marker + "-by", offer_id, project_id, platform="facebook",
+                       offset_min=-600, state="published")
+    for sid, views in ((a1, 500), (a2, 300)):
+        _run(
+            "INSERT INTO post_metrics (schedule_id, platform, views, likes, "
+            "comments, source) VALUES ($1, 'youtube', $2, 10, 5, 'test')",
+            uuidlib.UUID(sid), views,
+        )
+    r = client.get("/schedules/best-times")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["min_sample_posts"] == 2
+    suggestions = body["suggestions"]
+    youtube = suggestions.get("youtube") or []
+    assert any(h["local_hour"] is not None and h["sample_posts"] == 2
+               for h in youtube), "two measured posts in one hour → suggested"
+    assert "facebook" not in suggestions, (
+        "unmeasured platforms suggest nothing — no invention")
+    best = youtube[0]
+    assert set(best) == {"local_hour", "sample_posts", "avg_engagement"}
+    # mean of views + 2*(likes+comments) over BOTH measured posts:
+    # (530 + 330) / 2 = 430
+    assert best["avg_engagement"] == 430
+
