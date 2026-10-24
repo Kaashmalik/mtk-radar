@@ -112,7 +112,8 @@ class Fetcher:
         request = httpx.Request("GET", result.final_url, headers=headers or {})
         response = httpx.Response(
             result.status,
-            headers={"content-type": result.content_type},
+            headers=list(result.headers) if result.headers
+            else {"content-type": result.content_type},
             content=result.body,
             request=request,
         )
