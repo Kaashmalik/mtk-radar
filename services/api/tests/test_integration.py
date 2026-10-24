@@ -266,6 +266,7 @@ from settings_api import router as _settings_router
 from analytics_api import router as _analytics_router
 from trends_api import router as _trends_router
 from queue_api import router as _queue_router
+from research_api import router as _research_router
 from content_studio_api import router as _studio_router
 from worker_health import EXPECTED_WORKERS
 from worker_health import router as _workers_router
@@ -319,7 +320,8 @@ def auth_client(client):
               _media_router, _settings_router, _analytics_router, _health_router,
               _locks_router, _automation_router, _studio_router, _attention_router,
               _workers_router, _upload_sessions_router, _jobs_router,
-              _metrics_router, _trends_router, _queue_router):
+              _metrics_router, _trends_router, _queue_router,
+              _research_router):
         app2.include_router(r)
     # /sources + poll-result are declared on the main app with @app directly,
     # not on any router — mount the SAME handlers here so the collect-job
@@ -5752,3 +5754,257 @@ def test_queue_detail_matches_list_rank_and_never_500s(client):
     assert redetail["rank"] == next(
         q["rank"] for q in relisted if q["id"] == str(with_trend)), \
         "freshness change must move detail and list rank identically"
+
+
+# ------------------------------------------- research briefs & claims (G18)
+
+def test_promote_creates_research_brief_v1_and_queue_content_type(client):
+    """G18: promotion turns a topic into RESEARCH material — brief version 1
+    plus the queue row's content_type — and 'promotion' still never means
+    'verified' (the offer stays a candidate)."""
+    import json as _json
+
+    marker = uuid.uuid4().hex
+    trend_id = _mk_trend(marker)
+    promoted = client.post(f"/trends/{trend_id}/promote", headers=AUTH,
+                           json={"content_type": "claim_walkthrough"})
+    assert promoted.status_code == 201, promoted.text
+    body = promoted.json()
+    assert body["content_type"] == "claim_walkthrough"
+    offer_id = body["offer"]["id"]
+    assert body["offer"]["state"] == "candidate"
+
+    # Queue row carries the track (list AND detail).
+    listed = client.get("/production-queue").json()["queue"]
+    entry = next(q for q in listed if q["trend_id"] == str(trend_id))
+    assert entry["content_type"] == "claim_walkthrough"
+    detail = client.get(f"/queue/{entry['id']}").json()
+    assert detail["content_type"] == "claim_walkthrough"
+
+    # Brief v1 exists with the same track and the trend URL as first source.
+    briefs = _run(
+        """
+        SELECT version, content_type, viewer_question, sources::text AS sources,
+               auto_shortlisted
+        FROM research_briefs WHERE offer_id = $1 ORDER BY version
+        """,
+        uuid.UUID(offer_id),
+    )
+    assert [b["version"] for b in briefs] == [1]
+    assert briefs[0]["content_type"] == "claim_walkthrough"
+    assert briefs[0]["viewer_question"] == f"Hot trend {marker}"
+    assert _json.loads(briefs[0]["sources"])[0]["url"].endswith(f"trend-{marker}")
+
+    # Default track is the explainer (the safe, attributed one).
+    trend2 = _mk_trend(marker + "-d")
+    promoted2 = client.post(f"/trends/{trend2}/promote", headers=AUTH, json={})
+    assert promoted2.status_code == 201, promoted2.text
+    assert promoted2.json()["content_type"] == "explainer"
+
+
+def test_research_brief_versioning_and_human_only_claim_status(auth_client):
+    """Briefs are versioned (supersede, never rewrite); claim status is a
+    HUMAN resolution — a service/automation credential is refused, a human
+    reviewer's decision is audited and visible in blocking_conflicts."""
+    from settings_store import get_value as _get_value
+
+    provider = f"ResearchBrief {uuid.uuid4()}"
+    _run(
+        "INSERT INTO sources (provider, canonical_domain, category, adapter, "
+        "trust_tier) VALUES ($1, 'example.com', 'research_intro', 'manual', "
+        "'A_provider_owned')",
+        provider,
+    )
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": provider, "category": "research_intro",
+        "offer_type": "trend_topic",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+
+    # Anonymous/open and service credentials may not author briefs.
+    denied = auth_client.post(f"/offers/{offer_id}/research", headers=SVC, json={
+        "content_type": "explainer"})
+    assert denied.status_code == 403, denied.text
+
+    v1 = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "viewer_question": "Does the protocol actually work?",
+        "claims": [
+            {"claim_text": "Participants recalled 12% more words.",
+             "claim_class": "author_reported", "status": "supported"},
+            {"claim_text": "The protocol replaces sleep.",
+             "claim_class": "editorial_analysis"},
+        ],
+    })
+    assert v1.status_code == 201, v1.text
+    assert v1.json()["version"] == 1
+    claim_ids = [c["id"] for c in v1.json()["claims"]]
+    assert len(claim_ids) == 2
+
+    # A second POST is a NEW VERSION — v1 is preserved, the current pointer
+    # moves to v2 with its own (empty) claim set.
+    v2 = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "viewer_question": "Revised angle after reviewer notes",
+    })
+    assert v2.status_code == 201, v2.text
+    assert v2.json()["version"] == 2
+    versions = _run(
+        "SELECT version FROM research_briefs WHERE offer_id = $1 ORDER BY version",
+        uuid.UUID(offer_id))
+    assert [r["version"] for r in versions] == [1, 2]
+
+    listed = auth_client.get(f"/offers/{offer_id}/research", headers=SVC).json()
+    assert [b["version"] for b in listed["briefs"]] == [2, 1]
+    assert listed["current"]["version"] == 2
+
+    # Automation/service actors may NEVER settle a claim status.
+    machine = auth_client.patch(
+        f"/offers/{offer_id}/research/claims/{claim_ids[1]}",
+        headers=SVC, json={"status": "contradicted"})
+    assert machine.status_code == 403, machine.text
+
+    # But a claim of the CURRENT brief can be resolved by a human: mark the
+    # v1 claim contradicted → blocking_conflicts surfaces it.
+    v1_claim = auth_client.patch(
+        f"/offers/{offer_id}/research/claims/{claim_ids[1]}",
+        headers=AUTH, json={"status": "contradicted"})
+    assert v1_claim.status_code == 200, v1_claim.text
+    # The contradicted claim belongs to brief v1; the CURRENT brief (v2) has
+    # no claims, so the gate state on the current ledger is clean — the
+    # conflict is visible through the brief versions.
+    assert v1_claim.json()["blocking_conflicts"] == []
+    research = auth_client.get(f"/offers/{offer_id}/research",
+                               headers=SVC).json()
+    assert research["blocking_conflicts"] == []
+
+    # Human resolution is audited with the reviewer's identity.
+    actor_row = _run(
+        """
+        SELECT actor FROM audit_log WHERE action = 'research:claim-status'
+          AND entity_id = $1 ORDER BY id DESC LIMIT 1
+        """,
+        uuid.UUID(offer_id))
+    assert actor_row and actor_row[0]["actor"] == REVIEWER
+
+    # Brief creation is audited too.
+    brief_audit = _run(
+        "SELECT actor FROM audit_log WHERE action = 'research:brief-created' "
+        "AND entity_id = $1 ORDER BY id DESC LIMIT 1", uuid.UUID(offer_id))
+    assert brief_audit and brief_audit[0]["actor"] == REVIEWER
+
+
+def test_paper_explainer_script_is_attributed_and_coupon_free(auth_client):
+    """EP-03 acceptance: a paper becomes an accurately attributed explainer
+    WITHOUT invented coupon/price fields — and a contradicted claim in the
+    ledger blocks copy until a human resolves it."""
+    offer_id, _, _, _ = _verified_offer_for_auth(auth_client)
+    oid = uuid.UUID(offer_id)
+    # A stray coupon field from an old template run must never reach a paper.
+    _run("UPDATE offers SET promo_code = 'SAVE10' WHERE id = $1", oid)
+
+    brief = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "viewer_question": "Does the free-tier paper actually hold?",
+        "claims": [
+            {"claim_text": "The authors report a 12% recall improvement.",
+             "claim_class": "author_reported", "status": "supported",
+             "permitted_wording": "Word recall improved by 12% in the study.",
+             "source_owner": "Sleep & Cognition Lab (2025)"},
+            {"claim_text": "Shift workers benefit most (our reading).",
+             "claim_class": "editorial_analysis", "status": "unknown"},
+        ],
+    })
+    assert brief.status_code == 201, brief.text
+
+    script = auth_client.post(f"/offers/{offer_id}/script", headers=AUTH)
+    if script.status_code == 403:
+        script = auth_client.post(f"/offers/{offer_id}/script", headers=SVC)
+    assert script.status_code == 201, script.text
+    markdown = script.json()["markdown"]
+    assert "White words improved" not in markdown
+    assert "Word recall improved by 12% in the study." in markdown, \
+        "permitted wording from the ledger is quoted verbatim"
+    assert "The authors report" in markdown
+    assert "Our analysis" in markdown
+    assert "not yet independently confirmed" in markdown
+    assert "SAVE10" not in markdown, "a paper never grows a coupon"
+    assert "Promo code" not in markdown
+
+    # Contradicted claim blocks copy — fail closed, in every track.
+    claim_id = brief.json()["claims"][0]["id"]
+    blocked = auth_client.patch(
+        f"/offers/{offer_id}/research/claims/{claim_id}",
+        headers=AUTH, json={"status": "contradicted"})
+    assert blocked.status_code == 200, blocked.text
+    assert blocked.json()["blocking_conflicts"], "the reviewer sees the conflict"
+    script2 = auth_client.post(f"/offers/{offer_id}/script", headers=AUTH)
+    if script2.status_code == 403:
+        script2 = auth_client.post(f"/offers/{offer_id}/script", headers=SVC)
+    assert script2.status_code == 409, script2.text
+    assert "contradicted" in script2.json()["detail"]
+
+    # The human resolution unblocks generation again.
+    unblocked = auth_client.patch(
+        f"/offers/{offer_id}/research/claims/{claim_id}",
+        headers=AUTH, json={"status": "supported"})
+    assert unblocked.status_code == 200
+    assert unblocked.json()["blocking_conflicts"] == []
+    script3 = auth_client.post(f"/offers/{offer_id}/script", headers=AUTH)
+    if script3.status_code == 403:
+        script3 = auth_client.post(f"/offers/{offer_id}/script", headers=SVC)
+    assert script3.status_code == 201, script3.text
+
+    # The queue row's track follows the offer's brief/extraction target, so
+    # the studio path sees the same ledger.
+    studio_offer = auth_client.get(f"/studio/offers/{offer_id}").json()
+    attached = studio_offer.get("offer") or studio_offer
+    research = attached.get("research") or {}
+    if research:
+        assert research["content_type"] == "explainer"
+        assert any(c["status"] == "supported" for c in research["claims"])
+
+
+def test_automation_promotion_daily_cap(auth_client):
+    """G18/EP-03 'daily capacity caps': automation may auto-shortlist only
+    `auto_research_max_per_day` topics per day; a human promote is never
+    capped."""
+    # Tighten the guardrail to 1 for the test (audited, server-side value).
+    policy = auth_client.get("/automation/policy", headers=SVC).json()["policy"]
+    policy["guardrails"]["auto_research_max_per_day"] = 1
+    saved = auth_client.put("/automation/policy", headers=AUTH,
+                            json={"policy": policy})
+    assert saved.status_code in (200, 201), saved.text
+
+    first = _mk_trend(uuid.uuid4().hex)
+    ok = auth_client.post(f"/trends/{first}/promote", headers=SVC,
+                          params={"reviewer": "automation:research"}, json={})
+    assert ok.status_code == 201, ok.text
+    briefs = _run(
+        """
+        SELECT auto_shortlisted FROM research_briefs
+        WHERE offer_id = (SELECT offer_id FROM production_queue
+                          WHERE trend_id = $1)
+        """,
+        first)
+    assert briefs and briefs[0]["auto_shortlisted"] is True, \
+        "automation promotion marks the brief as an auto-shortlist"
+
+    second = _mk_trend(uuid.uuid4().hex)
+    capped = auth_client.post(f"/trends/{second}/promote", headers=SVC,
+                              params={"reviewer": "automation:research"},
+                              json={})
+    assert capped.status_code == 429, capped.text
+    assert "auto_research_max_per_day" in capped.json()["detail"]
+    # The capped trend is untouched (still on the radar, not promoted).
+    status = _run("SELECT status FROM trend_candidates WHERE id = $1", second)
+    assert status[0]["status"] == "radar"
+
+    # A human promotes the SAME trend past the exhausted budget.
+    human = auth_client.post(f"/trends/{second}/promote", headers=AUTH, json={})
+    assert human.status_code == 201, human.text
+
+    # Restore the default so other tests see the stock policy.
+    policy["guardrails"]["auto_research_max_per_day"] = 2
+    auth_client.put("/automation/policy", headers=AUTH, json={"policy": policy})

@@ -28,6 +28,23 @@ SCRIPT_FORMATS: Final = (
 )
 DEFAULT_FORMAT: Final = "official_explainer"
 
+# EP-03 G18: production tracks (research_briefs.content_type / the queue's
+# content_type column). The 'offer' track keeps every offer-centric gate
+# untouched; the research tracks constrain WHAT the narration may assert —
+# claims come from the versioned ledger with per-class attribution, and no
+# coupon/price field may be invented around a paper.
+CONTENT_TYPES: Final = (
+    "explainer", "tested_tutorial", "claim_walkthrough", "offer",
+)
+#: content_type → script formats that track may use (fail closed: a research
+#: explainer can never borrow first-person formats without the matching track).
+_CONTENT_TYPE_FORMATS: Final = {
+    "explainer": ("official_explainer",),
+    "tested_tutorial": ("official_explainer", "tested_tutorial"),
+    "claim_walkthrough": SCRIPT_FORMATS,
+    "offer": SCRIPT_FORMATS,
+}
+
 
 class ScriptGateError(PermissionError):
     """Raised when script generation is attempted for an unverified offer."""
@@ -56,6 +73,122 @@ def assert_video_allowed(state: str) -> None:
             f"script generation blocked: offer state is '{state}' — verified "
             "with official evidence is required (master plan §3)"
         )
+
+
+def research_brief(offer: dict) -> dict:
+    """The current versioned research brief attached by the API callers
+    (offers_api / content_studio_api via latest_brief_with_claims)."""
+    return decode_mapping(offer.get("research"))
+
+
+def content_type_of(offer: dict) -> str:
+    """The production track for this content: explicit on the offer/queue row,
+    else the brief's, else the legacy 'offer' track (G18 stays the default for
+    offers that predate research briefs)."""
+    return str(offer.get("content_type")
+               or research_brief(offer).get("content_type")
+               or "offer")
+
+
+def assert_content_type_format(content_type: str, script_format: str) -> None:
+    """A track may only borrow borrowed formats it earned: a research
+    explainer cannot quietly become a first-person walkthrough without the
+    matching track (and the capture gates those formats already enforce)."""
+    allowed = _CONTENT_TYPE_FORMATS.get(content_type)
+    if allowed is None:
+        raise ScriptGateError(
+            f"unknown content type '{content_type}' — known: "
+            + ", ".join(CONTENT_TYPES)
+        )
+    if script_format not in allowed:
+        raise ScriptGateError(
+            f"content type '{content_type}' does not allow script format "
+            f"'{script_format}' — allowed: {', '.join(allowed)} (set the "
+            "matching content type on the research brief first)"
+        )
+
+
+def assert_research_cleared(offer: dict) -> list[str]:
+    """Fail closed on the claim ledger: a CONTRADICTED claim blocks script
+    generation until a human reviewer resolves it (research_api PATCH).
+
+    "Conflicting evidence blocks unsupported copy" (EP-03 acceptance) — no
+    renderer change may talk around a standing contradiction.
+    """
+    claims = decode_list(research_brief(offer).get("claims"))
+    conflicts = [str(c.get("claim_text") or "").strip()
+                 for c in claims if c.get("status") == "contradicted"]
+    if conflicts:
+        raise ScriptGateError(
+            "script generation blocked: "
+            f"{len(conflicts)} research claim(s) are contradicted by current "
+            "evidence — a human reviewer must resolve them in the claim ledger "
+            f"first: {'; '.join(conflicts[:3])}"
+        )
+    return conflicts
+
+
+#: Per-claim-class attribution framing. "The authors report X" is sourcing;
+#: "X is the best" must never be framed as sourced. This is the EP-03
+#: acceptance: every substantive sentence resolves to evidence or is
+#: labeled analysis.
+_CLAIM_FRAMING: Final = {
+    "author_reported": {
+        "en": "The authors report",
+        "ur": "محققین کا کہنا ہے",
+        "label": "sourced (primary source)",
+    },
+    "independently_reproduced": {
+        "en": "Independently reproduced by other researchers",
+        "ur": "دوسرے محققین نے خود دہرایا",
+        "label": "sourced (independent reproduction)",
+    },
+    "tested_by_mtk": {
+        "en": "We tested this ourselves",
+        "ur": "ہم نے یہ خود آزمایا",
+        "label": "hands-on (our own test)",
+    },
+    "editorial_analysis": {
+        "en": "Our analysis (our interpretation, not the researchers' claim)",
+        "ur": "ہمارا تجزیہ (ہماری تشریح، محققین کا دعویٰ نہیں)",
+        "label": "labeled analysis",
+    },
+}
+
+
+def research_attribution_lines(offer: dict, language: str = "en") -> list[str]:
+    """The attribution block the script may use for the brief's claims.
+
+    Only SUPPORTED/UNKNOWN claims appear (contradicted ones already blocked
+    generation above). Permitted wording from the ledger wins verbatim — the
+    reviewer recorded the exact sentence the script may say; otherwise the
+    claim text is quoted inside its class framing. UNKNOWN claims are
+    explicitly labeled unconfirmed ("labeled analysis" branch of the
+    acceptance).
+    """
+    lines: list[str] = []
+    for claim in decode_list(research_brief(offer).get("claims")):
+        if claim.get("status") == "contradicted":
+            continue
+        framing = _CLAIM_FRAMING.get(claim.get("claim_class") or "")
+        if not framing:
+            continue
+        wording = claim.get("permitted_wording") or claim.get("claim_text") or ""
+        wording = str(wording).strip()
+        if not wording:
+            continue
+        if language == "ur":
+            line = f"- {framing['ur']}۔ «{wording}»"
+        else:
+            line = f'- {framing["en"]}: “{wording}”'
+        if claim.get("status") == "unknown":
+            line += (" — ابھی آزادانہ تصدیق نہیں ہوئی۔" if language == "ur"
+                     else " — not yet independently confirmed.")
+        source = claim.get("source_owner") or claim.get("source_url")
+        if source:
+            line += f" ({source})"
+        lines.append(line)
+    return lines
 
 
 def assert_format_allowed(script_format: str, capture: dict | None) -> None:
@@ -310,7 +443,11 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
     title = offer.get("title", "Offer walkthrough")
     expires = _fmt_date(offer.get("expires_at"))
     renewal = decode_mapping(offer.get("renewal"))
-    promo_code = offer.get("promo_code")
+    # G18: coupon/price fields exist for the 'offer' track. A research track
+    # never borrows them — a paper has no promo code, and rendering one would
+    # be invention even if a stray field were present.
+    is_offer_track = content_type_of(offer) == "offer"
+    promo_code = offer.get("promo_code") if is_offer_track else None
     outcome = capture.get("claim_outcome") if capture else None
 
     titles = {
@@ -349,6 +486,21 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
         + (f" Promo code: `{promo_code}`." if promo_code else "")
     )
     lines.append("")
+    # G18: the research tracks carry their substantive sentences from the
+    # claim ledger with per-class attribution — sourced claims are framed as
+    # sourcing, our own interpretation is labeled analysis, unconfirmed claims
+    # say so. The 'offer' track keeps its checklist-driven structure.
+    attribution = research_attribution_lines(offer, language="en")
+    if content_type_of(offer) != "offer" or attribution:
+        lines.append("## Research claims (attributed — do not reword)")
+        if attribution:
+            lines.extend(attribution)
+        else:
+            lines.append("- No ledger claims recorded yet — describe only the "
+                         "cited sources in the evidence list; label any "
+                         "interpretation as analysis.")
+        lines.append("")
+    lines.append("")
     lines.append("## Before starting (official terms)")
     lines.append(f"- Read the official terms: {offer.get('redemption_url') or 'link in evidence below'}.")
     if expires:
@@ -368,7 +520,7 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
             f"(auto-renew: {'on' if renewal.get('autoRenew') else 'off by default'}). "
             "Show the renewal price and auto-renew setting before finalizing."
         )
-    else:
+    elif is_offer_track:
         renewal_status = _fact("renewal", offer).get("status")
         if renewal_status == CONTRADICTED:
             lines.append("- ⚠️ The quoted official terms contradict this offer's renewal claim — "
@@ -451,7 +603,10 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
     title = offer.get("title", "آفر")
     expires = _fmt_date(offer.get("expires_at"))
     renewal = decode_mapping(offer.get("renewal"))
-    promo_code = offer.get("promo_code")
+    # G18: انگریزی برانچ کا ہم آہنگ — ریسرچ ٹریک کبھی کوپن/قیمت کے میدان
+    # نہیں اٹھاتا؛ کاغذ کا پرومو کوڈ ہوتا ہی نہیں، نکالنا جعلسازی ہے۔
+    is_offer_track = content_type_of(offer) == "offer"
+    promo_code = offer.get("promo_code") if is_offer_track else None
     outcome = capture.get("claim_outcome") if capture else None
 
     titles = {
@@ -488,6 +643,18 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
     lines.append(_eligibility_line_ur(offer)
                  + (f" پرومو کوڈ: `{promo_code}`۔" if promo_code else ""))
     lines.append("")
+    # G18: انگریزی برانچ کا ہم آہنگ — ریسرچ ٹریک کے جملے لیجر سے، ہر طبقے کی
+    # منسوب بندی کے ساتھ (اخذ شدہ / خود آزمایا / لیبل شدہ تجزیہ)۔
+    attribution = research_attribution_lines(offer, language="ur")
+    if content_type_of(offer) != "offer" or attribution:
+        lines.append("## ریسرچ دعوے (منسوب — الفاظ نہ بدلیں)")
+        if attribution:
+            lines.extend(attribution)
+        else:
+            lines.append("- ابھی کوئی لیجر دعوا درج نہیں — صرف حوالہ شدہ ذرائع "
+                         "بیان کریں؛ اپنی تشریح کو تجزیہ کے طور پر لیبل کریں۔")
+        lines.append("")
+    lines.append("")
     lines.append("## شروع کرنے سے پہلے (آفیشل شرائط)")
     lines.append(f"- آفیشل شرائط پڑھیں: {offer.get('redemption_url') or 'نیچے ذرائع میں لنک'}۔")
     if expires:
@@ -508,7 +675,7 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
             f"(خودکار تجدید: {'آن' if renewal.get('autoRenew') else 'آف (ڈیفالٹ)'})۔ "
             "فائنل کرنے سے پہلے قیمت اور خودکار تجدید اسکرین پر دکھائیں۔"
         )
-    else:
+    elif is_offer_track:
         # انگریزی برانچ کا ہم آہنگ: کوئی قیمت درج نہ ہو تو کوئی قیمت مت گھڑیں —
         # 'عام قیمت' بھی ایک قیمت کا دعویٰ ہے۔
         renewal_status = _fact("renewal", offer).get("status")
@@ -637,6 +804,11 @@ def generate(offer: dict, evidence: list[dict], language: str = "en",
              capture: dict | None = None) -> dict:
     """Full generation pipeline. Raises ScriptGateError for unverified offers."""
     assert_video_allowed(offer.get("state", ""))
+    content_type = content_type_of(offer)
+    assert_content_type_format(content_type, script_format)
+    # G18, fail closed: a standing contradiction in the versioned claim
+    # ledger blocks copy in EVERY track until a human resolves it.
+    assert_research_cleared(offer)
     assert_format_allowed(script_format, capture)
     checklist = build_checklist(offer)
     command_cards = build_command_cards(decode_list(offer.get("claim_steps")))
@@ -650,6 +822,7 @@ def generate(offer: dict, evidence: list[dict], language: str = "en",
         "command_cards": command_cards,
         "language": language,
         "format": script_format,
+        "content_type": content_type,
         "beats": build_beats(offer, checklist, script_format, capture),
     }
 

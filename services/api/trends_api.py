@@ -24,6 +24,9 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import effective_reviewer
+from automation import guardrails as automation_guardrails
+from automation_api import load_policy
 from pagination import (
     decode_cursor,
     decode_datetime,
@@ -459,11 +462,19 @@ class TrendPromoteIn(BaseModel):
     preset_fit: Optional[int] = Field(default=None, ge=0, le=100)
     kind: str = Field(default="timely", pattern="^(timely|evergreen)$")
     expires_at: Optional[str] = None  # ISO date/datetime string when set
+    # EP-03 G18: the production track. explainer (default) = attributed
+    # research content; 'offer' keeps the offer-centric eligibility/renewal
+    # gates exactly as they were. `tested_tutorial`/`claim_walkthrough` keep
+    # their human-capture gates downstream.
+    content_type: str = Field(
+        default="explainer",
+        pattern="^(explainer|tested_tutorial|claim_walkthrough|offer)$")
 
 
 @router.post("/{trend_id}/promote", status_code=201)
 async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
-                        request: Request) -> dict:
+                        request: Request,
+                        reviewer: Optional[str] = Query(default=None)) -> dict:
     """Promote a radar topic to the production queue (offer + row, one tx).
 
     Closes the radar dead-end: `promoted` used to be a status no endpoint
@@ -478,7 +489,10 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
     import queue_api
 
     pool = db.get()
-    actor = "operator"
+    # Same actor convention as the automation transitions in offers/schedules:
+    # a reviewer token binds its human owner; a service credential may only
+    # name an explicit automation:<stage> actor (never a human).
+    actor = effective_reviewer(request, reviewer, default="operator")
     trend = await pool.fetchrow(
         """
         SELECT id, title, url, source_provider, source_category,
@@ -505,6 +519,16 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
             raise HTTPException(status_code=422,
                                 detail="expires_at must be an ISO date/datetime") from None
 
+    # EP-03 G18: automation may only auto-shortlist a bounded number of
+    # topics for research per day (the low-risk `auto_research_max_per_day`
+    # guardrail). Counted in the same transaction behind an advisory lock so
+    # concurrent automation promotions cannot race past the cap (same TOCTOU
+    # defense as the approval budget in schedules_api). Human actors are
+    # never capped.
+    limit = None
+    if actor.startswith(("automation:", "system:")):
+        limits = automation_guardrails(await load_policy())
+        limit = int(limits["auto_research_max_per_day"])
     snapshot = {
         "score": float(trend["score"]),
         "velocity": float(trend["velocity"] or 0.0),
@@ -514,6 +538,25 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
     }
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if limit is not None:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('mtk-automation-research-budget'))")
+                used = int(await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM audit_log
+                    WHERE action = 'trend:promoted' AND actor LIKE 'automation:%'
+                      AND created_at >= date_trunc('day', now())
+                    """
+                ) or 0)
+                if used >= limit:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "automation daily research budget exhausted "
+                            f"({used}/{limit}) — raise auto_research_max_per_day "
+                            "in Settings or promote manually"
+                        ),
+                    )
             offer = await conn.fetchrow(
                 """
                 INSERT INTO offers (title, provider, category, offer_type,
@@ -530,14 +573,31 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
                 """
                 INSERT INTO production_queue
                     (offer_id, trend_id, title, provider, category, kind,
-                     preset_fit, trend_snapshot, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+                     preset_fit, trend_snapshot, expires_at, content_type)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
                 RETURNING id
                 """,
                 offer["id"], trend["id"],
                 body.title or trend["title"], trend["source_provider"],
                 body.category or trend["source_category"],
                 body.kind, body.preset_fit, _json(snapshot), expires_at,
+                body.content_type,
+            )
+            # The trend becomes RESEARCH material, not an offer (G18): the
+            # brief is version 1 of the versioned claim ledger — a starting
+            # point a human editor builds on, never a verification. Promotion
+            # cannot mean "verified": the offer stays a `candidate`.
+            await conn.execute(
+                """
+                INSERT INTO research_briefs
+                    (offer_id, version, content_type, viewer_question,
+                     sources, auto_shortlisted)
+                VALUES ($1, 1, $2, $3, $4::jsonb, $5)
+                """,
+                offer["id"], body.content_type,
+                body.title or trend["title"],
+                _json([{"url": str(trend["url"])}]) if trend["url"] else "[]",
+                actor.startswith(("automation:", "system:")),
             )
             await conn.execute(
                 "UPDATE trend_candidates SET status = 'promoted', updated_at = now() "
@@ -552,15 +612,18 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
                 actor, queue_row["id"], _json({
                     "trend_id": str(trend["id"]),
                     "offer_id": str(offer["id"]),
+                    "content_type": body.content_type,
                     "snapshot": snapshot,
                 }),
             )
     return {
         "offer": {"id": str(offer["id"]), "state": offer["state"]},
         "queue_id": str(queue_row["id"]),
+        "content_type": body.content_type,
         "trend": {"id": str(trend["id"]), "status": "promoted"},
-        "message": ("Promoted to the production queue. The offer is still a "
-                    "candidate — verification evidence decides nothing else."),
+        "message": ("Promoted to the production queue with a research brief "
+                    "(version 1). The offer is still a candidate — verification "
+                    "evidence decides nothing else."),
     }
 
 

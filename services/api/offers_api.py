@@ -44,6 +44,7 @@ from automation import (
 )
 from automation_api import load_policy
 from redact import scan as scan_secrets
+from research_api import latest_brief_with_claims
 from schedules_state import script_version_hash
 from schemas import (
     ConflictResolveIn,
@@ -1057,6 +1058,13 @@ async def create_script(offer_id: uuid.UUID, request: Request,
     )
     offer_row = dict(offer)
     offer_row["fact_pack"] = decode(fact_pack["fact_pack"]) if fact_pack else {}
+    # EP-03 G18: the versioned research brief + claim ledger travels with the
+    # offer so scriptgen runs the contradiction gate and per-class attribution
+    # on the SAME ledger the researcher maintained.
+    brief = await latest_brief_with_claims(pool, offer_id)
+    if brief:
+        offer_row["research"] = brief
+        offer_row["content_type"] = brief.get("content_type")
     try:
         payload = generate_script_payload(
             offer_row, [dict(r) for r in evidence], language=language,

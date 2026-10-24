@@ -119,6 +119,7 @@ _RANKED_SELECT_TEMPLATE = """
             SELECT q.id, q.offer_id, q.trend_id, q.title, q.provider, q.category,
                    q.kind, q.preset_fit, q.trend_snapshot::text AS trend_snapshot,
                    q.expires_at, q.rank_pinned, q.status, q.created_at, q.updated_at,
+                   q.content_type,
                    o.state::text AS offer_state, o.expires_at AS offer_expires_at,
                    t.score::float8 AS trend_score,
                    t.freshness_score::float8 AS trend_freshness,
@@ -238,6 +239,7 @@ async def list_production_queue(
                 "provider": row["provider"],
                 "category": row["category"],
                 "kind": row["kind"],
+                "content_type": row["content_type"],
                 "offer_state": row["offer_state"],
                 "expires_at": row["expires_at"].isoformat() if row["expires_at"] else
                               (row["offer_expires_at"].isoformat()
@@ -340,6 +342,7 @@ async def get_queue_row(row_id: uuid.UUID) -> dict:
         "provider": row["provider"],
         "category": row["category"],
         "kind": row["kind"],
+        "content_type": row["content_type"],
         "preset_fit": row["preset_fit"],
         "trend_snapshot": row["trend_snapshot"],
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] else
