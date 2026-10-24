@@ -85,6 +85,8 @@ def platform_metadata(
     website_url: str | None = None,
     language: str = "en",
     variant: str = "default",
+    trend_keywords: list[str] | None = None,
+    hashtag_performance: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Platform-specific copy with hard limits, disclosures, source links,
     website CTA, hashtags and a pinned comment (§6/§11/§17).
@@ -110,6 +112,8 @@ def platform_metadata(
         website_url=website_url,
         language=language,
         variant=variant,
+        trend_keywords=trend_keywords,
+        hashtag_performance=hashtag_performance,
     )
 
 

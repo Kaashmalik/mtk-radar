@@ -2547,10 +2547,11 @@ def _gate_ready_schedule(auth_client, marker):
         offer_id,
         json.dumps({
             "title": f"Gate offer walkthrough {marker}"[:50],
-            "caption": "Official terms only. Results depend on the provider.",
+            "caption": ("Official terms only. Results depend on the provider.\n"
+                        "#GateCo #FreeDomain #Domain"),
             "tags": ["free domain", "free domain 2026", "gate co",
                      "verified walkthrough", "mtk codex"],
-            "hashtags": [],
+            "hashtags": ["#GateCo", "#FreeDomain", "#Domain"],
             "pinned_comment": "Sources are in the description.",
             "website_url": "https://mtk.example/guide",
             "cta": "Full guide on our site",
@@ -2683,10 +2684,11 @@ def test_release_gate_enforces_2026_packaging_quality(auth_client):
         variant_id,
         json.dumps({
             "title": "Gate walkthrough",
-            "caption": "Official terms only. Results depend on the provider.",
+            "caption": ("Official terms only. Results depend on the provider.\n"
+                        "#FreeDomain #Domain #Tech"),
             "tags": ["free domain", "free domain 2026", "gate co",
                      "verified walkthrough", "mtk codex"],
-            "hashtags": [],
+            "hashtags": ["#FreeDomain", "#Domain", "#Tech"],
         }),
     )
     cleared = auth_client.get(f"/schedules/{sid}/release-check", headers=SVC).json()
@@ -5197,3 +5199,66 @@ def test_automation_run_now_arms_owed_work_and_never_human_stages(client):
     # Audited.
     trail = _run("SELECT COUNT(*)::int AS n FROM audit_log WHERE action = 'automation:run-now'")
     assert trail[0]["n"] >= 1
+
+
+def test_hashtag_feedback_rollup_and_gate_integration(client):
+    """WP-E loop: a scheduled YouTube package carries description-tail
+    hashtags within the capability table; the daily metrics ingest rolls the
+    measured outcome into hashtag_performance; the gate enforces the same
+    table."""
+    marker = uuid.uuid4().hex
+    offer_id = _wpd_ready_offer(client, marker)
+    sched = client.post(f"/offers/{offer_id}/schedules", headers=SVC, json={
+        "platform": "youtube", "local_time": "2027-06-01T13:00:00+00:00",
+        "privacy": "private",
+    })
+    assert sched.status_code == 201, sched.text
+    sid = uuid.UUID(sched.json()["id"])
+
+    row = _run("SELECT metadata::text AS meta FROM schedules WHERE id = $1", sid)[0]
+    meta = json.loads(row["meta"])
+    hashtags_in_desc = [line for line in meta["caption"].splitlines()
+                        if line.startswith("#")]
+    assert hashtags_in_desc, "YouTube hashtags must ride the description tail"
+    # Every shippable tag is proposed; the count stays within the table.
+    assert 1 <= len(meta["hashtags"]) <= 5
+    assert meta["tags"] and all(not str(t).startswith("#") for t in meta["tags"])
+    # Every proposed tag cites evidence/trend provenance (parsed back from the
+    # built package): no invented tags.
+    assert all(not str(t).lower().lstrip("#") in {"fyp", "viral", "shorts"}
+               for t in meta["hashtags"])
+
+    # The gate agrees with the generator: the packaged post passes.
+    check = client.get(f"/schedules/{sid}/release-check").json()
+    assert not any(p["code"].startswith("hashtag_") and p.get("blocking")
+                   for p in check["problems"]), check
+
+    # Metrics ingest rolls performance up per (platform, tag).
+    snap = client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "youtube", "views": 1000, "impressions": 20000,
+        "source": "youtube-analytics",
+    })
+    assert snap.status_code == 201, snap.text
+    rollup = _run(
+        "SELECT tag, posts, impressions_total::bigint AS impressions "
+        "FROM hashtag_performance WHERE platform = 'youtube'"
+    )
+    tags = {r["tag"] for r in rollup}
+    assert tags >= set(meta["hashtags"]), (tags, meta["hashtags"])
+    for r in rollup:
+        if r["tag"] in meta["hashtags"]:
+            assert r["posts"] >= 1 and r["impressions"] >= 20000
+
+    # Idempotent re-ingest (same day) never drifts the rollup.
+    again = client.post(f"/schedules/{sid}/metrics", headers=SVC, json={
+        "platform": "youtube", "views": 1500, "impressions": 21000,
+        "source": "youtube-analytics",
+    })
+    assert again.status_code == 201
+    rolled = _run(
+        "SELECT posts, impressions_total::bigint AS impressions "
+        "FROM hashtag_performance WHERE platform = 'youtube' AND tag = $1",
+        meta["hashtags"][0],
+    )[0]
+    assert rolled["posts"] == 1, "one post, not N ingests"
+    assert rolled["impressions"] == 21000
