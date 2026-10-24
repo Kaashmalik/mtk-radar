@@ -27,9 +27,25 @@ from typing import Any, Iterable
 GROWTH_SCORE_ENV = "MTK_ENABLE_GROWTH_SCORE"
 _TRUTHY = {"1", "true", "yes", "on"}
 
+#: G21 (evidence-to-video plan): the SAME compliance rationale that gates the
+#: composite growth score applies to EVERY derived engagement blend built from
+#: platform metrics — not only growth_engine. Affected paths today:
+#:   * `GET /schedules/best-times` — views + 2×(likes+comments) composite;
+#:   * hashtag generation's measured-performance lift
+#:     (`hashtag_performance` rollup re-ranking/sinking tags).
+#: OFF by default; raw native metrics (avg views per hour, per-tag measured
+#: impressions as stored DATA) and documented editorial heuristics remain
+#: available ungated. Opt in per deployment only after the compliance review.
+DERIVED_ENGAGEMENT_ENV = "MTK_ENABLE_DERIVED_ENGAGEMENT"
+
 
 def growth_score_enabled() -> bool:
     return os.environ.get(GROWTH_SCORE_ENV, "").strip().lower() in _TRUTHY
+
+
+def derived_engagement_enabled() -> bool:
+    """Permission switch for derived engagement blends (G21, off by default)."""
+    return os.environ.get(DERIVED_ENGAGEMENT_ENV, "").strip().lower() in _TRUTHY
 
 
 def _num(value: Any, default: float = 0.0) -> float:

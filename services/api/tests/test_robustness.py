@@ -350,6 +350,10 @@ def test_best_times_suggests_only_measured_hours(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["min_sample_posts"] == 2
+    assert body["engagement_blend_enabled"] is False, (
+        "the derived blend is OFF by default (G21 permission switch)")
+    assert "editorial heuristic" in body["ranking_method"]
+    assert "views" in body["ranking_method"]
     suggestions = body["suggestions"]
     youtube = suggestions.get("youtube") or []
     assert any(h["local_hour"] is not None and h["sample_posts"] == 2
@@ -357,8 +361,77 @@ def test_best_times_suggests_only_measured_hours(client):
     assert "facebook" not in suggestions, (
         "unmeasured platforms suggest nothing — no invention")
     best = youtube[0]
-    assert set(best) == {"local_hour", "sample_posts", "avg_engagement"}
-    # mean of views + 2*(likes+comments) over BOTH measured posts:
-    # (530 + 330) / 2 = 430
-    assert best["avg_engagement"] == 430
+    # default mode: native avg views, NO derived composite
+    assert set(best) == {"local_hour", "sample_posts", "avg_views"}
+    assert best["avg_views"] == 400  # mean of (500, 300)
+
+
+def test_best_times_derived_blend_is_permission_gated(client, monkeypatch):
+    """G21 (evidence-to-video plan): the views + 2×(likes+comments) blend is
+    the same restricted derived-metric class as the growth score. Default OFF
+    ranks by native avg views; the blend exists only under the explicit
+    opt-in, is applied consistently, and is labeled as an internal signal."""
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    anchor = """
+        (date_trunc('hour', now() AT TIME ZONE 'Asia/Karachi')
+         AT TIME ZONE 'Asia/Karachi') - interval '24 hours' + %s
+    """
+
+    def measured_post(suffix, offset):
+        return str(_run(
+            """
+            INSERT INTO schedules (offer_id, project_id, platform, state,
+                                   local_time, timezone, idempotency_key)
+            VALUES ($1, $2, 'youtube', 'published', """ + anchor % offset + """,
+                    'Asia/Karachi', $3)
+            RETURNING id
+            """,
+            uuidlib.UUID(offer_id), uuidlib.UUID(project_id), f"cal-{marker}-{suffix}",
+        )[0]["id"])
+
+    # Best-times buckets collapse to HOUR-OF-DAY (all days), so the offsets
+    # below pick hours no other test in this file measures: H1 (+65/+75 min)
+    # and H2 (+185/+195 min) — two distinct local hours, exclusively this
+    # test's data despite the shared session DB.
+    # hour H1: low views but heavy likes → high BLEND
+    h1a = measured_post("h1a", "interval '65 minutes'")
+    h1b = measured_post("h1b", "interval '75 minutes'")
+    # hour H2 (two hours later): high views, no engagement
+    h2a = measured_post("h2a", "interval '185 minutes'")
+    h2b = measured_post("h2b", "interval '195 minutes'")
+    for sid, views, likes, comments in (
+            (h1a, 100, 100, 0), (h1b, 100, 100, 0),
+            (h2a, 200, 0, 0), (h2b, 200, 0, 0)):
+        _run(
+            "INSERT INTO post_metrics (schedule_id, platform, views, likes, "
+            "comments, source) VALUES ($1, 'youtube', $2, $3, $4, 'test')",
+            uuidlib.UUID(sid), views, likes, comments,
+        )
+
+    monkeypatch.delenv("MTK_ENABLE_DERIVED_ENGAGEMENT", raising=False)
+
+    # default: ranking by avg views puts H2 (200) ahead of H1 (100); the
+    # blend is nowhere in the payload. (Earlier tests in this session may add
+    # other measured youtube hours — filter to THIS test's two hours.)
+    body = client.get("/schedules/best-times").json()
+    assert body["engagement_blend_enabled"] is False
+    mine = [h for h in body["suggestions"]["youtube"]
+            if h["avg_views"] in (100.0, 200.0)]
+    assert [h["avg_views"] for h in mine] == [200.0, 100.0], \
+        "higher measured views lead under the default editorial ranking"
+    assert all("avg_engagement" not in h for h in body["suggestions"]["youtube"])
+
+    # explicit opt-in: the composite ranks H1 (100 + 2×100 = 300) above
+    # H2 (200), and the response is labeled as an internal directional
+    # signal — never as a platform metric.
+    monkeypatch.setenv("MTK_ENABLE_DERIVED_ENGAGEMENT", "1")
+    body = client.get("/schedules/best-times").json()
+    assert body["engagement_blend_enabled"] is True
+    assert "not a platform metric" in body["ranking_method"]
+    blend = body["suggestions"]["youtube"]
+    mine = [h for h in blend if h["avg_views"] in (100.0, 200.0)]
+    assert [h["avg_engagement"] for h in mine] == [300.0, 200.0], \
+        "with permission granted, the derived blend ranks H1 above H2"
+    assert mine[0]["avg_views"] == 100.0 and mine[1]["avg_views"] == 200.0
 
