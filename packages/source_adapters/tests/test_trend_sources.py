@@ -294,20 +294,24 @@ class TestGithubStarsAuthG14:
 
 
 class TestGithubStars:
-    def test_change_only_ids(self):
+    def test_stable_entity_id_and_star_payload(self):
         fetcher = FakeFetcher(GH_ROUTES)
         items = fetch_github_stars(["ollama/ollama"], fetcher=fetcher)
-        assert items[0].external_item_id == "gh-stars:ollama/ollama:110000"
+        assert items[0].external_item_id == "gh-stars:ollama/ollama"
         assert items[0].url == "https://github.com/ollama/ollama"
         assert "110000 GitHub stars" in items[0].title
+        assert items[0].extra["stars"] == 110000
         assert "Signal: GitHub star snapshot" in items[0].text
 
-    def test_count_change_produces_new_id(self):
-        # Velocity series: a NEW count is a NEW item; an unchanged count
-        # produces the SAME id and dedupes at the API.
-        low = FakeFetcher({k: {"stargazers_count": 109999, "description": ""} for k in GH_ROUTES})
+    def test_count_change_keeps_the_same_story(self):
+        # G08: the count is a MEASUREMENT, not identity — a star change must
+        # stay one dedupable story with a second observation, not churn a
+        # new item row keyed by the title count.
+        low = FakeFetcher({"https://api.github.com/repos/ollama/ollama":
+                           {"stargazers_count": 109999, "description": ""}})
         items_low = fetch_github_stars("ollama/ollama", fetcher=low)
-        assert items_low[0].external_item_id != "gh-stars:ollama/ollama:110000"
+        assert items_low[0].external_item_id == "gh-stars:ollama/ollama"
+        assert items_low[0].extra["stars"] == 109999
 
     def test_accepts_single_repo_string_and_multiple(self):
         fetcher = FakeFetcher(GH_ROUTES)

@@ -5383,3 +5383,69 @@ def test_extra_bounds_and_non_numeric_measurements_are_rejected(client, source):
                "WHERE external_id = 'g07-traffic'")
     assert json.loads(obs[0]["measurements"]) == {}, \
         "text-only metrics are NOT numeric measurements"
+
+
+# ------------------ EP-02 G08: momentum from observed engagement end-to-end
+
+def test_scan_computes_engagement_rate_from_observed_counts(client, source):
+    """G08 acceptance: HN 100→160 points over 2 h yields raw 30 points/h,
+    the re-fetch appends a measurement WITHOUT a duplicate story, and the
+    candidate's momentum is the measured engagement (not score movement)."""
+    import uuid as uuidlib
+    from datetime import timedelta
+
+    marker = uuidlib.uuid4().hex
+    url = f"https://news.ycombinator.com/item?id=90{marker[:6]}"
+
+    def _body(points, observed_at):
+        return {
+            "source_id": source,
+            "external_item_id": f"hn-90{marker[:6]}",
+            "url": url,
+            "title": "G08 engagement fixture",
+            "text": "stable body, moving points",
+            "published_at": observed_at.isoformat(),
+            "observed_at": observed_at.isoformat(),
+            "extra": {"hn_points": points, "hn_comments": 5,
+                      "hn_object_id": f"90{marker[:6]}",
+                      "source_kind": "trend_signal"},
+        }
+
+    now = datetime.now(timezone.utc)
+    res = client.post("/items", json=_body(100, now - timedelta(hours=2)))
+    assert res.status_code == 201, res.text
+    first_scan = client.post("/trends/scan", params={"limit": 50})
+    assert first_scan.status_code == 201, first_scan.text
+
+    cand = _run("SELECT id, engagement::text AS engagement "
+                "FROM trend_candidates WHERE url = $1", url)
+    assert len(cand) == 1
+    first_eng = json.loads(cand[0]["engagement"])
+    assert first_eng["known"] is False, "one observation cannot show momentum"
+
+    # Second poll of the SAME story, +100 points, 2 h later:
+    res = client.post("/items", json=_body(160, now))
+    assert res.status_code == 201 and res.json()["duplicate"] is True, \
+        "story dedup must not grow a second row"
+    count = _run("SELECT COUNT(*)::int AS n FROM items WHERE url = $1", url)
+    assert count[0]["n"] == 1
+
+    # Age the candidate into the rescan window, then re-score.
+    _run("UPDATE trend_candidates SET updated_at = now() - interval '7 hours' "
+         "WHERE url = $1", url)
+    second_scan = client.post("/trends/scan", params={"limit": 50})
+    assert second_scan.status_code == 201, second_scan.text
+
+    after = _run(
+        "SELECT engagement::text AS engagement, velocity "
+        "FROM trend_candidates WHERE url = $1", url)[0]
+    eng = json.loads(after["engagement"])
+    assert eng["known"] is True
+    assert eng["metric"] == "points"
+    assert eng["per_h"] == 30.0, "raw (160-100)/2h — unsmoothed, unscored"
+    assert eng["window_h"] == 2.0
+
+    # The measured engagement reached the API listing too.
+    listed = client.get("/trends", params={"limit": 100}).json()["candidates"]
+    mine = [c for c in listed if c["url"] == url]
+    assert mine and json.loads(mine[0]["engagement"])["per_h"] == 30.0
