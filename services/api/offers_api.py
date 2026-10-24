@@ -312,8 +312,8 @@ async def get_offer(offer_id: uuid.UUID) -> dict:
     )
     extraction = await pool.fetchrow(
         """
-        SELECT fields::text AS fields, conflicts::text AS conflicts, complete, model, created_at,
-               fact_pack::text AS fact_pack, offer_type, coverage::text AS coverage
+        SELECT fields::text AS fields, conflicts::text AS conflicts, complete, model, method,
+               created_at, fact_pack::text AS fact_pack, offer_type, coverage::text AS coverage
         FROM extractions WHERE offer_id = $1 ORDER BY created_at DESC LIMIT 1
         """,
         offer_id,
@@ -524,14 +524,14 @@ async def _add_extraction(pool, offer_id: uuid.UUID, extraction: ExtractionIn,
     serialized = extraction.model_dump(mode="json")
     row = await pool.fetchrow(
         """
-        INSERT INTO extractions (offer_id, fields, conflicts, complete, model, created_at,
-                                   fact_pack, offer_type, coverage)
-        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, clock_timestamp(), $6::jsonb, $7,
-                $8::jsonb)
+        INSERT INTO extractions (offer_id, fields, conflicts, complete, model, method,
+                                   created_at, fact_pack, offer_type, coverage)
+        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, clock_timestamp(), $7::jsonb, $8,
+                $9::jsonb)
         RETURNING id
         """,
         offer_id, _json(serialized["fields"]), _json(extraction.conflicts),
-        complete, extraction.model, _json(fact_pack), offer_type,
+        complete, extraction.model, extraction.method, _json(fact_pack), offer_type,
         _json(coverage) if coverage else None,
     )
     if extraction.conflicts:

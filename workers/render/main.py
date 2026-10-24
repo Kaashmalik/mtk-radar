@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 import shutil
@@ -748,6 +749,31 @@ def _ensure_render_jobs(client: httpx.Client, candidates: list[dict]) -> int:
     return present
 
 
+RENDER_LEASE_S = int(os.environ.get("MTK_RENDER_LEASE_S", "3600"))
+RENDER_LEASE_TOUCH_S = int(os.environ.get("MTK_RENDER_LEASE_TOUCH_S", "600"))
+
+
+def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event) -> None:
+    """Renew the render job's lease while the encode runs (WP-G §5.6.6).
+
+    A 4K encode can outlive the one-hour claim lease; without renewal the
+    attention view flags the job as wedged and a lease-expiry decision could
+    fight an in-flight render. The keeper extends the SAME holder's lease
+    every RENDER_LEASE_TOUCH_S until the render finishes or the process dies
+    (a dead process stops touching → the lease genuinely expires, as before).
+    """
+    while not stop.wait(RENDER_LEASE_TOUCH_S):
+        try:
+            resp = client.post(f"/jobs/{job_id}/touch",
+                               json={"worker": "render-worker",
+                                     "lease_s": RENDER_LEASE_S})
+            if resp.status_code != 200:
+                log.warning("lease renewal for render job %s refused (%s)",
+                            job_id, resp.status_code)
+        except httpx.HTTPError as exc:
+            log.warning("lease renewal for render job %s failed: %s", job_id, exc)
+
+
 def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
                        preset_keys: list[str], skip_narration: bool,
                        motion_template: str, candidates: list[dict]) -> set:
@@ -790,6 +816,11 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
             _job_result(client, job_id, ok=True,
                         detail="no longer a render candidate — nothing owed")
             continue
+        keeper_stop = threading.Event()
+        keeper = threading.Thread(
+            target=_lease_keeper, args=(client, str(job_id), keeper_stop),
+            name=f"lease-keeper-{str(job_id)[:8]}", daemon=True)
+        keeper.start()
         try:
             _render_candidate(api_url, out_root, skip_narration, motion_template,
                               candidate, preset_keys)
@@ -801,6 +832,8 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
             log.exception("render job %s failed for offer %s", job_id, offer_id)
             _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
                         retry_after_s=300)
+        finally:
+            keeper_stop.set()
     return rendered_keys
 
 

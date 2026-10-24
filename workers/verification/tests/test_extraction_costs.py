@@ -120,7 +120,7 @@ def test_extract_document_threads_the_cost_client(monkeypatch):
     _llm_env(monkeypatch)
     seen = []
 
-    def fake_extract(text, url, *, cost=None, ref_offer_id=None):
+    def fake_extract(text, url, *, cost=None, ref_offer_id=None, run_budget=None):
         seen.append(cost)
         return {}, [], None
 

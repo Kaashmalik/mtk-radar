@@ -27,6 +27,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import CREDENTIAL_DISABLED, CREDENTIAL_REVIEWER, credential_class
 from pagination import (
     decode_cursor,
     decode_datetime,
@@ -250,6 +251,148 @@ async def retry(job_id: uuid.UUID, request: Request) -> dict:
             status_code=409,
             detail=f"job is '{existing}' — only dead or failed jobs can be retried")
     return {"id": str(row["id"]), "status": row["status"]}
+
+
+class BulkRetryIn(BaseModel):
+    """Filter-checked bulk un-wedge (WP-G §5.6.5)."""
+    ids: Optional[list[uuid.UUID]] = Field(default=None, max_length=200)
+    all: bool = False
+    kinds: list[str] = Field(default_factory=list)
+
+
+@router.post("/jobs/bulk-retry")
+async def bulk_retry(body: BulkRetryIn, request: Request) -> dict:
+    """Revive MANY dead/failed jobs at once — the "50 jobs dead-lettered in
+    an outage" morning, one click instead of fifty (WP-G §5.6.5).
+
+    HUMAN-ONLY: mass requeuing is exactly the action automation must never
+    take on its own (same rule as batch transitions). Filter-checked: kinds
+    must be known job kinds, at most 200 ids, and only `dead`/`failed` rows
+    are touched — leased/done/pending jobs are never re-armed. Per-id results
+    (207-style multi-status) so a partially-wrong selection is visible.
+    """
+    if credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(
+            status_code=403,
+            detail="bulk retries are a human action — use a reviewer credential",
+        )
+    unknown = sorted(set(body.kinds) - set(JOB_KINDS))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown job kind(s): {', '.join(unknown)} — known: "
+                   f"{', '.join(JOB_KINDS)}")
+    if not body.all and not body.ids:
+        raise HTTPException(
+            status_code=422, detail="provide ids or all=true (with optional kinds filter)")
+    if len(body.kinds) > len(set(body.kinds)):
+        kinds = list(dict.fromkeys(body.kinds))
+    else:
+        kinds = body.kinds
+    # hard cap for the all=true path too
+    MAX_BULK = 200
+    pool = db.get()
+    rows = await pool.fetch(
+        """
+        SELECT id, kind, status::text AS status, attempts, last_error
+        FROM jobs
+        WHERE status IN ('dead', 'failed')
+          AND (($1::uuid[] IS NULL) OR (id = ANY($1::uuid[])))
+          AND (($2::text[] IS NULL) OR (kind = ANY($2::text[])))
+        ORDER BY updated_at DESC
+        LIMIT $3
+        """,
+        [str(i) for i in body.ids] if body.ids else None,
+        kinds if kinds else None,
+        MAX_BULK + 1,
+    )
+    truncated = len(rows) > MAX_BULK
+    rows = rows[:MAX_BULK]
+    updated = await pool.fetch(
+        """
+        UPDATE jobs SET status = 'pending', attempts = 0, last_error = NULL,
+               lease_holder = NULL, lease_expires_at = NULL,
+               run_after = now(), updated_at = now()
+        WHERE id = ANY($1::uuid[]) AND status IN ('dead', 'failed')
+        RETURNING id, kind
+        """,
+        [str(r["id"]) for r in rows],
+    ) if rows else []
+    retried = len(updated)
+    done: dict[str, dict] = {str(r["id"]): {"kind": r["kind"]} for r in updated}
+    results: list[dict] = []
+    for row in rows:
+        rid = str(row["id"])
+        if rid in done:
+            results.append({"id": rid, "kind": row["kind"], "ok": True,
+                            "status": "pending"})
+        else:
+            results.append({"id": rid, "kind": row["kind"], "ok": False,
+                            "status": row["status"],
+                            "detail": "state changed; only dead/failed jobs retry"})
+    # Explicitly-requested ids that matched nothing must still be visible.
+    if body.ids:
+        seen = {r["id"] for r in results}
+        for requested in body.ids:
+            rid = str(requested)
+            if rid not in seen:
+                current = await pool.fetchval(
+                    "SELECT status::text FROM jobs WHERE id = $1", requested)
+                results.append({
+                    "id": rid, "ok": False,
+                    "status": current or "missing",
+                    "detail": (f"job is '{current}' — only dead or failed jobs "
+                               "can be retried") if current else "job not found",
+                })
+    await db.get().execute(
+        "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
+        "VALUES ($1, $2, $3, NULL, $4::jsonb)",
+        credential_class(request), "jobs:bulk_retry", "jobs",
+        json.dumps({"requested": len(results), "retried": retried,
+                    "kinds": kinds, "all": body.all}, default=str),
+    )
+    return {"ok": all(r["ok"] for r in results), "retried": retried,
+            "requested": len(results), "truncated": truncated, "results": results}
+
+
+class JobTouchIn(BaseModel):
+    worker: str = Field(min_length=3, max_length=120)
+    lease_s: int = Field(default=DEFAULT_LEASE_S, ge=30, le=86400)
+
+
+@router.post("/jobs/{job_id}/touch")
+async def touch(job_id: uuid.UUID, body: JobTouchIn) -> dict:
+    """Extend a held lease (WP-G §5.6.6): renders beyond the lease window
+    (long encodes) must NOT be treated as wedged mid-flight by the attention
+    view, and must not lose the job to a reclaim decision on expiry. Only the
+    current holder can extend it — a stolen lease would break the exactly-one-
+    worker guarantee."""
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        UPDATE jobs SET lease_expires_at = now() + make_interval(secs => $2),
+               updated_at = now()
+        WHERE id = $1 AND status = 'leased' AND lease_holder = $3
+        RETURNING id, lease_expires_at
+        """,
+        job_id, body.lease_s, body.worker,
+    )
+    if not row:
+        current = await pool.fetchrow(
+            "SELECT status::text AS status, lease_holder FROM jobs WHERE id = $1",
+            job_id,
+        )
+        if not current:
+            raise HTTPException(status_code=404, detail="job not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"job is '{current['status']}'"
+                   + (f" held by another worker ({current['lease_holder']})"
+                      if current["status"] == "leased" else
+                      " — only a leased job can be touched"),
+        )
+    return {"id": str(row["id"]),
+            "lease_expires_at": row["lease_expires_at"].isoformat()}
 
 
 @router.get("/jobs/stuck")

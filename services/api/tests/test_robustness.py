@@ -1,0 +1,250 @@
+"""WP-G robustness close-outs (enhancement plan 2026-10-24 §5.6): bulk un-wedge
+(human-only, filter-checked), the render job lease heartbeat, and the media
+GC retention job (90 days, pinned artifacts exempt, dry run first).
+"""
+
+import uuid as uuidlib
+from pathlib import Path
+
+import pytest
+
+# Shared session fixture: wiped schema + migrated + the real app (with auth
+# DISABLED — credential checks pass; auth_client covers the 401/403 rules).
+from test_integration import _run, auth_client, client  # noqa: F401
+
+from test_integration import AUTH, REVIEWER, SVC  # noqa: F401
+
+
+# ------------------------------------------------------- /jobs/bulk-retry
+
+def _dead_job(marker: str, *, status: str = "dead", kind: str = "collect") -> uuidlib.UUID:
+    job_id = uuidlib.uuid4()
+    _run(
+        """
+        INSERT INTO jobs (id, kind, entity_id, payload, dedupe_key, status,
+                          run_after, attempts, max_attempts, last_error)
+        VALUES ($1, $2, NULL, '{}'::jsonb, $3, $4, now() - interval '1 hour', 5, 5, 'outage')
+        """,
+        job_id, kind, f"bulk:{marker}:{job_id}", status,
+    )
+    return job_id
+
+
+def test_bulk_retry_revives_only_dead_and_failed_jobs(client):
+    marker = uuidlib.uuid4().hex
+    dead = _dead_job(marker + "-dead", status="dead")
+    failed = _dead_job(marker + "-failed", status="failed", kind="render_package")
+    leased = _dead_job(marker + "-leased", status="leased")
+    pending = _dead_job(marker + "-pending", status="pending")
+
+    r = client.post("/jobs/bulk-retry", json={
+        "ids": [str(dead), str(failed), str(leased), str(pending)]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    by_id = {item["id"]: item for item in body["results"]}
+    assert by_id[str(dead)]["ok"] is True
+    assert by_id[str(failed)]["ok"] is True
+    assert by_id[str(leased)]["ok"] is False, "leased work is in flight — never re-armed"
+    assert by_id[str(pending)]["ok"] is False
+    assert body["retried"] == 2
+
+    states = {str(row["id"]): row["status"] for row in _run(
+        "SELECT id, status::text AS status FROM jobs WHERE id = ANY($1::uuid[])",
+        [str(j) for j in (dead, failed, leased, pending)])}
+    assert states[str(dead)] == "pending" and states[str(failed)] == "pending"
+    assert states[str(leased)] == "leased"
+    assert states[str(pending)] == "pending"
+    # fresh attempt budget + due now
+    row = _run("SELECT attempts, last_error, run_after <= now() AS due "
+               "FROM jobs WHERE id = $1", dead)[0]
+    assert row["attempts"] == 0 and row["last_error"] is None and row["due"]
+
+
+def test_bulk_retry_kinds_filter_and_unknown_kind_are_checked(client):
+    marker = uuidlib.uuid4().hex
+    dead_collect = _dead_job(marker + "-c", status="dead", kind="collect")
+    dead_render = _dead_job(marker + "-r", status="dead", kind="render_package")
+
+    r = client.post("/jobs/bulk-retry", json={"all": True, "kinds": ["collect"]})
+    assert r.status_code == 200
+    retried_ids = {item["id"] for item in r.json()["results"] if item["ok"]}
+    assert str(dead_collect) in retried_ids
+    assert str(dead_render) not in retried_ids, "the kind filter is respected"
+
+    assert client.post(
+        "/jobs/bulk-retry", json={"all": True, "kinds": ["not-a-kind"]}
+    ).status_code == 422
+    assert client.post("/jobs/bulk-retry", json={}).status_code == 422
+
+
+def test_bulk_retry_is_a_human_action(auth_client):
+    """Service credentials are refused outright — automation never bulk-requeues
+    on its own (same rule as batch transitions)."""
+    refused = auth_client.post("/jobs/bulk-retry", headers=SVC, json={"all": True})
+    assert refused.status_code == 403, refused.text
+
+
+def test_bulk_retry_writes_an_audit_entry(client):
+    marker = uuidlib.uuid4().hex
+    dead = _dead_job(marker, status="dead")
+    r = client.post("/jobs/bulk-retry", json={"ids": [str(dead)]})
+    assert r.status_code == 200
+    audit = _run("SELECT detail FROM audit_log WHERE action = 'jobs:bulk_retry' "
+                 "ORDER BY id DESC LIMIT 1")[0]["detail"]
+    assert "retried" in audit
+
+
+# --------------------------------------------------- /jobs/{id}/touch lease
+
+def test_job_touch_extends_lease_for_the_current_holder_only(client):
+    claim = client.post("/jobs/claim", json={
+        "worker": "render-worker", "lease_s": 60, "kinds": ["collect"]})
+    assert claim.status_code == 200, claim.text
+    body = claim.json()
+    if not body.get("claimed"):
+        pytest.skip("no due collect job available to claim")
+    job_id = body["id"]
+
+    before = _run("SELECT lease_expires_at FROM jobs WHERE id = $1",
+                  uuidlib.UUID(job_id))[0]
+    touched = client.post(f"/jobs/{job_id}/touch",
+                          json={"worker": "render-worker", "lease_s": 3600})
+    assert touched.status_code == 200, touched.text
+    after = _run("SELECT lease_expires_at FROM jobs WHERE id = $1",
+                 uuidlib.UUID(job_id))[0]
+    assert after["lease_expires_at"] > before["lease_expires_at"]
+
+    hijack = client.post(f"/jobs/{job_id}/touch",
+                         json={"worker": "someone-else", "lease_s": 3600})
+    assert hijack.status_code == 409, "only the current holder may extend"
+
+
+# ---------------------------------------------------------------- media GC
+
+def _rendered_offer(client, marker: str) -> str:
+    """An old landscape render (120 days) whose offer is verified."""
+    offer = client.post("/offers", json={
+        "provider": f"GC {marker}", "category": "domains", "offer_type": "coupon",
+    }).json()
+    offer_id = uuidlib.UUID(offer["id"])
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
+    _run(
+        "INSERT INTO evidence (offer_id, url, content_hash, official, domain_ok) "
+        "VALUES ($1, 'https://official.example/gc', $2, TRUE, TRUE)",
+        offer_id, f"gc-{marker}",
+    )
+    return offer["id"]
+
+
+def _old_render(offer_id: str, marker: str) -> uuidlib.UUID:
+    return _run(
+        """
+        INSERT INTO renders (offer_id, preset, width, height, video_path,
+                             captions_path, created_at)
+        VALUES ($1, 'landscape', 1920, 1080, $2, $3, now() - interval '120 days')
+        RETURNING id
+        """,
+        uuidlib.UUID(offer_id),
+        f"projects/gc/{marker}/video.mp4", f"projects/gc/{marker}/caps.vtt",
+    )[0]["id"]
+
+
+def test_media_gc_dry_run_candidates_exclude_pinned(client):
+    marker = uuidlib.uuid4().hex
+    # Old + UNPINNED: no schedule references this render.
+    orphan_offer = _rendered_offer(client, marker + "-orphan")
+    _old_render(orphan_offer, marker + "-orphan")
+    # Old + PINNED: a live schedule references the render.
+    pinned_offer = _rendered_offer(client, marker + "-pinned")
+    pinned_render = _old_render(pinned_offer, marker + "-pinned")
+    _run(
+        """
+        INSERT INTO projects (offer_id, state)
+        VALUES ($1, 'approved')
+        """,
+        uuidlib.UUID(pinned_offer),
+    )
+    _run(
+        """
+        INSERT INTO schedules (offer_id, project_id, platform, local_time, render_id,
+                               idempotency_key)
+        SELECT p.offer_id, p.id, 'youtube', now() + interval '1 day', $2, $3
+        FROM projects p WHERE p.offer_id = $1
+        """,
+        uuidlib.UUID(pinned_offer), pinned_render, f"gc-pin-{marker}",
+    )
+    pinned_count = _run("SELECT COUNT(*)::int AS n FROM schedules WHERE render_id = $1",
+                        pinned_render)[0]["n"]
+    assert pinned_count == 1, "test setup: the pinned schedule must exist"
+
+    r = client.post("/media/gc", json={"dry_run": True, "retention_days": 90})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "dry_run"
+    refs = {item["ref"] for item in body["items"]}
+    assert f"projects/gc/{marker}-orphan/video.mp4" in refs
+    assert f"projects/gc/{marker}-orphan/caps.vtt" in refs
+    pinned_refs = [ref for ref in refs if marker + "-pinned" in ref]
+    assert pinned_refs == [], "pinned renders (live schedule) are ALWAYS exempt"
+    assert client.post("/media/gc", json={"dry_run": True}).status_code == 200
+
+
+def test_media_gc_apply_deletes_and_audits(client):
+    marker = uuidlib.uuid4().hex
+    orphan_offer = _rendered_offer(client, marker + "-apply")
+    _old_render(orphan_offer, marker + "-apply")
+    # Real files inside the repo checkout so the legacy-path rule holds.
+    for rel in (f"projects/gc/{marker}-apply/video.mp4",
+                f"projects/gc/{marker}-apply/caps.vtt"):
+        path = Path.cwd() / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+    _run("UPDATE renders SET video_path = $2, captions_path = $3 "
+         "WHERE offer_id = $1",
+         uuidlib.UUID(orphan_offer),
+         f"projects/gc/{marker}-apply/video.mp4",
+         f"projects/gc/{marker}-apply/caps.vtt")
+
+    r = client.post("/media/gc", json={"dry_run": False, "retention_days": 90})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "apply"
+    assert body["deleted"] >= 2
+    assert not (Path.cwd() / f"projects/gc/{marker}-apply/video.mp4").exists()
+    assert not (Path.cwd() / f"projects/gc/{marker}-apply/caps.vtt").exists()
+    audit = _run(
+        "SELECT detail FROM audit_log WHERE action = 'media:gc' "
+        "ORDER BY id DESC LIMIT 1")[0]["detail"]
+    assert marker + "-apply" in audit
+
+
+# --------------------------------------------- trends summary is global (P2)
+
+def test_trends_summary_is_global_while_page_total_names_the_page(client):
+    """P2 carry-over (system-review 2026-10-23): the summary used to be
+    page-local while reading as totals. The summary is now GLOBAL and
+    `page_total` says exactly how many rows THIS page holds."""
+    marker = uuidlib.uuid4().hex
+    _run(
+        """
+        INSERT INTO trend_candidates (title, url, score, status)
+        VALUES ('t1', $1, 90, 'shortlisted'), ('t2', $2, 82, 'radar'),
+               ('t3', $3, 30, 'radar')
+        """,
+        f"https://trend.example/{marker}/a",
+        f"https://trend.example/{marker}/b",
+        f"https://trend.example/{marker}/c",
+    )
+    listed = client.get("/trends", params={"limit": 2})
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["page_total"] == len(body["candidates"]) == 2
+    summary = body["summary"]
+    assert summary["total"] > body["page_total"], (
+        "summary counts the whole radar, not the page")
+    hot = int(_run("SELECT COUNT(*)::int AS n FROM trend_candidates "
+                   "WHERE score >= 78")[0]["n"])
+    shortlisted = int(_run("SELECT COUNT(*)::int AS n FROM trend_candidates "
+                           "WHERE status = 'shortlisted'")[0]["n"])
+    assert summary["hot"] == hot
+    assert summary["shortlisted"] == shortlisted

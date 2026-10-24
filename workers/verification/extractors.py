@@ -223,6 +223,46 @@ def llm_configured() -> bool:
     return bool(os.environ.get("VERIFY_LLM_BASE_URL") and os.environ.get("VERIFY_LLM_API_KEY"))
 
 
+#: WP-G (§5.6.3): hardening knobs. A stuck/looping provider can only cost a
+#: run its call budget — never an unbounded retry storm.
+LLM_TIMEOUT_S = float(os.environ.get("VERIFY_LLM_TIMEOUT_S", "45"))
+LLM_MAX_CALLS_PER_RUN = int(os.environ.get("VERIFY_LLM_MAX_CALLS_PER_RUN", "12"))
+LLM_MAX_ATTEMPTS = max(1, int(os.environ.get("VERIFY_LLM_MAX_ATTEMPTS", "3")))
+LLM_BACKOFF_BASE_S = float(os.environ.get("VERIFY_LLM_BACKOFF_BASE_S", "1.0"))
+
+
+class RunBudget:
+    """Per-run request budget for the optional LLM extractor (WP-G).
+
+    One document is split into many sections; each section may ask the LLM.
+    The budget bounds the WHOLE run so a mis-sized document cannot turn into
+    an unbounded spend. `stats` is the honest-attribution record surfaced in
+    the extraction payload: the operator must see that the LLM was attempted
+    and fell back, not just a bare `rules/0.1`.
+    """
+
+    def __init__(self, max_calls: int = LLM_MAX_CALLS_PER_RUN,
+                 stats: Optional[dict] = None):
+        self.remaining = max(0, int(max_calls))
+        self.stats = stats if isinstance(stats, dict) else {}
+
+    def allow(self, kind: str) -> bool:
+        if self.remaining <= 0:
+            self.stats["llm_budget_exhausted"] = True
+            return False
+        return True
+
+    def charge(self, kind: str) -> None:
+        if kind in ("call", "retry"):
+            self.remaining = max(0, self.remaining - 1)
+            self.stats["llm_attempted"] = int(self.stats.get("llm_attempted", 0)) + 1
+
+    def note(self, key: str) -> None:
+        self.stats[key] = int(self.stats.get(key, 0)) + 1
+        if key == "llm_succeeded":
+            self.stats["llm_success"] = True
+
+
 def extract_fields_llm(
     text: str,
     evidence_url: str,
@@ -232,9 +272,17 @@ def extract_fields_llm(
     model: Optional[str] = None,
     cost: Optional[Any] = None,
     ref_offer_id: Optional[str] = None,
+    run_budget: Optional[RunBudget] = None,
 ) -> Optional[dict[str, Any]]:
     """Extract fields with an OpenAI-compatible LLM. Returns None on any
     failure — verification must never depend on the LLM being available.
+
+    Hardening (WP-G §5.6.3): every network error/5xx/429 is retried up to
+    `VERIFY_LLM_MAX_ATTEMPTS` with exponential backoff + jitter; a per-run
+    request budget (`VERIFY_LLM_MAX_CALLS_PER_RUN`, threaded via RunBudget)
+    bounds how many calls one document can make; when the LLM was attempted
+    but did not produce usable fields, `run_budget.stats` records it so the
+    worker can report `method=rules_fallback` honestly.
 
     Cost engine (WP-F): with a `cost` client attached, the result is served
     from the shared `extract:{content-hash}:{model}` cache first (a
@@ -251,10 +299,16 @@ def extract_fields_llm(
     if not base or not key:
         return None
 
+    if run_budget is not None:
+        if not run_budget.allow("call"):
+            return None  # per-run request budget spent — deterministic rules continue
+        run_budget.charge("call")
     if cost is not None:
         cache_key = costing.extraction_cache_key(model_id, text)
         cached = cost.cache_lookup("extract", cache_key)
         if cached is not None:
+            if run_budget is not None:
+                run_budget.note("llm_succeeded")  # a cache hit IS a success
             cost.report("llm_extract", units=0, provider="openai-compatible",
                         model=model_id, unit_type="tokens",
                         ref_type="offer", ref_id=ref_offer_id,
@@ -281,32 +335,56 @@ def extract_fields_llm(
         "temperature": 0,
         "response_format": {"type": "json_object"},
     }
-    try:
-        resp = httpx.post(
-            f"{base}/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=45,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        content = payload["choices"][0]["message"]["content"]
-        data = json.loads(content)
-        if not isinstance(data.get("fields"), dict):
-            return None
-        if cost is not None:
-            usage = payload.get("usage") or {}
-            tokens_in = int(usage.get("prompt_tokens") or 0)
-            tokens_out = int(usage.get("completion_tokens") or 0)
-            cost.cache_store("extract", cache_key, data)
-            cost.report("llm_extract", units=tokens_in + tokens_out,
-                        provider="openai-compatible", model=model_id,
-                        unit_type="tokens", ref_type="offer",
-                        ref_id=ref_offer_id,
-                        meta={"tokens_in": tokens_in, "tokens_out": tokens_out})
-        return data
-    except Exception:  # noqa: BLE001 — LLM failure must never block verification
-        return None
+    # WP-G: bounded retries with backoff + jitter. Network errors, 5xx and
+    # 429 are retried; a malformed payload is NOT (a re-ask would return the
+    # same garbage — the deterministic rules path stays authoritative).
+    import random
+    import time as _time
+
+    last_error: Optional[Exception] = None
+    for attempt in range(LLM_MAX_ATTEMPTS):
+        if attempt > 0:
+            if run_budget is not None:
+                if not run_budget.allow("retry"):
+                    break
+                run_budget.charge("retry")
+            _time.sleep(min(LLM_BACKOFF_BASE_S * (2 ** (attempt - 1)), 8.0)
+                        + random.uniform(0, 0.5))
+        try:
+            resp = httpx.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=LLM_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            content = payload["choices"][0]["message"]["content"]
+            data = json.loads(content)
+            if not isinstance(data.get("fields"), dict):
+                if run_budget is not None:
+                    run_budget.note("llm_bad_payload")
+                return None  # malformed — retrying would return the same garbage
+            if cost is not None:
+                usage = payload.get("usage") or {}
+                tokens_in = int(usage.get("prompt_tokens") or 0)
+                tokens_out = int(usage.get("completion_tokens") or 0)
+                cost.cache_store("extract", cache_key, data)
+                cost.report("llm_extract", units=tokens_in + tokens_out,
+                            provider="openai-compatible", model=model_id,
+                            unit_type="tokens", ref_type="offer",
+                            ref_id=ref_offer_id,
+                            meta={"tokens_in": tokens_in, "tokens_out": tokens_out})
+            if run_budget is not None:
+                run_budget.note("llm_succeeded")
+            return data
+        except (httpx.HTTPError, ValueError, KeyError, IndexError,
+                TypeError, json.JSONDecodeError) as exc:
+            last_error = exc
+            continue
+    if run_budget is not None:
+        run_budget.note("llm_failures")
+    return None
 
 
 def extract(
@@ -315,6 +393,7 @@ def extract(
     *,
     cost: Optional[Any] = None,
     ref_offer_id: Optional[str] = None,
+    run_budget: Optional[RunBudget] = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], Optional[str]]:
     """Combined extraction. Returns (fields, conflicts, model_used).
 
@@ -329,7 +408,8 @@ def extract(
 
     if llm_configured():
         llm = extract_fields_llm(text, evidence_url, cost=cost,
-                                 ref_offer_id=ref_offer_id)
+                                 ref_offer_id=ref_offer_id,
+                                 run_budget=run_budget)
         if llm is not None:
             model_used = os.environ.get("VERIFY_LLM_MODEL", "gpt-4o-mini")
             llm_fields = llm.get("fields", {})
@@ -354,6 +434,7 @@ def extract_document(
     max_chars: int = MAX_SECTION_CHARS,
     cost: Optional[Any] = None,
     ref_offer_id: Optional[str] = None,
+    run_budget: Optional[RunBudget] = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], Optional[str], int]:
     """Sectioned extraction over the whole document (WP01 slice 8).
 
@@ -372,7 +453,8 @@ def extract_document(
 
     for section in sections:
         section_fields, section_conflicts, model = extract(
-            section.text, evidence_url, cost=cost, ref_offer_id=ref_offer_id)
+            section.text, evidence_url, cost=cost, ref_offer_id=ref_offer_id,
+            run_budget=run_budget)
         model_used = model or model_used
         for name, field in section_fields.items():
             if name not in fields:

@@ -51,7 +51,7 @@ from document_sections import (  # noqa: E402
 from fetch_attestation import sign_provenance  # noqa: E402
 
 from allowlist import build_allowlist, domain_ok, host_of  # noqa: E402
-from extractors import extract_document, is_complete  # noqa: E402
+from extractors import RunBudget, extract_document, is_complete  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
@@ -238,10 +238,22 @@ class Verifier:
                     "official snapshot exceeds the sectioned-processing ceiling; "
                     "review rather than truncate terms"
                 )
+            # WP-G: per-run LLM request budget + honest attribution. When the
+            # LLM was attempted but produced nothing, the payload says
+            # `rules_fallback` — never a bare `rules/0.1` pretending the
+            # fallback did not happen.
+            run_stats: dict = {}
             fields, page_conflicts, page_model, sections_total = extract_document(
                 item.text, item.url,
                 cost=getattr(self, "cost", None), ref_offer_id=str(offer_id),
+                run_budget=RunBudget(stats=run_stats),
             )
+            if run_stats.get("llm_succeeded"):
+                extraction_method = "llm"
+            elif run_stats.get("llm_attempted") or run_stats.get("llm_budget_exhausted"):
+                extraction_method = "rules_fallback"
+            else:
+                extraction_method = "rules"
             payload = {
                 "url": item.url, "source_id": source_id,
                 "captured_content": item.text,
@@ -292,6 +304,7 @@ class Verifier:
             "fields": best_fields,
             "conflicts": conflicts,
             "model": model_used or "rules/0.1",
+            "method": extraction_method,
             # Everything the verifier actually read, section by section.
             "coverage": {
                 "version": SECTIONS_VERSION,

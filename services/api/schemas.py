@@ -321,10 +321,23 @@ class ExtractionIn(BaseModel):
     complete: bool = Field(default=False, strict=True)
     conflicts: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
     model: Optional[str] = Field(default=None, max_length=200)
+    #: WP-G (§5.6.3): honest attribution of HOW this proposal was produced —
+    #: `llm`, `rules` (deterministic only) or `rules_fallback` (the LLM was
+    #: attempted but produced nothing usable). Optional for legacy callers.
+    method: Optional[str] = Field(default=None, max_length=40)
     #: Optional for legacy/manual callers; the acquisition worker always sends it.
     coverage: Optional[ExtractionCoverage] = None
     #: Human explanation when a reviewer edits claims or clears conflicts.
     review_note: Optional[str] = Field(default=None, min_length=3, max_length=2000)
+
+    _ALLOWED_METHODS = {"llm", "rules", "rules_fallback"}
+
+    @model_validator(mode="after")
+    def known_method(self) -> "ExtractionIn":
+        if self.method is not None and self.method not in self._ALLOWED_METHODS:
+            raise ValueError(
+                f"method must be one of {sorted(self._ALLOWED_METHODS)}")
+        return self
 
     @model_validator(mode="after")
     def typed_claim_values(self) -> "ExtractionIn":
