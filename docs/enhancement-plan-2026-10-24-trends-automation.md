@@ -23,10 +23,11 @@ notably its source [S11] corrects the YouTube quota figures below (§4.1, §4.3)
 WP-F `3267201` · WP-G `6a610aa` · WP-H `e90a9d3` (docs: §7 item 9 — go-live
 checklist, source registry, runbook, traceability — updated in the same series).
 At `0d3b043` the local run was **964 passed, 3 skipped, 1 failed** (the
-portable-filename guard). After the 2026-10-25 M0/M1 fixes it is **975 passed,
-3 skipped, 0 failed**. The older "580 API + 461 workers/packages" count is
-**not reproducible** and is withdrawn; Postgres integration and CI were not run
-on 2026-10-25. Feature-to-code map:
+portable-filename guard). After the M2 runtime-proof batch (2026-10-25, `75b03e4`) it is **1176 passed,
+0 failed**, including 158 real-Postgres integration tests and 9/9 Playwright
+tests. The older "580 API + 461 workers/packages" count is **not
+reproducible** and is withdrawn. CI and live provider posting remain unproven.
+Feature-to-code map:
 [`master-plan-traceability.md`](master-plan-traceability.md).
 
 > **Scope caveat (reviewed 2026-10-25):** "landed" means the WP-A–WP-H

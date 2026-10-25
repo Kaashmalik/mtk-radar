@@ -11,10 +11,15 @@ Python suite **964 passed, 3 skipped, 1 failed**. Docker/Postgres was
 unavailable, so all database integration tests were skipped. CI on `0d3b043`
 did not run: GitHub reports the owner account is locked for billing.
 
-**Current local state (2026-10-25, working tree):** **975 passed / 3 skipped /
-0 failed**; extension 29/29; `ruff`, `pnpm typecheck`, dashboard production
-build, doc-link, filename and gitleaks checks clean. Postgres integration,
-Playwright and CI execution remain `UNPROVEN`.
+**Current local state (2026-10-25, `75b03e4`):** **1176 passed / 0 failed**
+(the full suite includes the real-Postgres integration layer); **9/9
+Playwright** tests pass, including the loaded-extension Chromium smoke;
+extension 29/29; `ruff`, `pnpm typecheck`, dashboard production build, doc-link,
+filename and gitleaks checks clean; `pnpm verify` exited 0. Postgres,
+Playwright and loaded-extension execution are now `VERIFIED` locally on
+Windows with portable PostgreSQL 16.15. **GitHub Actions execution and live
+private/test provider posting remain `UNPROVEN`** (billing lock; no provider
+keys).
 
 **Companions:**
 [master plan](master%20plan.md) (product intent),
@@ -85,15 +90,21 @@ anything below `VERIFIED`.
 | CI `0d3b043` | not started | GitHub: account locked due to billing issue |
 | Live publishing | not run | provider keys required |
 
-### Current local result (after M0 + first M1 batch)
+### Current local result (after M2 runtime proof, `75b03e4`)
 
 | Check | Result | Notes |
 |---|---|---|
-| `.\\.venv\\Scripts\\python.exe -m pytest -q` | **975 passed, 3 skipped, 0 failed** | Windows, 2026-10-25; +11 vs baseline |
-| `node --test apps/extension/tests/core.test.js` | **29/29 pass** | was 25; settings/probe + context-privacy regressions |
-| `ruff check .` | pass | via `.venv` |
+| `pnpm verify` (Git Bash, external Postgres) | **exit 0** | 2026-10-25; log in [`evidence/verify-pnpm-2026-10-25.log`](evidence/verify-pnpm-2026-10-25.log) |
+| Python suite (real Postgres 16.15) | **1176 passed, 0 failed** | includes 158 API integration tests; `MTK_VERIFY_DATABASE_URL=postgresql://mtk@127.0.0.1:55499/postgres` |
+| Playwright (dashboard + loaded extension) | **9/9 pass** | real API + production dashboard build + unpacked MV3 extension; [evidence](evidence/loaded-extension-e2e.json) |
+| `node --test apps/extension/tests/core.test.js` | **29/29 pass** | settings/probe + context-privacy regressions |
+| `ruff check --select E9,F63,F7,F82,F821` | pass | via `.venv` |
+| `gitleaks detect` | pass | 132 commits, no leaks |
 | `python scripts/check_doc_links.py` | pass | 48 files |
 | `python scripts/check_filenames.py` | pass | Windows-portable |
+| Provider private smoke (dry run) | **harness only** | all live providers `not_configured`; Instagram `unsupported_private`; [evidence](evidence/provider-private-smoke-dry-run.json) |
+| GitHub Actions | **UNPROVEN** | owner billing lock; workflow updated but not executed |
+| Live private/test posting | **UNPROVEN** | requires provider keys and an approved test clip |
 
 **Known false/stale claims:** recorded in the 2026-10-25 audit and folded into
 the gap register below. The audit is the source for every `DOC-*` item.
@@ -172,7 +183,7 @@ history, and `scripts/check_doc_links.py` resolves all 48 markdown files.
 | ID | Sev | Gap | Acceptance |
 |---|---|---|---|
 | CODE-01 | P0 | Extension save wipes a masked token (`options.js:91`) | Saving without retyping keeps the stored token; regression test covers masked and changed token |
-| CODE-02 | P0 | TikTok returns `confirmed: True` on `PUBLISH_COMPLETE` with no public post id (`tiktok.py:240-241`) | Confirmation requires a public post id; otherwise `confirmed: False` + hold; tests for both |
+| CODE-02 | P0 | TikTok returned `confirmed: True` on `PUBLISH_COMPLETE` with no public post id for a **public** post | Public confirmation requires a public post id; private/unlisted (`SELF_ONLY`) completion confirms only the requested private test post, never public visibility; tests for all three |
 | CODE-03 | P1 | Gate-off hashtags are alphabetical and can drop trend tags (`hashtags.py:214-224`) | Source-priority order preserved; cap never drops a higher-priority tag; test asserts order |
 | CODE-04 | P1 | `renewal.regularPrice` leaks into research scripts (`scriptgen.py:445-450`) | Research/explainer paths suppress renewal price unless the claim type allows it; EN + UR tests |
 | CODE-05 | P0 | Filename guard test cannot run on Windows (`test_check_filenames.py:53-57`) | End-to-end test works on Windows and Linux without creating an invalid file |
@@ -198,14 +209,15 @@ history, and `scripts/check_doc_links.py` resolves all 48 markdown files.
 Decisions for all four are recorded in [§6.6](#66-claim-decisions-2026-10-25).
 
 ### 6.4 Runtime proof (`PROOF-*`)
-| ID | Sev | Proof needed | Command / environment |
+
+| ID | Sev | Status | Proof / remaining action |
 |---|---|---|---|
-| PROOF-01 | P0 | Postgres integration suite and migration runner | `MTK_TEST_DATABASE_URL=... python -m pytest services/api/tests/test_integration.py -q` against Postgres 16 |
-| PROOF-02 | P1 | Full `pnpm verify` including Playwright | Docker stack + `pnpm verify` |
-| PROOF-03 | P1 | Loaded-extension Chromium E2E | unpacked extension against local API |
-| PROOF-04 | P0 | CI actually executes | unblock billing, push a no-op commit, record run URL |
-| PROOF-05 | P1 | One private/test publish per provider | provider keys; record post id/privacy/URL |
-| PROOF-06 | P1 | Render QC on a real output | ffprobe/QC report attached to the ledger |
+| PROOF-01 | P0 | **VERIFIED** (2026-10-25) | Postgres 16.15 external server; `MTK_VERIFY_DATABASE_URL=postgresql://mtk@127.0.0.1:55499/postgres pnpm verify` recreated `mtk_verify` and ran 158 integration tests; full suite **1176 passed** |
+| PROOF-02 | P1 | **VERIFIED** (2026-10-25) | `pnpm verify` in Git Bash on Windows with portable PostgreSQL; exit 0; [full log](evidence/verify-pnpm-2026-10-25.log) |
+| PROOF-03 | P1 | **VERIFIED** (2026-10-25) | 9/9 Playwright tests, including `loaded-extension.spec.ts` against the real API and unpacked extension; [JSON evidence](evidence/loaded-extension-e2e.json) |
+| PROOF-04 | P0 | **UNPROVEN** | CI workflow is implemented and now includes the loaded-extension step, but GitHub Actions cannot execute while the owner account is billing-locked. Record a run URL after unblocking. |
+| PROOF-05 | P1 | **UNPROVEN** | No provider credentials in this environment. `scripts/provider_private_smoke.py` is implemented and fail-closed; dry-run evidence is committed. Run `--live --video <clip>` per provider and record the confirmed private post. |
+| PROOF-06 | P1 | **UNPROVEN** | Render QC code/tests exist, but no dated real-output QC artifact is attached to this ledger. |
 
 ---
 
@@ -213,22 +225,22 @@ Decisions for all four are recorded in [§6.6](#66-claim-decisions-2026-10-25).
 
 | ID | Status | Evidence |
 |---|---|---|
-| CODE-01 | `IMPLEMENTED_UNVERIFIED` | `settingsPatch`/`probeToken` in `core.js`; options save omits a masked token; 29 Node tests; `node --check options.js`; loaded-browser E2E still unproven |
-| CODE-02 | `IMPLEMENTED_UNVERIFIED` | TikTok confirmation now requires a public post id; `PUBLISH_COMPLETE` alone returns `confirmed: False` + hold; 8 TikTok/confirmation tests; live TikTok still unproven |
+| CODE-01 | `IMPLEMENTED_UNVERIFIED` | `settingsPatch`/`probeToken` in `core.js`; options save omits a masked token; 29 Node tests; `node --check options.js`; the loaded-extension E2E saves and probes a token, but does not cover the masked-token reload case |
+| CODE-02 | `VERIFIED` (unit) | Public `PUBLISH_COMPLETE` without a public post id still returns `confirmed: False` + hold; private/unlisted `SELF_ONLY` completion returns `confirmed: True`, `visibility: self_only`, and no public URL; TikTok/confirmation tests pass. Live provider proof is PROOF-05 |
 | CODE-05 | `VERIFIED` (Windows) | 5/5 filename tests, including the temp-git-tree case; Linux CI run still `PROOF-04` |
 | DOC-15 | `VERIFIED` | 19 historical files moved under `docs/archive/`; banners added; links resolve |
 | DOC-16 | `VERIFIED` | `docs/README.md`, `scripts/check_doc_links.py`, 3 checker tests, verify/CI wiring; 48 files checked |
 | CODE-03 | `VERIFIED` (unit) | unmeasured hashtags keep source-priority order; new order/cap test; 15 hashtag tests |
 | CODE-04 | `VERIFIED` (unit) | research tracks suppress `renewal.regularPrice` in EN + UR; offer track regression-tested |
-| CODE-06 | `IMPLEMENTED_UNVERIFIED` | granted origin persisted in `chrome.storage.local` and retired on change/revoke; loaded-browser proof still pending |
+| CODE-06 | `IMPLEMENTED_UNVERIFIED` | granted origin persisted in `chrome.storage.local` and retired on change/revoke; the loaded-extension E2E now runs in real Chromium, but does not exercise the grant/revoke permission prompt |
 | CODE-12 | `VERIFIED` (unit) | `pageContextUrl` omits private surfaces and strips query/hash; 29 Node tests |
-| CODE-07 | `IMPLEMENTED_UNVERIFIED` | `GET /items/{item_id}` exact lookup; extension opens `/inbox?saved_item=<id>`; inbox highlights the row and the home page redirects old links; dashboard typecheck clean; new DB deep-link test written but not run |
-| CODE-08 | `VERIFIED` (unit) | `/attention` exposes per-kind `returned`/`truncated` + top-level flags; UI discloses caps; `test_attention_summary.py` (2 tests); DB assertions still unrun |
+| CODE-07 | `VERIFIED` (unit + DB) | `GET /items/{item_id}` exact lookup; extension opens `/inbox?saved_item=<id>`; inbox highlights the row and the home page redirects old links; the integration suite ran against Postgres 16.15 |
+| CODE-08 | `VERIFIED` (unit + DB) | `/attention` exposes per-kind `returned`/`truncated` + top-level flags; UI discloses caps; `test_attention_summary.py` + the DB-backed integration suite passed |
 | CODE-09 | `VERIFIED` | `GET /source-adapters` returns the whole Python registry with required/optional config and approval state; `SourceForm` renders kinds + config fields from it; registry API test passes |
-| CODE-10 | `IMPLEMENTED_UNVERIFIED` | cap counts both `automation:%` and `system:%`; superseded contradicted claims are exposed as `superseded_conflicts` and never gate; integration tests written but not run |
+| CODE-10 | `VERIFIED` (unit + DB) | cap counts both `automation:%` and `system:%`; superseded contradicted claims are exposed as `superseded_conflicts` and never gate; the integration test passed after making its daily-budget setup independent of prior promotions |
 | CODE-11 | `VERIFIED` | env-matrix reader map covers every matrix var and fails if a new var lacks a reader; TTS/Urdu and dynamic Instagram prefix reads handled |
-| CODE-13 | `IMPLEMENTED_UNVERIFIED` | provenance now stores `context_type`/`context_url`; contract test asserts both observation provenance and `items.extra`; DB test not run |
-| CODE-14 | `IMPLEMENTED_UNVERIFIED` | radar candidates store `signals.evidence` (`observation_id`, `retrieved_at`, `payload_hash`, `url`); scan evidence assertion written but not run |
+| CODE-13 | `VERIFIED` (unit + DB) | provenance stores `context_type`/`context_url`; the contract test asserts both observation provenance and `items.extra` and ran in the integration suite |
+| CODE-14 | `VERIFIED` (unit + DB) | radar candidates store `signals.evidence` (`observation_id`, `retrieved_at`, `payload_hash`, `url`); the scan evidence assertion ran in the integration suite |
 
 `DOC-01`–`DOC-14` were corrected in the same pass; they remain listed above
 until the final audit re-reads each file.
@@ -240,7 +252,7 @@ until the final audit re-reads each file.
 | CLAIM-01 | Implement gitleaks; explicitly drop commitlint and mypy; keep env-schema validation `PLANNED` | `PARTIAL` | `.gitleaks.toml`, `.pre-commit-config.yaml`, CI `secret-scan` job; local gitleaks run over 128 commits found no leaks; CI job unrun (billing); docs no longer claim commitlint/mypy |
 | CLAIM-02 | OBS external-capture intake and Perkstack/Find AI Credits Tier-C sources remain proposals, not shipped | `PLANNED` | `tool-stack-alignment-2026-10-23.md` marks both “Proposed”/“not implemented”; no code or seed exists |
 | CLAIM-03 | Beat cuts, J-cut/L-cut, music mix, brand tag and loudness QC stay editing-plan/operator work | `PLANNED` | `youtube-playbook-2026-10-23.md` labels each row `PLANNED`/`Operator`; renderer is a continuous pass |
-| CLAIM-04 | “Every connector passes private/test posting” is not demonstrated | `UNPROVEN (needs keys)` | no provider keys in this environment; `PROOF-05` owns the dated per-provider evidence |
+| CLAIM-04 | "Every connector passes private/test posting" is not demonstrated | `UNPROVEN (needs keys)` | fail-closed harness implemented in `scripts/provider_private_smoke.py`; dry-run evidence commits the missing-credential/unsupported states. No provider keys in this environment; `PROOF-05` owns the dated per-provider live evidence |
 
 A decision is closed when the document no longer claims more than the code
 does. `PLANNED` is an honest terminal state for a proposal; it is not a promise
@@ -274,6 +286,9 @@ ledger must be honest before the next feature layer is added.
 | Extension syntax | `node --check apps/extension/background.js` (and `options.js`) | parse-only |
 | Extension logic | `node --test apps/extension/tests` | pure logic/outbox |
 | Full verify | `pnpm verify` | lint + types + tests + build + Playwright |
+| Full verify without Docker | `MTK_VERIFY_DATABASE_URL=postgresql://user@host:port/postgres MTK_VERIFY_PYTHON=/path/to/.venv/python pnpm verify` | same gates against an existing PostgreSQL server; drops/recreates `mtk_verify` + `mtk_verify_e2e` |
+| Loaded extension | `E2E_EXTENSION_DIR=... E2E_API_BASE_URL=... E2E_EXTENSION_TOKEN=... E2E_API_TOKEN=... pnpm --dir apps/dashboard exec playwright test loaded-extension.spec.ts` | real Chromium profile + real API delivery/dedupe |
+| Provider private smoke | `python scripts/provider_private_smoke.py --dry-run` / `--live --video <clip>` | config check / confirmed private test posts; Instagram refuses by design |
 | Filename guard | `python scripts/check_filenames.py` | Windows-portable paths |
 | Docs links | `python scripts/check_doc_links.py` | no dead links |
 | Secret scan | `gitleaks detect --source . --config .gitleaks.toml --redact` | no committed credentials (CI `secret-scan` job) |
@@ -362,7 +377,13 @@ restore the previous verified status.
 - [x] Run full suite and record the dated result (975 pass / 3 skip / 0 fail)
 - [x] Add gitleaks config, pre-commit hooks and CI secret job (CLAIM-01)
 - [x] Record CLAIM-01–CLAIM-04 decisions without overclaiming (CLAIM-02–04 `PLANNED`/`UNPROVEN`)
-- [ ] M2 runtime proof: Postgres integration, loaded-browser E2E, CI, live publish
+- [x] M2a: Postgres integration + migration runner on PostgreSQL 16.15 (PROOF-01)
+- [x] M2b: full `pnpm verify` including 9 Playwright tests (PROOF-02)
+- [x] M2c: loaded-extension Chromium E2E against the real API (PROOF-03)
+- [x] M2d: fail-closed provider private/test smoke harness + dry-run evidence (PROOF-05 preparation)
+- [ ] M2e: CI execution URL after billing unlock (PROOF-04)
+- [ ] M2f: one confirmed live private/test post per provider (PROOF-05)
+- [ ] M2g: dated real-output render QC artifact (PROOF-06)
 
 ---
 
@@ -377,3 +398,7 @@ restore the previous verified status.
 | 2026-10-25 | working tree | CODE-07–CODE-14 fixed/implemented | 975 pass / 3 skip / 0 fail; 29/29 Node tests; ruff + `pnpm typecheck` + doc links + filename guard clean; new DB tests unrun |
 | 2026-10-25 | working tree | CLAIM decisions recorded; gitleaks + pre-commit + CI secret job added | gitleaks 8.24.2 full-history scan: 128 commits, no leaks; CI job configured but unrun (billing lock); commitlint/mypy claims removed |
 | 2026-10-25 | working tree | Edit-tool CRLF drift normalized back to LF; verification re-run | `git diff --check` clean; 975 pass / 3 skip / 0 fail; 29/29 Node tests; ruff + typecheck + dashboard build + doc/filename guards clean; `pre-commit run --all-files` passed |
+| 2026-10-25 | `a6138d7` | TikTok private confirmation: `SELF_ONLY` completion confirms a private/unlisted test post; public completion without a public id stays held | `test_publication_confirmation.py` + 26 targeted tests pass |
+| 2026-10-25 | `21b9a85` | External-Postgres verify path, disposable DB helper, Windows/Git Bash interpreter handling, loaded-extension Chromium E2E, CI Xvfb step; integration test isolation + `tzdata` | 158 integration tests pass; `pnpm verify` E2E 9/9 |
+| 2026-10-25 | `75b03e4` | Fail-closed private/test provider smoke (YouTube private, Facebook draft, TikTok `SELF_ONLY`, Instagram unsupported) | 12 harness tests pass; dry-run evidence committed |
+| 2026-10-25 | `75b03e4` | Full `pnpm verify` on Windows/Git Bash with portable PostgreSQL 16.15; gitleaks on PATH | exit 0; **1176 passed**; gitleaks 132 commits/no leaks; Playwright **9 passed (33.1s)**; [log](evidence/verify-pnpm-2026-10-25.log) |

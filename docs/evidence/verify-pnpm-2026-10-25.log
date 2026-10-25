@@ -1,0 +1,385 @@
+
+> mtk-radar@0.30.0 verify D:\MalikTech\mtk-radar
+> bash scripts/verify.sh
+
+
+▸ Filename portability (Windows-invalid characters, G28/EP-00)
+all tracked filenames portable (scripts/check_filenames.py)
+✔ filenames portable
+
+▸ Documentation links (relative README/docs links)
+documentation links resolve (48 files)
+✔ documentation links resolve
+
+▸ Secret scan (gitleaks)
+
+    ○
+    │╲
+    │ ○
+    ○ ░
+    ░    gitleaks
+
+9:14PM INF 132 commits scanned.
+9:14PM INF scanned ~19659454 bytes (19.66 MB) in 5.8s
+9:14PM INF no leaks found
+✔ no secrets in full history
+
+▸ Python lint (ruff: syntax + undefined names)
+All checks passed!
+✔ ruff clean
+
+▸ Python compile
+✔ all modules compile
+
+▸ Unit + integration tests (real Postgres, real migrations)
+  external Postgres; recreating disposable db mtk_verify
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 42%]
+........................................................................ [ 48%]
+........................................................................ [ 55%]
+........................................................................ [ 61%]
+........................................................................ [ 67%]
+........................................................................ [ 73%]
+........................................................................ [ 79%]
+........................................................................ [ 85%]
+........................................................................ [ 91%]
+........................................................................ [ 97%]
+........................                                                 [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  D:\MalikTech\mtk-radar\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+services\api\main.py:129
+services/api/tests/test_costs.py::test_usage_emit_and_pricing_are_deterministic
+services/api/tests/test_source_registry.py::test_api_exposes_every_registry_adapter_to_the_dashboard
+  D:\MalikTech\mtk-radar\services\api\main.py:129: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+.venv\Lib\site-packages\fastapi\applications.py:4745
+.venv\Lib\site-packages\fastapi\applications.py:4745
+services/api/tests/test_costs.py::test_usage_emit_and_pricing_are_deterministic
+services/api/tests/test_costs.py::test_usage_emit_and_pricing_are_deterministic
+services/api/tests/test_source_registry.py::test_api_exposes_every_registry_adapter_to_the_dashboard
+services/api/tests/test_source_registry.py::test_api_exposes_every_registry_adapter_to_the_dashboard
+  D:\MalikTech\mtk-radar\.venv\Lib\site-packages\fastapi\applications.py:4745: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+services\api\main.py:134
+services/api/tests/test_costs.py::test_usage_emit_and_pricing_are_deterministic
+services/api/tests/test_source_registry.py::test_api_exposes_every_registry_adapter_to_the_dashboard
+  D:\MalikTech\mtk-radar\services\api\main.py:134: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+services/api/tests/test_integration.py: 8 warnings
+services/api/tests/test_scriptgen.py: 16 warnings
+services/api/tests/test_scriptgen_bilingual.py: 4 warnings
+services/api/tests/test_scriptgen_research.py: 6 warnings
+  D:\MalikTech\mtk-radar\services\api\scriptgen.py:461: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    lines.append(f"_Checked on {datetime.utcnow().strftime('%d %b %Y')}. Terms may change; "
+
+services/api/tests/test_scriptgen_bilingual.py::test_multilingual_builds_both_languages_from_the_same_facts
+services/api/tests/test_scriptgen_bilingual.py::test_language_versions_have_distinct_hashes
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_script_keeps_renewal_and_eligibility_warnings
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_unknown_eligibility_never_claims_open_eligibility
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_missing_expiry_records_the_deadline_gap_not_silence
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_unknown_renewal_never_invents_a_price
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_summary_auto_renew_label_follows_the_facts
+services/api/tests/test_scriptgen_bilingual.py::test_urdu_summary_auto_renew_label_follows_the_facts
+services/api/tests/test_scriptgen_research.py::TestResearchTrackSourcing::test_explainer_never_renders_renewal_price
+  D:\\MalikTech\\mtk-radar\\services\\api\\scriptgen.py:626: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).\n    lines.append(f"_\u0686\u06cc\u06a9 \u06a9\u06cc\u0627 \u06af\u06cc\u0627: {datetime.utcnow().strftime('%d %b %Y')}\u06d4 \u0634\u0631\u0627\u0626\u0637 \u0628\u062f\u0644 \u0633\u06a9\u062a\u06cc \u06c1\u06cc\u06ba\u061b "
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1176 passed, 56 warnings in 144.88s (0:02:24)
+✔ test suites green
+
+▸ Typecheck (offer-schema + dashboard)
+✔ typecheck clean
+
+▸ Dashboard production build
+✔ dashboard builds
+
+▸ Compose configuration (production + dev override)
+✔ compose files valid
+
+▸ CI workflow YAML
+  jobs: secret-scan, python, node, e2e
+✔ ci workflow parses
+
+▸ Extension (Manifest V3) syntax + core logic tests
+TAP version 13
+# Subtest: resolveTarget
+    # Subtest: saves the right-clicked LINK, keeping the page only as context
+    ok 1 - saves the right-clicked LINK, keeping the page only as context
+      ---
+      duration_ms: 1.48
+      type: 'test'
+      ...
+    # Subtest: saves the page with the selected text when no link is involved
+    ok 2 - saves the page with the selected text when no link is involved
+      ---
+      duration_ms: 0.3304
+      type: 'test'
+      ...
+    # Subtest: plain page save: url is the page, no selection
+    ok 3 - plain page save: url is the page, no selection
+      ---
+      duration_ms: 0.2162
+      type: 'test'
+      ...
+    1..3
+ok 1 - resolveTarget
+  ---
+  duration_ms: 3.8566
+  type: 'suite'
+  ...
+# Subtest: restricted and denylisted targets
+    # Subtest: refuses browser-internal pages with a useful reason
+    ok 1 - refuses browser-internal pages with a useful reason
+      ---
+      duration_ms: 2.1315
+      type: 'test'
+      ...
+    # Subtest: allows normal http(s) pages
+    ok 2 - allows normal http(s) pages
+      ---
+      duration_ms: 0.3451
+      type: 'test'
+      ...
+    # Subtest: enforces the built-in private-surface denylist
+    ok 3 - enforces the built-in private-surface denylist
+      ---
+      duration_ms: 0.9596
+      type: 'test'
+      ...
+    # Subtest: supports user wildcard and exact rules
+    ok 4 - supports user wildcard and exact rules
+      ---
+      duration_ms: 1.0866
+      type: 'test'
+      ...
+    1..4
+ok 2 - restricted and denylisted targets
+  ---
+  duration_ms: 5.8676
+  type: 'suite'
+  ...
+# Subtest: privacy: tracking params, secrets, bounds
+    # Subtest: strips tracking parameters without breaking canonical identity
+    ok 1 - strips tracking parameters without breaking canonical identity
+      ---
+      duration_ms: 1.5029
+      type: 'test'
+      ...
+    # Subtest: detects common secret shapes (fail-closed inputs)
+    ok 2 - detects common secret shapes (fail-closed inputs)
+      ---
+      duration_ms: 2.0048
+      type: 'test'
+      ...
+    # Subtest: bounds the selection (intake, not page extraction)
+    ok 3 - bounds the selection (intake, not page extraction)
+      ---
+      duration_ms: 0.4457
+      type: 'test'
+      ...
+    # Subtest: context URLs drop queries and private surfaces
+    ok 4 - context URLs drop queries and private surfaces
+      ---
+      duration_ms: 0.3237
+      type: 'test'
+      ...
+    1..4
+ok 3 - privacy: tracking params, secrets, bounds
+  ---
+  duration_ms: 4.6613
+  type: 'suite'
+  ...
+# Subtest: validateApiBase
+    # Subtest: accepts https and loopback http
+    ok 1 - accepts https and loopback http
+      ---
+      duration_ms: 0.4374
+      type: 'test'
+      ...
+    # Subtest: rejects cleartext non-loopback, credentials, fragments, deep paths
+    ok 2 - rejects cleartext non-loopback, credentials, fragments, deep paths
+      ---
+      duration_ms: 0.2953
+      type: 'test'
+      ...
+    # Subtest: normalizes trailing slashes out of the base
+    ok 3 - normalizes trailing slashes out of the base
+      ---
+      duration_ms: 0.1552
+      type: 'test'
+      ...
+    1..3
+ok 4 - validateApiBase
+  ---
+  duration_ms: 1.1386
+  type: 'suite'
+  ...
+# Subtest: settingsPatch / probeToken
+    # Subtest: a masked token field is omitted from the saved patch
+    ok 1 - a masked token field is omitted from the saved patch
+      ---
+      duration_ms: 0.24
+      type: 'test'
+      ...
+    # Subtest: an edited token field is persisted
+    ok 2 - an edited token field is persisted
+      ---
+      duration_ms: 0.1239
+      type: 'test'
+      ...
+    # Subtest: the probe uses the stored token only while the field is masked
+    ok 3 - the probe uses the stored token only while the field is masked
+      ---
+      duration_ms: 0.1704
+      type: 'test'
+      ...
+    1..3
+ok 5 - settingsPatch / probeToken
+  ---
+  duration_ms: 0.7008
+  type: 'suite'
+  ...
+# Subtest: classifyResponse / errors
+    # Subtest: maps every distinct user state
+    ok 1 - maps every distinct user state
+      ---
+      duration_ms: 0.1944
+      type: 'test'
+      ...
+    # Subtest: offline/timeout/rate-limited retry; terminal states do not
+    ok 2 - offline/timeout/rate-limited retry; terminal states do not
+      ---
+      duration_ms: 0.241
+      type: 'test'
+      ...
+    1..2
+ok 6 - classifyResponse / errors
+  ---
+  duration_ms: 0.5669
+  type: 'suite'
+  ...
+# Subtest: delivery engine
+    # Subtest: one save → saved, with the client idempotency key as external_item_id
+    ok 1 - one save → saved, with the client idempotency key as external_item_id
+      ---
+      duration_ms: 9.801
+      type: 'test'
+      ...
+    # Subtest: OFFLINE survives: stays pending, later retry delivers the SAME key once
+    ok 2 - OFFLINE survives: stays pending, later retry delivers the SAME key once
+      ---
+      duration_ms: 1.5831
+      type: 'test'
+      ...
+    # Subtest: duplicate answer marks the entry duplicate, not a second save
+    ok 3 - duplicate answer marks the entry duplicate, not a second save
+      ---
+      duration_ms: 0.7086
+      type: 'test'
+      ...
+    # Subtest: timeout is retryable and distinct from 401/422/429
+    ok 4 - timeout is retryable and distinct from 401/422/429
+      ---
+      duration_ms: 0.8249
+      type: 'test'
+      ...
+    # Subtest: 429 keeps the entry queued; 401 and 422 are terminal failures
+    ok 5 - 429 keeps the entry queued; 401 and 422 are terminal failures
+      ---
+      duration_ms: 2.8307
+      type: 'test'
+      ...
+    # Subtest: gives up after MAX_ATTEMPTS with the attempts counter intact
+    ok 6 - gives up after MAX_ATTEMPTS with the attempts counter intact
+      ---
+      duration_ms: 1.2305
+      type: 'test'
+      ...
+    # Subtest: bounded outbox: refuses the 51st unsent entry with a useful action
+    ok 7 - bounded outbox: refuses the 51st unsent entry with a useful action
+      ---
+      duration_ms: 2.5111
+      type: 'test'
+      ...
+    # Subtest: TTL prune drops expired pending entries and delivered entries after 7d
+    ok 8 - TTL prune drops expired pending entries and delivered entries after 7d
+      ---
+      duration_ms: 0.5434
+      type: 'test'
+      ...
+    # Subtest: retry(entry) resets attempts and delivers exactly that entry
+    ok 9 - retry(entry) resets attempts and delivers exactly that entry
+      ---
+      duration_ms: 1.036
+      type: 'test'
+      ...
+    # Subtest: pageUrl context and handle ride along in the payload
+    ok 10 - pageUrl context and handle ride along in the payload
+      ---
+      duration_ms: 2.6761
+      type: 'test'
+      ...
+    1..10
+ok 7 - delivery engine
+  ---
+  duration_ms: 24.762
+  type: 'suite'
+  ...
+1..7
+# tests 29
+# suites 7
+# pass 29
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 289.504
+✔ extension clean
+
+▸ End-to-end (real API + dashboard build + Chromium)
+  api on 8000, dashboard on 3000
+
+Running 9 tests using 2 workers
+
+  ✓  2 [chromium] › e2e\smoke.spec.ts:27:5 › unauthenticated visitors are redirected to the login form (6.4s)
+  ✓  3 [chromium] › e2e\smoke.spec.ts:34:5 › app shell: brand, primary nav, and a green API health dot (2.5s)
+  ✓  4 [chromium] › e2e\smoke.spec.ts:60:5 › overview, radar, studio and analytics load real data from the API (3.9s)
+  ✓  5 [chromium] › e2e\smoke.spec.ts:78:5 › operator console: queue, connections and settings render live data (3.9s)
+  ✓  6 [chromium] › e2e\smoke.spec.ts:94:5 › sources page lists registered sources and the add form (2.1s)
+  ✓  1 [chromium] › e2e\loaded-extension.spec.ts:38:5 › loaded extension pairs, probes the API, and delivers its outbox (21.7s)
+  ✓  7 [chromium] › e2e\smoke.spec.ts:104:5 › source permission can be attested and revoked from the desk (4.9s)
+  ✓  8 [chromium] › e2e\smoke.spec.ts:127:5 › verified offer workspace exposes evidence, claims and format-gated script generation (4.0s)
+  ✓  9 [chromium] › e2e\smoke.spec.ts:216:5 › start automation and Needs You render the v0.30 operator gates (2.7s)
+
+  9 passed (33.1s)
+✔ browser + loaded-extension smoke green
+
+✔ verification complete — the system is working
+  next: docs/go-live-checklist.md (add keys, connect accounts, first post)
+

@@ -1,0 +1,60 @@
+{
+  "finished_at": "2026-10-25T16:19:06.205971+00:00",
+  "mode": "dry-run",
+  "notes": [
+    "A private smoke never publishes a public post.",
+    "Instagram is reported unsupported_private by design (no private mode).",
+    "TikTok private/unlisted is SELF_ONLY; completion does not prove public visibility.",
+    "Tokens and access-token query strings are redacted from this artifact."
+  ],
+  "ok": true,
+  "proof": "dry_run_only",
+  "proven": false,
+  "providers": {
+    "facebook": {
+      "checked_at": "2026-10-25T16:19:06.205516+00:00",
+      "credentials_configured": false,
+      "error": "Facebook Page credentials missing (FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN)",
+      "platform_privacy": "unpublished_draft",
+      "provider": "facebook",
+      "requested_privacy": "private",
+      "status": "not_configured"
+    },
+    "instagram": {
+      "checked_at": "2026-10-25T16:19:06.205953+00:00",
+      "credentials_configured": false,
+      "error": "Instagram Content Publishing has no per-post private/unpublished mode. This harness refuses to publish a public post in a private smoke; use a public-post procedure with explicit human approval instead.",
+      "platform_privacy": null,
+      "provider": "instagram",
+      "requested_privacy": "private",
+      "status": "unsupported_private"
+    },
+    "tiktok": {
+      "checked_at": "2026-10-25T16:19:06.205742+00:00",
+      "credentials_configured": false,
+      "error": "TikTok credentials missing (TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, TIKTOK_REFRESH_TOKEN)",
+      "platform_privacy": "SELF_ONLY",
+      "provider": "tiktok",
+      "requested_privacy": "private",
+      "status": "not_configured"
+    },
+    "youtube": {
+      "checked_at": "2026-10-25T16:19:06.204988+00:00",
+      "credentials_configured": false,
+      "error": "YouTube credentials missing (YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN)",
+      "platform_privacy": "private",
+      "provider": "youtube",
+      "requested_privacy": "private",
+      "status": "not_configured"
+    }
+  },
+  "schema": "mtk-provider-private-smoke/1",
+  "started_at": "2026-10-25T16:19:06.204971+00:00",
+  "statuses": {
+    "facebook": "not_configured",
+    "instagram": "unsupported_private",
+    "tiktok": "not_configured",
+    "youtube": "not_configured"
+  },
+  "video": null
+}

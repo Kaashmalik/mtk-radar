@@ -271,7 +271,7 @@ browser step.
 | 3. Script & checklist | Claim guide, command cards, citations | Every factual claim traceable to evidence | ✅ v0.10 |
 | 4. Capture & video | Screen recording, redaction, captions, FFmpeg exports | One complete video package reproducible | ✅ v0.11–v0.14, v0.17 |
 | 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 (handoff export; no timeline editor — WP10 planned) |
-| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ⚠️ v0.19 — adapters + mocked tests; live private/test posts unproven (needs keys) |
+| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ⚠️ v0.19 — adapters + mocked tests + fail-closed private smoke harness; live private/test posts unproven (needs keys) |
 | 7. Analytics & scale | Views, corrections, source freshness | Data improves packaging without weakening verification | ✅ v0.18, v0.22, v0.24 |
 | 8. Automation & control | Manual / assisted / autopilot policy per stage | Every gated write re-checks the policy; human stages cannot be bypassed | ✅ v0.26 |
 | 9. Production polish | Trend radar, bilingual studio, covers/motion, English-first packaging, growth analytics | English package + captions for every video; Urdu voiceover opt-in; verified render/schedule path | ✅ v0.27 |
@@ -280,9 +280,11 @@ Remaining, with reasons: SSO/self-serve logins (single-operator token model is
 sufficient — see runbook §9), Postgres HA (single instance at this scale),
 TikTok publishing (requires an approved developer app), the WP10 in-app light
 editor (handoff export exists; there is no timeline editor), EP-05–EP-07
-(evidence-to-video plan, still proposed), live private/test posting and
-loaded-extension browser proof, the Postgres integration run, and GitHub
-Actions (currently blocked by the owner account's billing lock). The ordered
+(evidence-to-video plan, still proposed), live private/test posting (needs
+provider keys and an approved clip), and GitHub Actions (currently blocked by
+the owner account's billing lock). The Postgres integration suite and the
+loaded-extension Chromium E2E now run locally; see the
+[evidence log](docs/evidence/verify-pnpm-2026-10-25.log). The ordered
 remediation plan is the [implementation roadmap](docs/implementation-roadmap-2026-10-25.md).
 
 For the detailed twelve-week implementation sequence, see the [master plan](docs/master%20plan.md).

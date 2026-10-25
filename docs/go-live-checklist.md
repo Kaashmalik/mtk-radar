@@ -32,10 +32,11 @@ the database, never in the browser, never in git. The database only records
 | API + DB | integration tests against real Postgres 16, migrations 001→040 applied by the real runner |
 | State machine (§3) | unit/integration tests — illegal transitions, expiry, hash-binding, redaction and automation gates |
 | Workers | collector, verification, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
-| Dashboard | production build + Playwright smoke against the real API (4 browser tests) |
+| Dashboard | production build + Playwright smoke against the real API (9 browser tests) |
 | Object storage | local round-trip plus the S3-compatible driver over a mocked HTTP transport (no moto dependency) |
 | Backup/restore | `infra/backup.sh` + `infra/restore.sh` + systemd timers (`infra/systemd/`) |
-| Extension | MV3 manifest + service worker + options page, syntax-checked in CI |
+| Extension | MV3 manifest + service worker + options page; syntax + 29 Node tests + loaded-extension Chromium E2E (pairing, outbox delivery, dedupe) |
+| Provider private smoke | fail-closed harness implemented; **no live private/test post has been confirmed here** (dry-run evidence only) |
 
 Run everything yourself:
 
@@ -254,6 +255,30 @@ adapter stays disabled (posts are skipped, not failed).
 10. **Correct it (if needed)** — offer page → *Record correction*. The
     worker pushes the correction notice into the published description
     (YouTube) and pauses affected scheduled posts.
+
+### 4.1 Prove private/test publishing per provider (optional, needs keys)
+
+Use a short, approved clip that you are willing to upload as a private/test
+post. The harness refuses Instagram (its API has no private mode), uploads
+YouTube as `private`, Facebook as an unpublished draft, and TikTok as
+`SELF_ONLY`; it never publishes a public post.
+
+```bash
+# Configuration-only check: safe without provider keys.
+python scripts/provider_private_smoke.py --dry-run --providers all
+
+# Live: explicit opt-in, one private/test post per selected provider.
+python scripts/provider_private_smoke.py --live \
+  --video ./approved-test-clip.mp4 \
+  --providers youtube,facebook,tiktok \
+  --evidence-out docs/evidence/provider-private-smoke.json
+```
+
+Read `proof` in the JSON: only `live_private_posts_confirmed` is a pass. A
+`not_configured`, `unsupported_private` or `held_unconfirmed` result must not
+be rewritten as success. TikTok `SELF_ONLY` completion confirms the private
+test upload; it does not prove public visibility. Tokens and access-token
+query strings are redacted from the artifact.
 
 ---
 

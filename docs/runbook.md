@@ -303,8 +303,10 @@ Save-link extension (EP-04): configure the API URL and the dedicated
 `MTK_EXTENSION_TOKEN` on its options page (right-click the icon → Options).
 Right-clicking a link saves the **link**, not the current tab; saves queue
 offline in an outbox and are delivered once. The extension requests only the
-API host permission, and **Revoke** clears local config/credentials. Not yet:
-the loaded-extension Chromium E2E proof and the store packaging/CSP review.
+API host permission, and **Revoke** clears local config/credentials. The
+loaded-extension Chromium E2E is verified locally (pairing + outbox delivery +
+dedupe); not yet: store packaging/CSP review and the manual permission-prompt
+UI.
 
 Operator console (v0.19/v0.20): every configuration surface lives in the
 dashboard — **Sources** (register what the collectors poll, see poll
@@ -533,8 +535,9 @@ rows to refs.
   the display timezone is Asia/Karachi everywhere (fine for a PKT operator).
 - Extension (EP-04): configured via its options page (API URL + dedicated
   extension token); the save action surfaces 401/connection problems on the
-  badge. Not yet: loaded-extension Chromium E2E and packaging/store hardening
-  (icons, CSP review, MV3 store listing).
+  badge. Loaded-extension Chromium E2E is verified locally; still not done:
+  packaging/store hardening (icons, CSP review, MV3 store listing) and the
+  manual permission-prompt surface.
 - Backup automation (v0.18, off-host copy v0.24): systemd timers in
   `infra/systemd/` — daily backup, monthly restore drill into a throwaway DB;
   the drill unit going red means backups are unusable. When `MTK_S3_*` is

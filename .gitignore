@@ -24,6 +24,8 @@ Thumbs.db
 
 # Logs and caches
 *.log
+# Verification transcripts are reviewed, secret-scanned evidence.
+!docs/evidence/*.log
 .cache/
 coverage/
 __pycache__/
