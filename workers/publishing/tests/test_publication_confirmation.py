@@ -134,6 +134,21 @@ def test_tiktok_complete_without_public_post_id_is_held_unconfirmed():
     assert out["remote_url"] is None
 
 
+def test_tiktok_complete_self_only_confirms_private_test_upload():
+    """Private/unlisted map to SELF_ONLY and never get a public post id; a
+    completed SELF_ONLY upload is the correct terminal state for a test post,
+    while still never claiming public visibility."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"status": "PUBLISH_COMPLETE"}})
+
+    adapter = _tiktok(handler)
+    out = adapter.confirm_publication("pub-1", expected_privacy="private", timeout_s=0)
+    assert out["confirmed"] is True
+    assert out["visibility"] == "self_only"
+    assert out["remote_url"] is None
+    assert "not independently echoed" in out["note"]
+
+
 def test_tiktok_accepts_a_scalar_post_id():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {
