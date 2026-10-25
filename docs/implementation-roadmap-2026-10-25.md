@@ -215,7 +215,7 @@ Decisions for all four are recorded in [§6.6](#66-claim-decisions-2026-10-25).
 | PROOF-01 | P0 | **VERIFIED** (2026-10-25) | Postgres 16.15 external server; `MTK_VERIFY_DATABASE_URL=postgresql://mtk@127.0.0.1:55499/postgres pnpm verify` recreated `mtk_verify` and ran 158 integration tests; full suite **1176 passed** |
 | PROOF-02 | P1 | **VERIFIED** (2026-10-25) | `pnpm verify` in Git Bash on Windows with portable PostgreSQL; exit 0; [full log](evidence/verify-pnpm-2026-10-25.log) |
 | PROOF-03 | P1 | **VERIFIED** (2026-10-25) | 9/9 Playwright tests, including `loaded-extension.spec.ts` against the real API and unpacked extension; [JSON evidence](evidence/loaded-extension-e2e.json) |
-| PROOF-04 | P0 | **UNPROVEN** | CI workflow is implemented and now includes the loaded-extension step, but GitHub Actions cannot execute while the owner account is billing-locked. Record a run URL after unblocking. |
+| PROOF-04 | P0 | **UNPROVEN** | CI workflow is implemented and now includes the loaded-extension step, but GitHub Actions cannot execute while the owner account is billing-locked. Latest observed run ([40091453367](https://github.com/Kaashmalik/mtk-radar/actions/runs/40091453367)) failed every job in ~3 s with **zero steps started**; [blocker evidence](evidence/github-actions-blocked.json). The local commits are not pushed. Record a passing run URL after unblocking. |
 | PROOF-05 | P1 | **UNPROVEN** | No provider credentials in this environment. `scripts/provider_private_smoke.py` is implemented and fail-closed; dry-run evidence is committed. Run `--live --video <clip>` per provider and record the confirmed private post. |
 | PROOF-06 | P1 | **UNPROVEN** | Render QC code/tests exist, but no dated real-output QC artifact is attached to this ledger. |
 

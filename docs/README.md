@@ -53,6 +53,8 @@ still planned.
   Chromium pairing, delivery and duplicate dedupe.
 - [Provider private-smoke dry run](evidence/provider-private-smoke-dry-run.json) -
   harness safety only; **not** live-provider proof.
+- [GitHub Actions blocker](evidence/github-actions-blocked.json) - the latest
+  observed run started zero job steps; CI is not executed for local HEAD.
 
 ## History
 
