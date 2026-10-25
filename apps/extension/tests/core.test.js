@@ -23,8 +23,11 @@ import {
   denylistReason,
   findSecrets,
   isRetryable,
+  pageContextUrl,
+  probeToken,
   restrictedReason,
   resolveTarget,
+  settingsPatch,
   stripTrackingParams,
   validateApiBase,
 } from "../core.js";
@@ -151,6 +154,19 @@ describe("privacy: tracking params, secrets, bounds", () => {
     const long = "a".repeat(MAX_SELECTION_CHARS + 500);
     assert.equal(boundSelection(long).length, MAX_SELECTION_CHARS);
   });
+
+  it("context URLs drop queries and private surfaces", () => {
+    assert.equal(
+      pageContextUrl("https://blog.example.com/post?utm_source=x&token=s#top"),
+      "https://blog.example.com/post",
+    );
+    assert.equal(pageContextUrl("https://mail.google.com/mail/u/0/#inbox"), "");
+    assert.equal(pageContextUrl("https://web.whatsapp.com/"), "");
+    assert.equal(pageContextUrl(""), "");
+    assert.equal(
+      pageContextUrl("https://shop.example.com/x", ["shop.example.com"]), "",
+    );
+  });
 });
 
 // ---- configuration --------------------------------------------------------
@@ -175,6 +191,44 @@ describe("validateApiBase", () => {
     const ok = validateApiBase("https://radar.example.com///");
     assert.equal(ok.base, "https://radar.example.com");
     assert.equal(ok.origin, "https://radar.example.com");
+  });
+});
+
+// ---- options-page settings ------------------------------------------------
+
+describe("settingsPatch / probeToken", () => {
+  it("a masked token field is omitted from the saved patch", () => {
+    const values = {
+      apiBase: "https://radar.example.com", token: "", handle: "kashi",
+      dashboardBase: "",
+    };
+    const patch = settingsPatch(values, { tokenMasked: true });
+    assert.equal("token" in patch, false);
+    assert.equal(patch.apiBase, "https://radar.example.com");
+    assert.equal(values.token, ""); // input object is not mutated
+  });
+
+  it("an edited token field is persisted", () => {
+    const patch = settingsPatch(
+      { apiBase: "https://radar.example.com", token: "new-token" },
+      { tokenMasked: false },
+    );
+    assert.equal(patch.token, "new-token");
+  });
+
+  it("the probe uses the stored token only while the field is masked", () => {
+    assert.equal(
+      probeToken({ tokenMasked: true, typedToken: "", storedToken: "stored" }),
+      "stored",
+    );
+    assert.equal(
+      probeToken({ tokenMasked: false, typedToken: "typed", storedToken: "stored" }),
+      "typed",
+    );
+    assert.equal(
+      probeToken({ tokenMasked: true, typedToken: "", storedToken: undefined }),
+      "",
+    );
   });
 });
 

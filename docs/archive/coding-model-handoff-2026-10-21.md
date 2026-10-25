@@ -1,10 +1,13 @@
 # Coding-model handoff — MTK RADAR AI
 
+> **Historical.** A dated handoff for coding models. Superseded by the [implementation roadmap](../implementation-roadmap-2026-10-25.md) and [implementation best practices](../implementation-best-practices.md).
+
+
 **Date:** 21 October 2026 (UTC)
 
 **For:** GLM, MiniMax, other local models, or any coding assistant.
 
-**Authoritative roadmap:** [Automation Master Plan 2026–2027](automation-master-plan-2026-10-21.md).
+**Authoritative roadmap:** [Automation Master Plan 2026–2027](../automation-master-plan-2026-10-21.md).
 
 ## 1. What this repository actually is
 
@@ -14,7 +17,7 @@ Current code includes discovery, evidence/extraction, scripts, human-operated ca
 
 Audit results: 239 Python tests passed, one database integration module skipped, TypeScript typecheck and narrow Python lint passed. Real database, browser, media and platform release verification still need proof. Do not copy these counts as your own new test results.
 
-**Implementation update:** the first WP01 integrity slice is implemented; its latest local result is 325 passing tests including isolated PostgreSQL integration. Read [the checkpoint](implementation-wp01-2026-10-21.md) and the master-plan ledger before choosing a task. The preceding counts are the original audit baseline, not the current test total.
+**Implementation update:** the first WP01 integrity slice is implemented; its latest local result is 325 passing tests including isolated PostgreSQL integration. Read [the checkpoint](wp01/implementation-wp01-2026-10-21.md) and the master-plan ledger before choosing a task. The preceding counts are the original audit baseline, not the current test total.
 
 ## 2. Copy/paste prompt for one implementation session
 

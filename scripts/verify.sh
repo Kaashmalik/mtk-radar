@@ -64,6 +64,19 @@ step "Filename portability (Windows-invalid characters, G28/EP-00)"
 python3 scripts/check_filenames.py || fail "filenames"
 ok "filenames portable"
 
+step "Documentation links (relative README/docs links)"
+python3 scripts/check_doc_links.py || fail "doc links"
+ok "documentation links resolve"
+
+step "Secret scan (gitleaks)"
+if command -v gitleaks > /dev/null 2>&1; then
+  gitleaks detect --source . --config .gitleaks.toml --redact \
+    || fail "gitleaks"
+  ok "no secrets in full history"
+else
+  printf '  gitleaks not installed; the CI secret-scan job is the gate\n'
+fi
+
 step "Python lint (ruff: syntax + undefined names)"
 ruff check --select E9,F63,F7,F82,F821 services workers packages || fail "ruff"
 ok "ruff clean"
@@ -134,7 +147,7 @@ python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); pri
   || fail "ci yaml"
 ok "ci workflow parses"
 
-step "Extension (Manifest V3) syntax + unit suite (Chrome-API stubs)"
+step "Extension (Manifest V3) syntax + core logic tests"
 node --check apps/extension/core.js || fail "extension core.js"
 node --check apps/extension/background.js || fail "extension background.js"
 node --check apps/extension/options.js || fail "extension options.js"

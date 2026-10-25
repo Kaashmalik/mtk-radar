@@ -190,6 +190,38 @@ async def list_sources(
     return result
 
 
+@app.get("/source-adapters")
+async def list_source_adapters() -> list[dict]:
+    """The authoritative adapter registry, in stable UI order.
+
+    The dashboard renders its adapter picker and config fields from this
+    endpoint instead of duplicating a hardcoded list (CODE-09). Approval-gated
+    adapters are returned with `available: false` and a reason so the form can
+    disable them without hiding them from the operator.
+    """
+    from source_adapters.registry import (
+        ADAPTERS,
+        APPROVAL_PENDING,
+        approval_denial,
+    )
+
+    out: list[dict] = []
+    for kind, spec in ADAPTERS.items():
+        reason = approval_denial(kind)
+        out.append({
+            "kind": kind,
+            "label": spec.label,
+            "description": spec.description,
+            "collector_polled": spec.collector_polled,
+            "config_required": list(spec.config_required),
+            "config_optional": list(spec.config_optional),
+            "approval_pending": kind in APPROVAL_PENDING,
+            "available": reason is None,
+            "unavailable_reason": reason,
+        })
+    return out
+
+
 @app.post("/sources", status_code=201)
 async def create_source(source: SourceIn) -> dict:
     """Register a source. Idempotent on (provider, canonical_domain)."""
@@ -444,6 +476,8 @@ async def create_item(item: ItemIn) -> dict:
                 _json({
                     "source_kind": (item.extra or {}).get("source_kind"),
                     "intake": "extension" if from_extension else "collector",
+                    "context_type": (item.extra or {}).get("context_type"),
+                    "context_url": (item.extra or {}).get("context_url"),
                 }),
             )
 
@@ -523,6 +557,31 @@ async def list_items(
         lambda row: encode_cursor(row["observed_at"], row["id"]),
     )
     return out
+
+
+@app.get("/items/{item_id}")
+async def get_item(item_id: uuid.UUID) -> dict:
+    """One inbox item by id — the dashboard's `?saved_item=` deep link.
+
+    The extension opens `/inbox?saved_item=<id>` after a save; this endpoint
+    makes the link exact instead of hoping the item is on page one.
+    """
+    pool = db.get()
+    row = await pool.fetchrow(
+        """
+        SELECT i.id, i.url, i.canonical_url, i.title, i.observed_at, i.published_at,
+               i.duplicate_group, i.processed,
+               s.provider AS source_provider, s.category AS source_category,
+               s.trust_tier::text AS trust_tier
+        FROM items i
+        LEFT JOIN sources s ON s.id = i.source_id
+        WHERE i.id = $1
+        """,
+        item_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="item not found")
+    return dict(row)
 
 
 @app.patch("/items/{item_id}/processed")

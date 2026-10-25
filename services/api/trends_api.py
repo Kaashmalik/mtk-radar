@@ -259,10 +259,31 @@ async def scan_trends(limit: int = Query(default=100, ge=1, le=500)) -> dict:
             (r["observed_at"], json.loads(r["measurements"]))
             for r in eng_rows
         ])
+        # CODE-14: a radar lead must carry the same evidence discipline as an
+        # offer snapshot - where it was fetched, when, and the payload hash
+        # that lets a reviewer prove the payload did not change.
+        evidence_row = await pool.fetchrow(
+            """
+            SELECT id, observed_at, payload_hash
+            FROM source_observations
+            WHERE url = $1
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            data["url"],
+        )
         scored = score_item(data, existing_offer_count=int(existing_offers or 0),
                             duplicate_count=max(0, int(duplicates or 0) - 1),
                             corroborating_sources=corroborating,
                             engagement=engagement)
+        scored["signals"]["evidence"] = ({
+            "observation_id": str(evidence_row["id"]),
+            "retrieved_at": (evidence_row["observed_at"].isoformat()
+                             if isinstance(evidence_row["observed_at"], datetime)
+                             else evidence_row["observed_at"]),
+            "payload_hash": evidence_row["payload_hash"],
+            "url": data["url"],
+        } if evidence_row else None)
         # Score-velocity is still RECORDED (a diagnostic of the candidate's
         # own re-scoring history), but it no longer moves demand.
         velocity = smooth_velocity(
@@ -544,7 +565,8 @@ async def promote_trend(trend_id: uuid.UUID, body: TrendPromoteIn,
                 used = int(await conn.fetchval(
                     """
                     SELECT COUNT(*) FROM audit_log
-                    WHERE action = 'trend:promoted' AND actor LIKE 'automation:%'
+                    WHERE action = 'trend:promoted'
+                      AND (actor LIKE 'automation:%' OR actor LIKE 'system:%')
                       AND created_at >= date_trunc('day', now())
                     """
                 ) or 0)

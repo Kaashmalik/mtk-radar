@@ -1652,6 +1652,40 @@ SVC = {"Authorization": "Bearer svc-token"}
 HUMAN = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 
 
+def test_item_deep_link_returns_the_exact_item_and_404_for_unknown(client, source):
+    """The extension's `?saved_item=<id>` link must resolve the exact row even
+    when the item is processed or off page one."""
+    import uuid as uuidlib
+
+    marker = uuidlib.uuid4().hex
+    inserted = _run(
+        """
+        INSERT INTO items (source_id, external_item_id, url, canonical_url, title,
+                           observed_at, text_hash)
+        VALUES ($1, $2, $3, $3, $4, now(), $5)
+        RETURNING id
+        """,
+        uuidlib.UUID(source),
+        f"saved-{marker}",
+        f"https://example.com/saved-{marker}",
+        f"Saved item {marker}",
+        f"hash-saved-{marker}",
+    )[0]
+    item_id = str(inserted["id"])
+
+    got = client.get(f"/items/{item_id}",
+                     headers={"Origin": "http://localhost:3000"})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["id"] == item_id
+    assert body["title"] == f"Saved item {marker}"
+    assert "source_provider" in body and "processed" in body
+
+    missing = client.get(f"/items/{uuidlib.uuid4()}",
+                         headers={"Origin": "http://localhost:3000"})
+    assert missing.status_code == 404
+
+
 def test_inbox_and_radar_cursors_reach_the_tail_and_scan_marks_items_processed(client, source):
     """Scoring an item is processing it, and a fixed page must not hide the tail.
 
@@ -5878,6 +5912,12 @@ def test_research_brief_versioning_and_human_only_claim_status(auth_client):
     research = auth_client.get(f"/offers/{offer_id}/research",
                                headers=SVC).json()
     assert research["blocking_conflicts"] == []
+    assert research["superseded_conflicts"] == [{
+        "version": 1,
+        "claim_id": claim_ids[1],
+        "claim_text": "The protocol replaces sleep.",
+        "status": "contradicted",
+    }], "a superseded conflict is history, not a silent deletion"
 
     # Human resolution is audited with the reviewer's identity.
     actor_row = _run(
@@ -6010,6 +6050,32 @@ def test_automation_promotion_daily_cap(auth_client):
     auth_client.put("/automation/policy", headers=AUTH, json={"policy": policy})
 
 
+def test_system_actor_counts_against_the_automation_research_cap(auth_client):
+    """CODE-10: `system:` promotions are capped by the same guardrail as
+    `automation:` promotions. The old count only matched `automation:%`, so a
+    system actor could silently bypass the daily research budget."""
+    policy = auth_client.get("/automation/policy", headers=SVC).json()["policy"]
+    policy["guardrails"]["auto_research_max_per_day"] = 1
+    saved = auth_client.put("/automation/policy", headers=AUTH,
+                            json={"policy": policy})
+    assert saved.status_code in (200, 201), saved.text
+
+    first = _mk_trend(uuid.uuid4().hex)
+    ok = auth_client.post(f"/trends/{first}/promote", headers=SVC,
+                          params={"reviewer": "system:research"}, json={})
+    assert ok.status_code == 201, ok.text
+
+    second = _mk_trend(uuid.uuid4().hex)
+    capped = auth_client.post(f"/trends/{second}/promote", headers=SVC,
+                              params={"reviewer": "automation:research"},
+                              json={})
+    assert capped.status_code == 429, capped.text
+    assert "auto_research_max_per_day" in capped.json()["detail"]
+
+    policy["guardrails"]["auto_research_max_per_day"] = 2
+    auth_client.put("/automation/policy", headers=AUTH, json={"policy": policy})
+
+
 def test_extension_intake_contract_idempotent_with_context(client):
     """EP-04 contract: the extension's durable outbox retries every save with
     the SAME client idempotency key (external_item_id). The server must turn
@@ -6057,7 +6123,7 @@ def test_extension_intake_contract_idempotent_with_context(client):
     row = _run(
         """
         SELECT i.selection, i.account_handle, i.text, s.adapter,
-               i.story_key
+               i.story_key, i.extra::text AS extra
         FROM items i JOIN sources s ON s.id = i.source_id
         WHERE i.id = $1
         """,
@@ -6066,12 +6132,33 @@ def test_extension_intake_contract_idempotent_with_context(client):
     assert row, "the saved item must exist"
     assert row[0]["selection"].startswith("Participants recalled 12%")
     assert row[0]["adapter"] == "extension"  # the browser-extension source
+    stored_extra = _json.loads(row[0]["extra"])
+    assert stored_extra["context_type"] == "link"
+    assert stored_extra["context_url"] == "https://blog.example.com/roundup"
     # context persisted in the G07 observation ledger
     obs = _run(
-        "SELECT excerpt, provenance::text AS provenance FROM source_observations "
+        "SELECT excerpt, payload_hash, observed_at, provenance::text AS provenance "
+        "FROM source_observations "
         "WHERE external_id = $1 ORDER BY observed_at DESC LIMIT 1",
         key,
     )
     assert obs and obs[0]["excerpt"].startswith("Participants recalled 12%")
     provenance = _json.loads(obs[0]["provenance"])
     assert provenance["intake"] == "extension"
+    assert provenance["context_type"] == "link"
+    assert provenance["context_url"] == "https://blog.example.com/roundup"
+
+    # CODE-14: scoring the item records the retrieval evidence on the radar
+    # candidate (same observation hash, never an invented timestamp).
+    scan = client.post("/trends/scan", params={"limit": 500})
+    assert scan.status_code == 201, scan.text
+    candidate = _run(
+        "SELECT signals::text AS signals FROM trend_candidates WHERE url = $1",
+        link,
+    )
+    assert candidate, "the saved item must reach the radar"
+    signals = _json.loads(candidate[0]["signals"])
+    evidence = signals["evidence"]
+    assert evidence["payload_hash"] == obs[0]["payload_hash"]
+    assert evidence["retrieved_at"] == obs[0]["observed_at"].isoformat()
+    assert evidence["url"] == link

@@ -30,7 +30,7 @@ python workers/capture/main.py --offer <OFFER_ID> --api http://localhost:8000
 ```
 
 - [ ] Clean laptop profile; close unrelated tabs; no personal browsing
-- [ ] Follow the guided steps: automation opens pages + records 1280x720 + keeps the step log; **you perform every account action**
+- [ ] Follow the guided steps: automation opens pages + records 1920×1080 + keeps the step log; **you perform every account action**
 - [ ] Pause on irreversible/paid decisions and say what is happening (§4)
 - [ ] Show the **renewal price + auto-renew UI** before finalizing
 - [ ] Show the verification checkpoint: where the benefit appears in the account

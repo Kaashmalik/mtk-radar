@@ -1,7 +1,8 @@
 # Third-Party Notices
 
-Every adopted upstream used by MTK RADAR AI, with the exact version we pin,
-its license, how it is integrated, and the obligations that follow.
+Every adopted upstream used by MTK RADAR AI, with the version we pin (or the
+recorded range where the workspace uses one), its license, how it is
+integrated, and the obligations that follow.
 Companion to [`open-source-integrations.md`](open-source-integrations.md)
 (rationale) and the master plan §8 (evaluation rules).
 
@@ -12,23 +13,24 @@ Integration happens through pinned packages, pinned images, or APIs.
 
 | Project | Pinned version | License | Integration tier | Notes / obligations |
 |---|---|---|---|---|
-| FastAPI | `0.115.5` (services/api/requirements.txt) | MIT | Library | Attribution only |
-| uvicorn | `0.32.1` | BSD-3-Clause | Library | — |
-| asyncpg | `0.30.0` | Apache-2.0 | Library | — |
-| pydantic | `2.10.3` | MIT | Library | — |
-| pydantic-settings | `2.6.1` | MIT | Library | — |
+| FastAPI | `0.146.0` (services/api/requirements.txt) | MIT | Library | Attribution only |
+| uvicorn | `0.54.0` (services/api/requirements.txt) | BSD-3-Clause | Library | — |
+| asyncpg | `0.32.0` (services/api/requirements.txt) | Apache-2.0 | Library | — |
+| pydantic | `2.14.1` (services/api/requirements.txt) | MIT | Library | — |
+| pydantic-settings | `2.16.1` (services/api/requirements.txt) | MIT | Library | — |
 | httpx | `0.28.1` (workers/requirements.txt) | BSD-3-Clause | Library | The only HTTP client in the workers (no requests/urllib3) |
-| feedparser | `6.0.11` | BSD-2-Clause | Library | RSS/Atom parsing for the collector |
-| Playwright (Python) | `1.49.1` (workers/capture/requirements.txt) | Apache-2.0 | Library + browser binary | Human-operated capture session only; no session state or secrets in artifacts |
-| FFmpeg | system package (`apt-get install ffmpeg` in the render compose service) | LGPL-2.1+ (GPL if built with GPL codecs) | Vendor binary | Our builds use stock Debian packages (LGPL). If a distribution later ships FFmpeg binaries, review codec/patent implications for that build before redistributing it. `FFMPEG_PATH` / `FFPROBE_PATH` override the binary. |
+| feedparser | `6.0.14` (services/api/requirements.txt) | BSD-2-Clause | Library | RSS/Atom parsing for the collector |
+| PyYAML | `6.0.3` (services/api/requirements.txt) | MIT | Library | Compose/CI sanity checks and the env-matrix guard; not used to parse untrusted input |
+| Playwright (Python) | `1.49.1` (workers/capture/requirements.txt) | Apache-2.0 | Library + browser binary | Human-operated capture session only; no session state or secrets in artifacts. Chromium is installed for the capture worker, not in the render image. |
+| FFmpeg | system package baked into `workers/Dockerfile` (stock Debian package) | LGPL-2.1+ (GPL if built with GPL codecs) | Vendor binary | Our builds use stock Debian packages (LGPL). If a distribution later ships FFmpeg binaries, review codec/patent implications for that build before redistributing it. `FFMPEG_PATH` / `FFPROBE_PATH` override the binary. |
 | PostgreSQL | `16-alpine` (infra/docker) | PostgreSQL License | Service (container) | Notice retention required |
 | Redis | `7-alpine` (infra/docker) | RSALv2/SSPLv1 (server), MIT (clients) | Service (container) | Self-hosted use is fine; no redistribution of modified forks. Used as the API cache layer (v0.22). |
 | redis-py | `5.2.1` (services/api/requirements.txt) | MIT | Library (optional) | The API imports it lazily; without it the cache layer is disabled and the system runs unchanged. |
-| MinIO (S3-compatible storage) | `RELEASE.2024-06-13T22-53-53Z` (pinned by release tag) | AGPL-3.0 | Service (container, optional profile) | Used unmodified as the local S3 endpoint in dev; production deployments can point `MTK_S3_*` at any S3-compatible store. |
-| Next.js / React | apps/dashboard/package.json | MIT | Library | — |
-| TypeScript | `^5.7.2` (root package.json) | Apache-2.0 | Library | — |
-| zod | packages/offer-schema | MIT | Library | Offer schema shared with the dashboard |
-| moto (test-only) | services/api tests | Apache-2.0 | Library (dev) | S3 mock used by the object-storage tests |
+| MinIO (S3-compatible storage) | `quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z` (compose) | AGPL-3.0 | Service (container, optional profile) | Used unmodified as the local S3 endpoint in dev; production deployments can point `MTK_S3_*` at any S3-compatible store. |
+| MinIO client (`mc`) | `quay.io/minio/mc:RELEASE.2024-06-13T16-04-24Z` (compose init job) | AGPL-3.0 | Service (container, optional profile) | Creates the bucket once; not part of the request path. |
+| Next.js / React | `next 16.4.3`, `react 19.3.1` (apps/dashboard/package.json) | MIT | Library | — |
+| TypeScript | `^5.7.2` range (root + dashboard), resolves `5.9.3` in `pnpm-lock.yaml` | Apache-2.0 | Library | Range, not an exact pin |
+| zod | `^3.24.1` range (packages/offer-schema), resolves `3.25.76` | MIT | Library | Offer schema shared with the dashboard; range, not an exact pin |
 
 ## Evaluated and NOT adopted (with the reason)
 

@@ -219,7 +219,11 @@ def generate_hashtags(
             if best and avg < floor:
                 return (2, 0, item["tag"].lower())   # measured underperformer
             return (0, -avg, item["tag"].lower())    # measured, healthy
-        return (1, 0, item["tag"].lower())           # unmeasured yet
+        # Unmeasured: keep the pool's source-priority order. Python's sort is
+        # stable, so returning an equal key preserves the insertion order
+        # (trend → category → provider → eligibility) and the cap can never
+        # drop a higher-priority tag in favour of an alphabetical accident.
+        return (1, 0, 0)
 
     pool.sort(key=rank)
 

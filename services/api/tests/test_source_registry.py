@@ -37,6 +37,31 @@ def _load_collector():
 
 
 # The five kinds that used to be the whole schema — plus everything added.
+def test_api_exposes_every_registry_adapter_to_the_dashboard():
+    """CODE-09: the dashboard form derives its adapter list from the API, so
+    the API must expose every registered kind (including approval-gated ones,
+    with `available: false`) instead of letting the UI hardcode nine kinds."""
+    import asyncio
+
+    # Do NOT `import main` here: the full suite also loads worker `main.py`
+    # modules, so the bare name can resolve to the wrong file. Load the API
+    # module by path under a unique name.
+    spec = importlib.util.spec_from_file_location(
+        "mtk_api_main_registry_test",
+        _REPO / "services" / "api" / "main.py",
+    )
+    api_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api_main)
+
+    rows = asyncio.run(api_main.list_source_adapters())
+    assert [row["kind"] for row in rows] == list(ADAPTER_KINDS)
+    for row in rows:
+        assert row["label"]
+        assert row["description"]
+        assert row["available"] is (row["unavailable_reason"] is None)
+    assert {row["kind"] for row in rows if not row["available"]} == set(APPROVAL_PENDING)
+
+
 def test_api_adapter_literal_matches_registry():
     assert sorted(schemas.AdapterKind.__args__) == sorted(ADAPTER_KINDS), (
         "schemas.AdapterKind and source_adapters.registry drifted apart")

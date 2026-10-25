@@ -52,9 +52,8 @@ MATRIX: dict[str, tuple[str, ...]] = {
     "TTS_VOICE_UR": ("render",),
     # packages/source_adapters/trendcache.py — the collectors' shared cache
     "REDIS_URL": ("api", "collectors"),
-    # workers/publishing/platforms/instagram.py + workers/metrics/main.py
-    "INSTAGRAM_USER_ID": ("publishing", "metrics"),
-    "INSTAGRAM_ACCESS_TOKEN": ("publishing", "metrics"),
+    # workers/publishing/main.py (dynamic <PREFIX>_) + workers/metrics/main.py
+    "INSTAGRAM_USER_ID": ("publishing", "metrics"),    "INSTAGRAM_ACCESS_TOKEN": ("publishing", "metrics"),
     # workers/publishing/main.py (public media URL + WP-G token refresh)
     "MTK_PUBLIC_MEDIA_BASE_URL": ("publishing",),
     "MTK_TOKEN_REFRESH_CADENCE_D": ("publishing",),
@@ -139,20 +138,69 @@ def test_every_compose_placeholder_is_documented_or_internal(compose_env, docume
 def test_matrix_matches_the_consumers_in_code():
     """The matrix itself cannot rot silently: each var must still be READ by
     the named consumer's code (otherwise the entry is stale and belongs here
-    not in compose)."""
+    not in compose).
+
+    CODE-11: this used to spot-check 7 of the 25 vars. The mapping below covers
+    every entry, and the last assertion makes a newly added matrix var fail
+    until its reader is named.
+    """
     readers = {
         "VERIFY_LLM_BASE_URL": ["workers/verification/extractors.py",
                                 "services/api/costs_store.py"],
+        "VERIFY_LLM_API_KEY": ["workers/verification/extractors.py"],
+        "VERIFY_LLM_MODEL": ["workers/verification/extractors.py"],
         "VERIFY_LLM_TIMEOUT_S": ["workers/verification/extractors.py"],
+        "VERIFY_LLM_MAX_ATTEMPTS": ["workers/verification/extractors.py"],
+        "VERIFY_LLM_MAX_CALLS_PER_RUN": ["workers/verification/extractors.py"],
         "COST_LLM_INPUT_PER_MTOK": ["services/api/costs_store.py"],
+        "COST_LLM_OUTPUT_PER_MTOK": ["services/api/costs_store.py"],
+        "COST_TTS_PER_MCHAR": ["services/api/costs_store.py"],
         "TTS_BASE_URL": ["workers/render/narration.py",
                          "services/api/costs_store.py"],
+        "TTS_API_KEY": ["workers/render/narration.py"],
+        "TTS_MODEL": ["workers/render/narration.py"],
+        "TTS_VOICE": ["workers/render/narration.py"],
+        "TTS_BASE_URL_UR": ["workers/render/narration.py"],
+        "TTS_API_KEY_UR": ["workers/render/narration.py"],
+        "TTS_MODEL_UR": ["workers/render/narration.py"],
         "TTS_VOICE_UR": ["workers/render/narration.py"],
-        "INSTAGRAM_USER_ID": ["workers/publishing/platforms/instagram.py",
+        "REDIS_URL": ["packages/source_adapters/trendcache.py"],
+        "INSTAGRAM_USER_ID": ["workers/publishing/main.py",
                               "workers/metrics/main.py"],
+        "INSTAGRAM_ACCESS_TOKEN": ["workers/publishing/main.py",
+                                   "workers/metrics/main.py"],
+        "MTK_PUBLIC_MEDIA_BASE_URL": ["workers/publishing/main.py"],
         "MTK_TOKEN_REFRESH_CADENCE_D": ["workers/publishing/main.py"],
+        "MTK_TOKEN_REFRESH_MARGIN_D": ["workers/publishing/main.py"],
+        "FACEBOOK_APP_ID": ["workers/publishing/main.py"],
+        "FACEBOOK_APP_SECRET": ["workers/publishing/main.py"],
     }
+    assert set(readers) == set(MATRIX), (
+        "every matrix var needs a named reader (and vice versa)")
+
+    def is_read(var: str, text: str) -> bool:
+        import re
+
+        if re.search(rf"""["']{re.escape(var)}["']""", text):
+            return True
+        # Urdu TTS settings are read through
+        # ``os.environ.get(f"TTS_BASE_URL_{language.upper()}")``.
+        for base in ("TTS_BASE_URL", "TTS_API_KEY", "TTS_MODEL", "TTS_VOICE"):
+            if var == f"{base}_UR" and f"{base}_{{language.upper()}}" in text:
+                return True
+        # Publishing builds the Instagram names from a per-account prefix
+        # (``f"{prefix}USER_ID"`` / ``f"{prefix}ACCESS_TOKEN"``).
+        if var == "INSTAGRAM_USER_ID" and "{prefix}USER_ID" in text:
+            return True
+        if var == "INSTAGRAM_ACCESS_TOKEN" and "{prefix}ACCESS_TOKEN" in text:
+            return True
+        return False
+
+    missing: list[str] = []
     for var, files in readers.items():
         for rel in files:
-            assert var in (_REPO / rel).read_text(), \
-                f"{var} is no longer read by {rel} — update the G13 matrix"
+            if not is_read(var, (_REPO / rel).read_text()):
+                missing.append(f"{var} in {rel}")
+    assert not missing, (
+        "these settings are no longer read by their named consumer: "
+        + ", ".join(missing))

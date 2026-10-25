@@ -1,10 +1,13 @@
 # WP01 third slice — safe egress, raw-byte retention and fetch provenance
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slices:** [snapshot integrity](implementation-wp01-2026-10-21.md) ·
 [offer-type fact pack](implementation-wp01-slice2-2026-10-21.md)
-**Master plan:** [§6 steps 2–3, §7, §12 WP01, audit A19](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 steps 2–3, §7, §12 WP01, audit A19](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 Until this slice, verification stored the *derived text* of a page. Nothing
 proved the provider ever served it, nothing stopped the verifier from being used

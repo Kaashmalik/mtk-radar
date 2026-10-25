@@ -118,6 +118,18 @@ class TestResearchTrackSourcing:
         assert "SAVE10" not in payload["markdown"]
         assert "Promo code" not in payload["markdown"]
 
+    def test_explainer_never_renders_renewal_price(self):
+        offer = _offer("explainer", claims=[{**BRIEF_CLAIMS[0]}])
+        offer["renewal"] = {"regularPrice": "$149.00/yr", "autoRenew": True}
+        markdown = generate(offer, [], language="en")["markdown"]
+        assert "$149" not in markdown
+        assert "renews at" not in markdown
+        assert "ongoing cost" not in markdown.lower()
+
+        urdu = generate(offer, [], language="ur")["markdown"]
+        assert "$149" not in urdu
+        assert "جاری قیمت" not in urdu
+
     def test_explainer_marks_payload_content_type(self):
         payload = generate(_offer("explainer"), [], language="en")
         assert payload["content_type"] == "explainer"
@@ -144,6 +156,8 @@ class TestResearchTrackSourcing:
         offer["renewal"] = {"autoRenew": True, "regularPrice": "$49.99/yr"}
         payload = generate(offer, [], language="en")
         assert "Promo code: `SAVE10`" in payload["markdown"]
+        assert "$49.99/yr" in payload["markdown"]
+        assert "renews at" in payload["markdown"]
 
 
 class TestContentTypeId:

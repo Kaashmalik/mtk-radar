@@ -77,6 +77,14 @@ def _row_total(rows: list[Any], fallback: int = 0) -> int:
         return len(rows)
 
 
+def summarize_kind(count: int, returned: int) -> dict[str, Any]:
+    """Exact total + how many rows the capped response actually contains.
+
+    The dashboard must never present a capped list as complete (CODE-08).
+    """
+    return {"count": count, "returned": returned, "truncated": count > returned}
+
+
 def _item(*, kind: str, entity_id: Any, severity: str, title: str,
           detail: str, href: str, action: str, at: Any = None,
           **extra: Any) -> dict[str, Any]:
@@ -109,7 +117,7 @@ async def build_attention(pool=None) -> dict[str, Any]:
         counts[kind] = count
         items.extend(items_for_kind)
         by_kind[kind] = {
-            "count": count,
+            **summarize_kind(count, len(items_for_kind)),
             "severity": min(
                 (i["severity"] for i in items_for_kind),
                 key=lambda s: _SEVERITY_RANK.get(s, 9),
@@ -484,6 +492,8 @@ async def build_attention(pool=None) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total": total,
         "human_total": total,
+        "returned_total": len(items),
+        "truncated": any(v["truncated"] for v in by_kind.values()),
         "severity": severity,
         "counts": counts,
         "by_kind": by_kind,

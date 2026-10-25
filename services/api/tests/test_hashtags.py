@@ -162,6 +162,24 @@ def test_generation_stays_deterministic():
     assert a == b
 
 
+def test_gate_off_preserves_source_priority_order(monkeypatch):
+    """CODE-03: with the derived-engagement gate off, unmeasured tags must
+    keep the source-priority order (trend → category → provider → eligibility)
+    instead of falling back to alphabetical order and losing trend tags at the
+    cap."""
+    monkeypatch.delenv("MTK_ENABLE_DERIVED_ENGAGEMENT", raising=False)
+    trends = ["tag one", "tag two", "tag three", "tag four", "tag five",
+              "tag six"]
+    items = generate_hashtags("youtube", provider="Acme",
+                              category="ai_tools", countries=["PK"],
+                              trend_keywords=trends)
+    assert len(items) == 5  # YouTube cap
+    assert [i["source"] for i in items] == ["trend"] * 5
+    assert [i["tag"] for i in items] == [
+        "#TagOne", "#TagTwo", "#TagThree", "#TagFour", "#TagFive",
+    ]
+
+
 # --------------------------------------------------------------- gate reasons
 
 

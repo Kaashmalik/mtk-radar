@@ -75,8 +75,7 @@ const SECRET_SIGNATURES = [
 /** What the user asked to save, from a context-menu event + tab.
  * RIGHT-CLICKED LINK wins over the page (the audit's core bug): the page URL
  * travels along as CONTEXT in extra.context_url, never as the saved target. */
-export function resolveTarget({ info = {}, tab = {} } = {}) {
-  const linkUrl = info.linkUrl ? String(info.linkUrl) : "";
+export function resolveTarget({ info = {}, tab = {} } = {}) {  const linkUrl = info.linkUrl ? String(info.linkUrl) : "";
   if (linkUrl) {
     return {
       url: linkUrl,
@@ -155,6 +154,26 @@ export function stripTrackingParams(url) {
   }
 }
 
+/** Context URL to attach when the saved target is a link.
+ *
+ * The page is context, not content: a webmail/chat/sign-in URL is omitted
+ * entirely, and the remaining URL is reduced to scheme+host+path (queries and
+ * fragments can carry tokens or personal identifiers). Returns "" when the
+ * context is not safe to upload.
+ */
+export function pageContextUrl(raw, extraDenylist = []) {
+  if (!raw) return "";
+  if (restrictedReason(raw) || denylistReason(raw, extraDenylist)) return "";
+  try {
+    const u = new URL(raw);
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
 /** Which secret kinds appear in the text (fail closed: a positive match
  * BLOCKS the save; the user is told to save without the selected text). */
 export function findSecrets(text) {
@@ -207,6 +226,29 @@ export function validateApiBase(raw) {
     return { ok: false, error: "use the API ROOT (e.g. https://radar.example.com) — paths are added automatically" };
   }
   return { ok: true, base: value, origin: u.origin, loopback };
+}
+
+// ---- options-page settings -------------------------------------------------
+
+/**
+ * Build the patch persisted to chrome.storage.local.
+ *
+ * The options page masks a stored token by clearing the input and setting
+ * `data-masked`. In that state the token must be omitted entirely: writing
+ * `token: ""` here used to wipe a working credential on an unrelated save.
+ */
+export function settingsPatch(values, { tokenMasked = false } = {}) {
+  const patch = { ...values };
+  if (tokenMasked) delete patch.token;
+  return patch;
+}
+
+/**
+ * Token to send to the health probe. A masked field means "use the stored
+ * token"; an edited field means "use what the operator typed".
+ */
+export function probeToken({ tokenMasked, typedToken, storedToken }) {
+  return tokenMasked ? (storedToken ?? "") : (typedToken ?? "");
 }
 
 // ---- response classification ----------------------------------------------

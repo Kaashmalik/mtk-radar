@@ -1,5 +1,8 @@
 # Enhancement plan — full-project audit and two-month YouTube-first roadmap (22 October 2026)
 
+> **Historical.** A dated audit/plan. Superseded by the [implementation roadmap](../implementation-roadmap-2026-10-25.md) and the 2026-10-24 enhancement plans; kept for the decision trail.
+
+
 **Plan date:** 22 October 2026 (UTC)
 
 > **Resolution note (23 October 2026, commit `0f7dd23`):** the P0 "no application-level login gate on the dashboard" finding below is CLOSED — the console sits behind a signed HttpOnly session cookie (`lib/session.ts`, `proxy.ts`), the backend proxy attaches tokens server-side, and the release gate enforces `claim_outcome`/QC bindings. Do not re-raise the closed P0s from this dated audit without re-checking the code first.
@@ -577,12 +580,12 @@ as production-ready or fully autonomous.
 
 ## 10. Related documents
 
-- [Automation master plan (21 October 2026)](automation-master-plan-2026-10-21.md) —
+- [Automation master plan (21 October 2026)](../automation-master-plan-2026-10-21.md) —
   historical audit, WP01 safety slices and the longer schedule.
-- [Go-live checklist](go-live-checklist.md) — secrets, accounts and operator
+- [Go-live checklist](../go-live-checklist.md) — secrets, accounts and operator
   checkpoints.
-- [Cost, laptop production and VPS fallback (22 October 2026)](cost-laptop-vps-2026-10-22.md)
+- [Cost, laptop production and VPS fallback (22 October 2026)](../cost-laptop-vps-2026-10-22.md)
   — hosting and spend constraints.
-- [Render QC](render-qc.md) — measured export checks.
-- [Security and redaction](security-and-redaction.md) — capture and secret rules.
-- [Runbook](runbook.md) — operating procedures.
+- [Render QC](../render-qc.md) — measured export checks.
+- [Security and redaction](../security-and-redaction.md) — capture and secret rules.
+- [Runbook](../runbook.md) — operating procedures.

@@ -38,5 +38,9 @@ Non-negotiable rules from the master plan (§3, §4, §11). Violations block rel
 
 ## Dependency hygiene
 
-- Pinned versions; monthly security-advisory check; gitleaks in pre-commit and CI.
+- Pinned versions; monthly security-advisory check. Secret scanning with
+  gitleaks is configured in `.pre-commit-config.yaml` and the CI `secret-scan` job
+  (`.gitleaks.toml`). The config was run locally over all 128 commits with no
+  leaks on 2026-10-25; CI execution is `UNPROVEN` while the owner billing lock
+  remains (PROOF-04), so treat the CI gate as configured, not proven.
 - Licenses recorded in `third-party-notices.md` before adoption.

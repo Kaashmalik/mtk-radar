@@ -1,9 +1,12 @@
 # WP01 eleventh slice — bounded ToS attestation validity and revocation
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [per-source terms-of-service attestation](implementation-wp01-slice10-2026-10-21.md)
-**Master plan:** [§5 source registry, §6 step 2](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§5 source registry, §6 step 2](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 The tenth slice recorded who decided that automated reading of a source is
 permitted, but the record never aged and could not be withdrawn. Terms change;

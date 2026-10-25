@@ -1,9 +1,12 @@
 # WP01 ninth slice — extraction coverage is required at promotion
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [sectioned long-document extraction](implementation-wp01-slice8-2026-10-21.md)
-**Master plan:** [§6 steps 4–5, audit A04/A13](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 steps 4–5, audit A04/A13](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 The eighth slice made coverage verifiable: the API recomputes the section count
 from the stored snapshot and rejects a truncated claim. But coverage was optional

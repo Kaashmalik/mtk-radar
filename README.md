@@ -19,7 +19,7 @@ Every offer is treated as **time-sensitive data**: eligibility, region, expiry, 
 | **Discover** | Collect candidate changes from trusted source feeds, APIs, release notes, official pages, and saved links. | Choose source categories and regions. |
 | **Verify** | Extract offer fields, preserve evidence, compare sources, and flag conflicts or missing terms. | Approve, reject, or request more evidence. |
 | **Prepare** | Create a claim checklist, script, command cards, shot list, and platform copy. | Edit factual claims and narration. |
-| **Capture & Edit** | Record the real claim flow; generate captions, voiceover, and 16:9 / 9:16 exports. | Review redactions and edit in-app or in an external editor. |
+| **Capture & Edit** | Record the real claim flow; generate captions, voiceover, and 16:9 / 9:16 exports. | Review redactions, edit copy/captions in the Studio, or export the bundle for an external editor. |
 | **Schedule** | Create a platform-specific post package, schedule it, and track status. | Final approval per platform; cancel or reschedule. |
 | **Learn** | Record results and corrections; refresh or expire stale offer pages. | Correct errors and request takedown/update. |
 
@@ -238,12 +238,14 @@ browser step.
 
 ## Documentation
 
-- [`docs/implementation-wp01-2026-10-21.md`](docs/implementation-wp01-2026-10-21.md) — first implemented verification-integrity checkpoint, migration 012/API rollout notes, test coverage and explicit remaining safety limitations.
+- [`docs/implementation-roadmap-2026-10-25.md`](docs/implementation-roadmap-2026-10-25.md) — **the active execution plan**: status rules, gap register, milestones and proof commands. Start here for current work.
+- [`docs/README.md`](docs/README.md) — documentation index (active docs, operations, engineering, history).
+- [`docs/archive/wp01/implementation-wp01-2026-10-21.md`](docs/archive/wp01/implementation-wp01-2026-10-21.md) — **historical** first verification-integrity checkpoint; superseded by the roadmap and EP log.
 - [`docs/automation-master-plan-2026-10-21.md`](docs/automation-master-plan-2026-10-21.md) — **dated 2026–2027 enhancement roadmap and code audit**: actual test results, implemented/remaining checklist, safety gaps, trend radar, premium video, light editor, local-model controls and ordered work packages. Use this for new enhancement work; historical completion claims below are not production certification.
 - [`docs/enhancement-plan-2026-10-24-trends-automation.md`](docs/enhancement-plan-2026-10-24-trends-automation.md) — **Trend Radar v2, research-to-video queue, one-click scheduling, evidence-based hashtags, and the cost engine** — work packages WP-A…WP-H with acceptance criteria (extends the 10-22 audit and this master plan).
-- [`docs/coding-model-handoff-2026-10-21.md`](docs/coding-model-handoff-2026-10-21.md) — compact implementation instructions and acceptance/report rules for GLM, MiniMax or other coding assistants.
+- [`docs/archive/coding-model-handoff-2026-10-21.md`](docs/archive/coding-model-handoff-2026-10-21.md) — **historical** compact handoff for GLM, MiniMax or other coding assistants; use the roadmap for current work.
 - [`docs/master plan.md`](docs/master%20plan.md) — the complete build plan: product scope, verification design, offer schema, video production guide, publishing operations, and reference links.
-- [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — golden rules, engineering best practices, and the Weeks 1–4 to-do checklist for starting implementation.
+- [`docs/implementation-best-practices.md`](docs/implementation-best-practices.md) — working agreements; the Weeks 1–4 checklist is historical, and unimplemented tooling is marked `PLANNED`.
 - [`docs/first-offer-recipe.md`](docs/first-offer-recipe.md) — the pilot case-study recipe: pre-flight, script, guided capture, redaction review, hard no's.
 - [`docs/open-source-integrations.md`](docs/open-source-integrations.md) — upstream repositories we integrate (and how), license reviews, fork strategy, and integration to-dos.
 - [`docs/source-registry.md`](docs/source-registry.md) — registered sources with trust tiers and polling cadence.
@@ -254,6 +256,7 @@ browser step.
 - [`docs/cost-laptop-vps-2026-10-22.md`](docs/cost-laptop-vps-2026-10-22.md) — **low-cost hosting**: cost scenarios, student/free-resource stack, laptop production setup, Render/MongoDB credits, Supabase/Cloudinary/Drive tradeoffs, and the split-VPS fallback when the laptop is off.
 - [`docs/notifications.md`](docs/notifications.md) — **monitor webhook/email alerts**: payload schema, SMTP/Gmail setup, webhook security, test command, troubleshooting, and which parts can (and cannot) run on free Supabase.
 - [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, obligations, and the evaluated-but-not-adopted list.
+- [`docs/tool-stack-alignment-2026-10-23.md`](docs/tool-stack-alignment-2026-10-23.md) — **external tool-stack evaluation**: Perkstack, OBS, Descript, CapCut, Opus Clip, Metricool, Loomly, Runway, HeyGen mapped against the in-house pipeline, with adopt/skip decisions and guardrails.
 - [`docs/go-live-checklist.md`](docs/go-live-checklist.md) — **the operator procedure**: which keys to add, how to connect each social account, the first real post, and the daily/weekly operations.
 - [`docs/master-plan-traceability.md`](docs/master-plan-traceability.md) — every master-plan item mapped to its code and its proof.
 - [`docs/upgrade-checklist.md`](docs/upgrade-checklist.md) — how a pinned dependency or image is upgraded safely.
@@ -267,15 +270,20 @@ browser step.
 | 2. Verification desk | Structured extraction, evidence snapshots, staleness rules | No unverified offer enters script generation | ✅ v0.7–v0.9 |
 | 3. Script & checklist | Claim guide, command cards, citations | Every factual claim traceable to evidence | ✅ v0.10 |
 | 4. Capture & video | Screen recording, redaction, captions, FFmpeg exports | One complete video package reproducible | ✅ v0.11–v0.14, v0.17 |
-| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 |
-| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ✅ v0.19 (needs your keys) |
+| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 (handoff export; no timeline editor — WP10 planned) |
+| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ⚠️ v0.19 — adapters + mocked tests; live private/test posts unproven (needs keys) |
 | 7. Analytics & scale | Views, corrections, source freshness | Data improves packaging without weakening verification | ✅ v0.18, v0.22, v0.24 |
 | 8. Automation & control | Manual / assisted / autopilot policy per stage | Every gated write re-checks the policy; human stages cannot be bypassed | ✅ v0.26 |
 | 9. Production polish | Trend radar, bilingual studio, covers/motion, English-first packaging, growth analytics | English package + captions for every video; Urdu voiceover opt-in; verified render/schedule path | ✅ v0.27 |
 
 Remaining, with reasons: SSO/self-serve logins (single-operator token model is
-sufficient — see runbook §9), Postgres HA (single instance at this scale), and
-TikTok publishing (requires an approved developer app).
+sufficient — see runbook §9), Postgres HA (single instance at this scale),
+TikTok publishing (requires an approved developer app), the WP10 in-app light
+editor (handoff export exists; there is no timeline editor), EP-05–EP-07
+(evidence-to-video plan, still proposed), live private/test posting and
+loaded-extension browser proof, the Postgres integration run, and GitHub
+Actions (currently blocked by the owner account's billing lock). The ordered
+remediation plan is the [implementation roadmap](docs/implementation-roadmap-2026-10-25.md).
 
 For the detailed twelve-week implementation sequence, see the [master plan](docs/master%20plan.md).
 

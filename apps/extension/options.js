@@ -4,7 +4,7 @@
  * the durable outbox manager (retry once / delete / open saved item).
  */
 
-import { validateApiBase } from "./core.js";
+import { probeToken, settingsPatch, validateApiBase } from "./core.js";
 
 const FIELDS = ["apiBase", "token", "handle", "dashboardBase"];
 const DEFAULTS = {
@@ -28,6 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const cfg = { ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) };
   for (const f of FIELDS) $(f).value = cfg[f] ?? "";
   $("denylist").value = (cfg.denylistExtra ?? []).join("\n");
+  lastGrantedOrigin = cfg.lastGrantedOrigin || null;
   maskTokenIfPresent(cfg.token);
   await renderOutbox();
   bind();
@@ -49,12 +50,14 @@ function bind() {
 
   $("test-conn").addEventListener("click", async () => {
     setStatus("probing…", true);
+    const tokenMasked = Boolean($("token").dataset.masked);
+    const stored = tokenMasked ? await chrome.storage.local.get("token") : {};
     const probe = await withWorker({
       type: "mtk-radar:health",
       base: $("apiBase").value.trim() || DEFAULTS.apiBase,
-      token: $("token").dataset.masked
-        ? (await chrome.storage.local.get("token")).token ?? ""
-        : $("token").value.trim(),
+      token: probeToken({
+        tokenMasked, typedToken: $("token").value.trim(), storedToken: stored.token,
+      }),
     });
     renderProbe(probe);
     if (probe?.ok) setStatus("", true);
@@ -88,7 +91,8 @@ async function onSave(event) {
     return;
   }
   // A masked (untouched) token field must not overwrite the stored token.
-  if ($("token").dataset.masked) values.token = "";
+  const tokenMasked = Boolean($("token").dataset.masked);
+  const patch = settingsPatch(values, { tokenMasked });
   const denylistExtra = $("denylist").value.split("\n")
     .map((s) => s.trim()).filter(Boolean).slice(0, 100);
 
@@ -99,32 +103,45 @@ async function onSave(event) {
     setStatus("you declined the host permission — the extension cannot reach that API origin", false);
     return;
   }
-  await chrome.storage.local.set({ ...values, denylistExtra });
-  if (values.token) maskTokenIfPresent(values.token);
+  await chrome.storage.local.set({ ...patch, denylistExtra });
+  if (!tokenMasked && values.token) maskTokenIfPresent(values.token);
   setStatus("Saved ✓", true);
+  const stored = tokenMasked ? await chrome.storage.local.get("token") : {};
   const probe = await withWorker({
-    type: "mtk-radar:health", base: values.apiBase, token: values.token,
+    type: "mtk-radar:health",
+    base: values.apiBase,
+    token: probeToken({
+      tokenMasked, typedToken: values.token, storedToken: stored.token,
+    }),
   });
   renderProbe(probe);
 }
 
 async function ensureOriginPermission(origin, loopback) {
-  if (loopback) return true;
+  if (loopback) {
+    await rememberGrantedOrigin(origin);
+    return true;
+  }
   if (!chrome.permissions) return true;
   const pattern = `${origin}/*`;
   if (await chrome.permissions.contains({ origins: [pattern] })) {
-    lastGrantedOrigin = origin;
+    await rememberGrantedOrigin(origin);
     return true;
   }
   const ok = await chrome.permissions.request({ origins: [pattern] });
-  if (ok) {
-    if (lastGrantedOrigin && lastGrantedOrigin !== origin) {
-      await chrome.permissions.remove({ origins: [`${lastGrantedOrigin}/*`] })
-        .catch(() => {});
-    }
-    lastGrantedOrigin = origin;
-  }
+  if (ok) await rememberGrantedOrigin(origin);
   return ok;
+}
+
+/** Persist the granted origin so a reload can retire the previous host.
+ * Session-only state used to leave the old permission behind forever. */
+async function rememberGrantedOrigin(origin) {
+  if (lastGrantedOrigin && lastGrantedOrigin !== origin && chrome.permissions) {
+    await chrome.permissions.remove({ origins: [`${lastGrantedOrigin}/*`] })
+      .catch(() => {});
+  }
+  lastGrantedOrigin = origin;
+  await chrome.storage.local.set({ lastGrantedOrigin: origin });
 }
 
 async function onRevoke() {
@@ -136,7 +153,8 @@ async function onRevoke() {
   if (!check.loopback && chrome.permissions) {
     await chrome.permissions.remove({ origins: [`${check.origin}/*`] }).catch(() => {});
   }
-  await chrome.storage.local.remove(["token", "handle", "apiBase", "dashboardBase", "denylistExtra"]);
+  await chrome.storage.local.remove(["token", "handle", "apiBase", "dashboardBase", "denylistExtra", "lastGrantedOrigin"]);
+  lastGrantedOrigin = null;
   for (const f of FIELDS) $(f).value = "";
   $("denylist").value = "";
   $("token").placeholder = "paste MTK_EXTENSION_TOKEN";
@@ -234,7 +252,7 @@ async function openSavedItem(entry) {
     setStatus("set the Dashboard URL to open saved items", false);
     return;
   }
-  await chrome.tabs.create({ url: `${dash}/?saved_item=${encodeURIComponent(entry.itemId)}` });
+  await chrome.tabs.create({ url: `${dash}/inbox?saved_item=${encodeURIComponent(entry.itemId)}` });
 }
 
 function escapeHtml(text) {

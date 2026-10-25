@@ -1,9 +1,12 @@
 # WP01 second slice — offer-type terms contract and explicit fact-pack statuses
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [first snapshot-bound verification slice](implementation-wp01-2026-10-21.md) (commit `0dbd7df`, verified at `fe4764e`)
-**Master plan:** [§6 steps 5–9, §12 WP01](../docs/automation-master-plan-2026-10-21.md#12-ordered-implementation-work-packages)
+**Master plan:** [§6 steps 5–9, §12 WP01](../../automation-master-plan-2026-10-21.md#12-ordered-implementation-work-packages)
 
 This slice closes the two WP01 remaining items:
 

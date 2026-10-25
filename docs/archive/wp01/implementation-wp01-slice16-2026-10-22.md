@@ -1,9 +1,12 @@
 # WP01 sixteenth slice — coverage for claim-free pages
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 22 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [audit blast radius](implementation-wp01-slice15-2026-10-21.md)
-**Master plan:** [§17 scheduling/publishing, legacy review](../docs/automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
+**Master plan:** [§17 scheduling/publishing, legacy review](../../automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
 
 The ninth slice required the stored `coverage` record to list every machine
 snapshot a claim cites. That still left one hole: a worker could read a page,

@@ -1,6 +1,10 @@
 # Implementation Guide — Best Practices & To-Do Checklist
 
-How to start building MTK RADAR AI the right way, per the [master plan](master%20plan.md). This document defines the working agreements and the ordered to-do list for the first build sprint (Weeks 1–4 of the twelve-week sequence).
+How to work on MTK RADAR AI, per the [master plan](master%20plan.md). This guide
+started as the Weeks 1–4 start-up checklist; the repository is now at v0.30, so
+the checklist in §3 is historical. The working agreements still apply, and the
+current execution order lives in the
+[implementation roadmap](implementation-roadmap-2026-10-25.md).
 
 ---
 
@@ -20,23 +24,42 @@ How to start building MTK RADAR AI the right way, per the [master plan](master%2
 ### Repository & Git
 - Monorepo with the layout from the master plan (`apps/`, `services/`, `workers/`, `packages/`, `infra/`, `docs/`).
 - Trunk-based development: short-lived feature branches → PR into `main` → squash merge.
-- Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`) — enforced with commitlint.
+- Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`) are the team
+  convention. `commitlint` is **not configured and no longer claimed**; adopt
+  it only if a real multi-author workflow needs the enforcement.
 - PRs require: green CI, at least one review, and no failing type checks. Small PRs (< ~400 lines) preferred.
 
 ### Environment & configuration
 - Local development runs via Docker Compose (`infra/docker/`): Postgres, Redis, workers, dashboard.
-- Configuration via `.env` (validated at boot with a schema — fail fast on missing vars); commit only `.env.example`.
-- Secrets in a vault/env manager (never in the repo); object storage uses signed URLs.
+- Configuration via `.env`; a single schema validator at boot is **planned, not
+  implemented** (CLAIM-01). Today each service validates the variables it reads
+  and fails closed where a missing value is unsafe, and the Compose env matrix
+  is guard-tested against every reader.
+- Secrets in a vault/env manager (never in the repo); object storage uses
+  server-side SigV4 and media streams through the authenticated API — there are
+  no public or presigned URLs (see `security-and-redaction.md`).
 
 ### Database
-- Versioned migrations from day 1 (no schema drift); every migration is reversible or has a documented rollback.
+- Versioned migrations from day 1 (no schema drift); migrations are
+  **forward-only** and every change relies on the tested backup/restore path
+  rather than down-migrations.
 - Every table gets `created_at`/`updated_at`; offers, evidence, and approvals are append-friendly with explicit state columns.
 - Idempotency keys for all job outcomes (collections, publishes) so retries never duplicate work.
 
 ### Quality gates
-- TypeScript everywhere strict mode; Python workers with `ruff` + `mypy`.
-- Pre-commit hooks: format, lint, secret scanning (gitleaks), no large binaries.
-- CI on every PR: lint → typecheck → unit tests → build. Publish/deploy only from `main`.
+- TypeScript everywhere strict mode; Python uses `ruff` (enforced) and type
+  hints. `mypy` is **not configured and no longer claimed** (CLAIM-01); add it
+  only with a scoped baseline that can stay green.
+- Pre-commit hooks are configured in `.pre-commit-config.yaml`: gitleaks secret
+  scanning (put the pinned `gitleaks` binary on `PATH`), `ruff`, the Windows
+  filename guard and the doc-link check. Install with
+  `pip install pre-commit && pre-commit install`; the config passes
+  `pre-commit run --all-files` on 2026-10-25.
+- CI on every PR: secret scan → lint → typecheck → unit tests → build. The
+  gitleaks scan also runs over full history in the `secret-scan` job; the config is
+  verified locally (128 commits, no leaks). CI execution still fails before
+  starting because the owner account is billing-locked; record that as
+  `UNPROVEN`, not green (PROOF-04).
 - Structured logs with job/trace IDs; dead-letter queue watched from week 1; source health dashboard before scaling sources.
 
 ### Data & content safety
@@ -46,7 +69,11 @@ How to start building MTK RADAR AI the right way, per the [master plan](master%2
 
 ---
 
-## 3. To-do checklist — implementation start (Weeks 1–4)
+## 3. Historical start checklist (Weeks 1–4) — superseded
+
+> The checkboxes below record the original start-up sequence. They are not a
+> current status report; use the [implementation roadmap](implementation-roadmap-2026-10-25.md)
+> for open work.
 
 ### Week 1 — Foundation
 - [ ] Create monorepo skeleton: `apps/dashboard`, `apps/extension`, `services/api`, `workers/*`, `packages/*`, `infra/docker` (per master plan §12).

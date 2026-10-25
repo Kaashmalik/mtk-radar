@@ -12,9 +12,21 @@ the ranked list with badges and one primary action per offer state.
 | Component | Source | Neutral when unknown |
 |---|---|---|
 | trend | live score of the linked trend candidate | 0 |
-| evidence | `min(100, 25 × evidence snapshots on the offer)` | 0 |
+| evidence | 0–100 score, see below | 0 |
 | freshness | linked trend's freshness score | 50 |
 | fit | operator's preset fit for the video format | 50 |
+
+Evidence is **current support**, not a snapshot count (G15). Only evidence
+captured in the last 14 days counts, with `robots_allowed` true and an HTTP
+status of 200 or absent. The component is:
+
+    evidence = (40 if any official evidence else 25)
+             + 30 × share of the offer's declared claims supported
+             + 30 × min(1, independent sources / 2)
+
+Declared claims are the fields the offer actually carries: `promo_code`,
+`redemption_url`, `eligibility`, `value` and `claim_steps`. Independence is
+distinct `source_id` values. If no current evidence exists, the component is 0.
 
 Because the rank is computed at read time from evidence, adding a verified
 snapshot lifts the row without any re-scoring job. Operator pins
@@ -36,8 +48,9 @@ Deterministic, server-side, visible in `archived_reason`:
 
 - `offer_expired` — the linked offer state is `expired`
 - `deadline_passed` — the row's own freshness deadline passed
-- `trend_cooled` — the linked trend's latest radar observation is ≤ 0 velocity
-  and older than 7 days
+- `trend_cooled` — the linked trend's **latest** observation has velocity ≤ 0,
+  and the last meaningful growth (`last_growth_at`, or the first observation if
+  the trend never grew) is older than 7 days. Rescanning cannot reset cooling.
 
 ## Safety model
 

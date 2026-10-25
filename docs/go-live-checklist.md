@@ -29,11 +29,11 @@ the database, never in the browser, never in git. The database only records
 
 | Area | How it is proven |
 | --- | --- |
-| API + DB | integration tests against real Postgres 16, migrations 001→023 applied by the real runner |
+| API + DB | integration tests against real Postgres 16, migrations 001→040 applied by the real runner |
 | State machine (§3) | unit/integration tests — illegal transitions, expiry, hash-binding, redaction and automation gates |
 | Workers | collector, verification, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
 | Dashboard | production build + Playwright smoke against the real API (4 browser tests) |
-| Object storage | S3-compatible driver tested against a real S3 mock (moto) |
+| Object storage | local round-trip plus the S3-compatible driver over a mocked HTTP transport (no moto dependency) |
 | Backup/restore | `infra/backup.sh` + `infra/restore.sh` + systemd timers (`infra/systemd/`) |
 | Extension | MV3 manifest + service worker + options page, syntax-checked in CI |
 
@@ -55,7 +55,7 @@ cp .env.example .env
 docker compose -f infra/docker/docker-compose.yml up -d \
   --profile workers --profile storage
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
-curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.29.0"}
+curl -s localhost:8000/health        # {"status":"ok","service":"api","version":"0.30.0"}
 ```
 
 Then open **Settings → Automation control** and confirm the default **Assisted**
@@ -125,8 +125,9 @@ The dashboard validates the token against the API, then sets a signed HttpOnly
 session cookie. Browser JavaScript never sees the token (all interactive calls
 use the same-origin `/api/backend` proxy). Every approval, correction,
 connection and setting change is bound to this identity in `audit_log` (§15).
-Revoke with `python -m scripts.mint_reviewer --revoke Kashi`; the reviewer's
-next API call fails even if their dashboard cookie has not expired.
+Revoke with `python -m scripts.mint_reviewer --revoke Kashi`; the API's positive
+token cache is 60 s, so the reviewer is locked out within one minute even if
+their dashboard cookie has not expired.
 
 ### 2.3 Optional extras
 
@@ -134,7 +135,6 @@ next API call fails even if their dashboard cookie has not expired.
 | --- | --- |
 | `GITHUB_TOKEN` | raises collector rate limits for GitHub sources |
 | `MTK_S3_*` (+ `MTK_STORAGE_BACKEND=s3`) | portable renders/captures **and** the off-host copy of every backup (recommended) |
-| `MTK_S3_*` + `MTK_STORAGE_BACKEND=s3` | portable renders/captures (any S3-compatible store) |
 | `MTK_PUBLIC_MEDIA_BASE_URL` | public CDN/bucket origin — **required for Instagram** |
 | `MTK_NOTIFY_WEBHOOK_URL` / `MTK_NOTIFY_WEBHOOK_TOKEN` | optional JSON alert digest (Slack/Discord/your receiver); token is sent as a Bearer header |
 | `MTK_NOTIFY_EMAIL_TO` + `MTK_SMTP_*` | optional SMTP email digest from the monitor (Gmail needs an App Password) |

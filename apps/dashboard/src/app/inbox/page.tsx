@@ -58,6 +58,16 @@ async function getInbox(q: string | undefined, filter: string, cursor: string | 
   }
 }
 
+async function getItem(id: string): Promise<ItemRow | null> {
+  try {
+    const res = await apiFetch(`/items/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as ItemRow;
+  } catch {
+    return null;
+  }
+}
+
 function buildHref(q: string | undefined, filter: string, cursor?: string | null): string {
   const params = new URLSearchParams();
   params.set("filter", filter);
@@ -77,10 +87,21 @@ export default async function InboxPage({
     return Array.isArray(value) ? value[0] : value;
   };
   const q = first("q")?.slice(0, 200);
-  const filter = FILTERS.some(([f]) => f === first("filter")) ? first("filter")! : "unprocessed";
+  const rawSavedItem = first("saved_item");
+  // The extension opens this page with the exact id it received from the API.
+  // Accept only a UUID shape; the API validates the rest and returns 404.
+  const savedItem = rawSavedItem && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawSavedItem)
+    ? rawSavedItem
+    : undefined;
+  const filter = savedItem
+    ? "all"
+    : FILTERS.some(([f]) => f === first("filter")) ? first("filter")! : "unprocessed";
   const cursor = first("cursor");
 
-  const { items, next } = await getInbox(q, filter, cursor);
+  const saved = savedItem ? await getItem(savedItem) : null;
+  const { items, next } = savedItem
+    ? { items: saved ? [saved] : [], next: null as string | null }
+    : await getInbox(q, filter, cursor);
 
   return (
     <main className="page">
@@ -95,6 +116,17 @@ export default async function InboxPage({
             </p>
           </div>
         </div>
+
+        {savedItem ? (
+          <div className="saved-banner" role="status">
+            <span>
+              {saved
+                ? <>Saved from the extension: <strong>{saved.title ?? saved.url}</strong></>
+                : <>Saved item <code>{savedItem}</code> was not found in this deployment.</>}
+            </span>
+            <Link href="/inbox" className="btn btn-ghost btn-small">Back to inbox</Link>
+          </div>
+        ) : null}
 
         <form method="GET" action="/inbox" className="inbox-controls" role="search">
           <input type="hidden" name="filter" value={filter} />
@@ -132,16 +164,21 @@ export default async function InboxPage({
           </div>
         ) : items.length === 0 ? (
           <div className="empty-state">
-            {q
-              ? <>Nothing matches “{q}” in this filter.</>
-              : filter === "unprocessed"
-                ? "Inbox is clear — nothing is waiting for review."
-                : "No items in this view."}
+            {savedItem
+              ? <>Saved item <code>{savedItem}</code> was not found in this deployment.</>
+              : q
+                ? <>Nothing matches “{q}” in this filter.</>
+                : filter === "unprocessed"
+                  ? "Inbox is clear — nothing is waiting for review."
+                  : "No items in this view."}
           </div>
         ) : (
           <div className="inbox-list">
             {items.map((item) => (
-              <div className="trend-row" key={item.id}>
+              <div
+                className={`trend-row${savedItem && item.id === savedItem ? " saved-highlight" : ""}`}
+                key={item.id}
+              >
                 <div>
                   <h3 className="truncate">
                     <a href={item.url} target="_blank" rel="noreferrer">
