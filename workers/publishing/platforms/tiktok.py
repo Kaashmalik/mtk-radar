@@ -219,6 +219,12 @@ class TikTokAdapter(PublishAdapter):
         when present, and 'unknown visibility' stays an explicit held state
         rather than an assumed one.
 
+        Private/unlisted test posts are the exception to the public-id rule:
+        TikTok maps both to SELF_ONLY, so a completion status is the expected
+        terminal state and no public id will ever exist. Confirmation for
+        those modes is therefore based on the completed SELF_ONLY upload; it
+        is not evidence of public visibility.
+
         The worker treats `confirmed: false` as a held failure: no retry,
         no duplicate upload, a human looks at the post.
         """
@@ -252,9 +258,23 @@ class TikTokAdapter(PublishAdapter):
             if post_ids:
                 return {**last, "confirmed": True}
             if status in ("PUBLISH_COMPLETE", "PUBLISHED"):
+                # SELF_ONLY posts (private/unlisted test uploads) never become
+                # publicly available, so a public post id is not expected.
+                # Completion confirms the requested private post; it never
+                # proves public visibility.
+                if expected_privacy in ("private", "unlisted"):
+                    return {
+                        **last,
+                        "confirmed": True,
+                        "visibility": "self_only",
+                        "requested_privacy": expected_privacy,
+                        "note": ("TikTok completed the requested SELF_ONLY upload; "
+                                 "private visibility is not independently echoed "
+                                 "by the status endpoint"),
+                    }
                 return {**last, "confirmed": False,
                         "error": "tiktok reported a completion status but returned "
-                                 "no public post id — visibility is unconfirmed; "
+                                 "no public post id - visibility is unconfirmed; "
                                  "verify in the TikTok app before retrying"}
             if time.monotonic() >= deadline:
                 return {**last, "confirmed": False,
