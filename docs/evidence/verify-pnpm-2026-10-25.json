@@ -4,7 +4,7 @@
   "commit": "75b03e4acdbc8de6873e9c41ea0c8a0b271e77b1",
   "commit_subject": "feat: add fail-closed private provider smoke harness",
   "command": "corepack pnpm verify",
-  "shell": "Git Bash 2.51 on Windows",
+  "shell": "Git Bash (GNU bash 5.2.15, MSYS2) on Windows",
   "result": "pass",
   "exit_code": 0,
   "environment": {
