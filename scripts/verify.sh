@@ -11,12 +11,31 @@
 #   ./scripts/verify.sh --no-e2e     # skip the browser smoke test
 #   ./scripts/verify.sh --fast       # skip the browser smoke test and the build
 #
-# The throwaway Postgres is started with docker (name mtk-verify-pg, port
-# 55499) and removed afterwards. Nothing touches your .env or your data.
+#   MTK_VERIFY_DATABASE_URL=postgresql://user:pass@host:port/postgres \
+#     ./scripts/verify.sh
+#     # no Docker daemon: use an existing PostgreSQL server. The script
+#     # recreates the disposable databases `mtk_verify` and `mtk_verify_e2e`.
+#
+# The default throwaway Postgres is started with docker (name mtk-verify-pg,
+# port 55499) and removed afterwards. Nothing touches your .env or your data.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
+
+# Prefer an explicit interpreter (the repo venv on Windows), then python3,
+# then python. Every Python invocation below uses this, so the same script
+# works on Linux CI and a Windows Git Bash workstation.
+if [ -n "${MTK_VERIFY_PYTHON:-}" ]; then
+  PYTHON="$MTK_VERIFY_PYTHON"
+elif command -v python3 > /dev/null 2>&1; then
+  PYTHON="python3"
+elif command -v python > /dev/null 2>&1; then
+  PYTHON="python"
+else
+  echo "python3 or python is required" >&2
+  exit 2
+fi
 
 RUN_E2E=1
 RUN_BUILD=1
@@ -33,7 +52,7 @@ PG_NAME="mtk-verify-pg"
 # first free port from a start point (a busy port would make the whole run
 # look broken for reasons that have nothing to do with the code)
 pick_port() {
-  python3 - "$1" << 'PY'
+  "$PYTHON" - "$1" << 'PY'
 import socket, sys
 start = int(sys.argv[1])
 for candidate in range(start, start + 50):
@@ -44,10 +63,18 @@ for candidate in range(start, start + 50):
             break
 PY
 }
-PG_PORT="${MTK_VERIFY_PG_PORT:-$(pick_port 55499)}"
-# 127.0.0.1, not localhost: some hosts resolve localhost to IPv6 ::1 first,
-# while Docker publishes the port on IPv4 only — that fails as a 60s timeout.
-PG_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/mtk_verify"
+
+EXTERNAL_PG_URL="${MTK_VERIFY_DATABASE_URL:-${MTK_TEST_DATABASE_URL:-}}"
+USE_EXTERNAL_PG=0
+if [ -n "$EXTERNAL_PG_URL" ]; then
+  USE_EXTERNAL_PG=1
+  PG_URL=""
+else
+  PG_PORT="${MTK_VERIFY_PG_PORT:-$(pick_port 55499)}"
+  # 127.0.0.1, not localhost: some hosts resolve localhost to IPv6 ::1 first,
+  # while Docker publishes the port on IPv4 only — that fails as a 60s timeout.
+  PG_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/mtk_verify"
+fi
 VENV="${MTK_VERIFY_VENV:-/tmp/opencode/verify-venv}"
 
 step() { printf '\n\033[1;36m▸ %s\033[0m\n' "$1"; }
@@ -55,17 +82,19 @@ ok()   { printf '\033[1;32m✔ %s\033[0m\n' "$1"; }
 fail() { printf '\033[1;31m✘ %s\033[0m\n' "$1" >&2; exit 1; }
 
 cleanup() {
-  docker rm -f "$PG_NAME" > /dev/null 2>&1 || true
+  if [ "$USE_EXTERNAL_PG" = "0" ]; then
+    docker rm -f "$PG_NAME" > /dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 1. lint
 step "Filename portability (Windows-invalid characters, G28/EP-00)"
-python3 scripts/check_filenames.py || fail "filenames"
+"$PYTHON" scripts/check_filenames.py || fail "filenames"
 ok "filenames portable"
 
 step "Documentation links (relative README/docs links)"
-python3 scripts/check_doc_links.py || fail "doc links"
+"$PYTHON" scripts/check_doc_links.py || fail "doc links"
 ok "documentation links resolve"
 
 step "Secret scan (gitleaks)"
@@ -78,36 +107,51 @@ else
 fi
 
 step "Python lint (ruff: syntax + undefined names)"
-ruff check --select E9,F63,F7,F82,F821 services workers packages || fail "ruff"
+if command -v ruff > /dev/null 2>&1; then
+  ruff check --select E9,F63,F7,F82,F821 services workers packages scripts \
+    || fail "ruff"
+elif "$PYTHON" -m ruff --version > /dev/null 2>&1; then
+  "$PYTHON" -m ruff check --select E9,F63,F7,F82,F821 services workers packages scripts \
+    || fail "ruff"
+else
+  fail "ruff is required (install the API requirements or ruff)"
+fi
 ok "ruff clean"
 
 step "Python compile"
-python -m compileall -q services workers packages || fail "compileall"
+"$PYTHON" -m compileall -q services workers packages scripts || fail "compileall"
 ok "all modules compile"
 
 # ------------------------------------------------------------ 2. tests
 step "Unit + integration tests (real Postgres, real migrations)"
-if ! docker info > /dev/null 2>&1; then
-  fail "docker is required for the integration layer (Postgres)"
+if [ "$USE_EXTERNAL_PG" = "1" ]; then
+  echo "  external Postgres; recreating disposable db mtk_verify"
+  PG_URL="$("$PYTHON" scripts/pg_test_db.py \
+    --base-url "$EXTERNAL_PG_URL" --name mtk_verify)" \
+    || fail "could not create mtk_verify on the external Postgres"
+else
+  if ! docker info > /dev/null 2>&1; then
+    fail "docker is required for the integration layer (Postgres); set MTK_VERIFY_DATABASE_URL to use an existing server"
+  fi
+  cleanup
+  # a leftover container still holding the port would make the readiness check
+  # fail for reasons that have nothing to do with this run
+  for _ in $(seq 1 15); do
+    docker run -d --rm --name "$PG_NAME" \
+      -e POSTGRES_USER=mtk -e POSTGRES_PASSWORD=mtk -e POSTGRES_DB=mtk_verify \
+      -p "${PG_PORT}:5432" postgres:16-alpine > /dev/null 2>&1 && break
+    sleep 1
+  done
+  docker ps --filter "name=${PG_NAME}" --format "{{.Names}}" | grep -q "$PG_NAME" \
+    || fail "could not start the throwaway Postgres (port ${PG_PORT} busy?)"
+  for _ in $(seq 1 60); do
+    docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 && break || sleep 1
+  done
+  docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
+    || { docker logs "$PG_NAME" | tail -5; fail "postgres did not start"; }
 fi
-cleanup
-# a leftover container still holding the port would make the readiness check
-# fail for reasons that have nothing to do with this run
-for _ in $(seq 1 15); do
-  docker run -d --rm --name "$PG_NAME" \
-    -e POSTGRES_USER=mtk -e POSTGRES_PASSWORD=mtk -e POSTGRES_DB=mtk_verify \
-    -p "${PG_PORT}:5432" postgres:16-alpine > /dev/null 2>&1 && break
-  sleep 1
-done
-docker ps --filter "name=${PG_NAME}" --format "{{.Names}}" | grep -q "$PG_NAME" \
-  || fail "could not start the throwaway Postgres (port ${PG_PORT} busy?)"
-for _ in $(seq 1 60); do
-  docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 && break || sleep 1
-done
-docker exec "$PG_NAME" pg_isready -U mtk > /dev/null 2>&1 \
-  || { docker logs "$PG_NAME" | tail -5; fail "postgres did not start"; }
 
-MTK_TEST_DATABASE_URL="$PG_URL" python -m pytest -q || fail "pytest"
+MTK_TEST_DATABASE_URL="$PG_URL" "$PYTHON" -m pytest -q || fail "pytest"
 ok "test suites green"
 
 # ------------------------------------------------- 3. pinned deps (py3.12)
@@ -143,7 +187,7 @@ docker compose -f infra/docker/docker-compose.yml \
 ok "compose files valid"
 
 step "CI workflow YAML"
-python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); print('  jobs:', ', '.join(d['jobs']))" \
+"$PYTHON" -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); print('  jobs:', ', '.join(d['jobs']))" \
   || fail "ci yaml"
 ok "ci workflow parses"
 
@@ -151,7 +195,7 @@ step "Extension (Manifest V3) syntax + core logic tests"
 node --check apps/extension/core.js || fail "extension core.js"
 node --check apps/extension/background.js || fail "extension background.js"
 node --check apps/extension/options.js || fail "extension options.js"
-python3 -c "import json; json.load(open('apps/extension/manifest.json'))" || fail "extension manifest"
+"$PYTHON" -c "import json; json.load(open('apps/extension/manifest.json'))" || fail "extension manifest"
 ( cd apps/extension && node --test tests/*.test.js ) || fail "extension unit tests"
 ok "extension clean"
 
@@ -166,22 +210,36 @@ if [ "$RUN_E2E" = "1" ]; then
   echo "  api on ${API_PORT}, dashboard on ${DASH_PORT}"
 
   E2E_DB="mtk_verify_e2e"
-  docker exec "$PG_NAME" createdb -U mtk "$E2E_DB" > /dev/null 2>&1 || true
-  E2E_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/${E2E_DB}"
+  if [ "$USE_EXTERNAL_PG" = "1" ]; then
+    E2E_URL="$("$PYTHON" scripts/pg_test_db.py \
+      --base-url "$PG_URL" --name "$E2E_DB")" \
+      || fail "could not create ${E2E_DB} on the external Postgres"
+  else
+    docker exec "$PG_NAME" dropdb -U mtk --if-exists "$E2E_DB" > /dev/null 2>&1 || true
+    docker exec "$PG_NAME" createdb -U mtk "$E2E_DB" > /dev/null 2>&1 \
+      || fail "could not create ${E2E_DB}"
+    E2E_URL="postgresql://mtk:mtk@127.0.0.1:${PG_PORT}/${E2E_DB}"
+  fi
 
-  PY_BIN="$VENV/bin/python"
-  [ -x "$PY_BIN" ] || PY_BIN="python"
+  PY_BIN="$PYTHON"
+  if [ -x "$VENV/bin/python" ]; then
+    PY_BIN="$VENV/bin/python"
+  elif [ -x "$VENV/Scripts/python.exe" ]; then
+    PY_BIN="$VENV/Scripts/python.exe"
+  fi
   DATABASE_URL="$E2E_URL" "$PY_BIN" services/api/db_migrate.py > /dev/null || fail "migrations"
 
   # Real auth for the smoke test: a service token for Node-side reads and a
   # personal reviewer token for the browser session. Nothing is hard-coded.
   MTK_API_TOKEN="$(openssl rand -hex 24)"
   MTK_SESSION_SECRET="$(openssl rand -hex 32)"
+  MTK_EXTENSION_TOKEN="$(openssl rand -hex 24)"
   E2E_REVIEWER_TOKEN="$(DATABASE_URL="$E2E_URL" "$PY_BIN" \
     services/api/scripts/mint_reviewer.py --name "Verify E2E" | sed -n '2p')"
   [ -n "$E2E_REVIEWER_TOKEN" ] || fail "reviewer mint produced no token"
 
   MTK_API_TOKEN="$MTK_API_TOKEN" \
+  MTK_EXTENSION_TOKEN="$MTK_EXTENSION_TOKEN" \
   MTK_CORS_ORIGINS="http://127.0.0.1:${DASH_PORT},http://localhost:${DASH_PORT}" \
     DATABASE_URL="$E2E_URL" "$PY_BIN" -m uvicorn main:app --app-dir services/api \
     --host 127.0.0.1 --port "$API_PORT" > /tmp/mtk-verify-api.log 2>&1 &
@@ -207,9 +265,13 @@ if [ "$RUN_E2E" = "1" ]; then
 
   E2E_BASE_URL="http://127.0.0.1:${DASH_PORT}" \
   E2E_REVIEWER_TOKEN="$E2E_REVIEWER_TOKEN" \
+  E2E_API_BASE_URL="http://127.0.0.1:${API_PORT}" \
+  E2E_API_TOKEN="$MTK_API_TOKEN" \
+  E2E_EXTENSION_TOKEN="$MTK_EXTENSION_TOKEN" \
+  E2E_EXTENSION_DIR="$REPO_ROOT/apps/extension" \
     corepack pnpm --dir apps/dashboard exec playwright test || fail "playwright"
   kill "$API_PID" "$DASH_PID" > /dev/null 2>&1 || true
-  ok "browser smoke green"
+  ok "browser + loaded-extension smoke green"
 fi
 
 printf '\n\033[1;32m✔ verification complete — the system is working\033[0m\n'

@@ -4825,6 +4825,23 @@ def _mk_trend(marker):
     )[0]["id"]
 
 
+def _automation_research_used_today():
+    """Promotions already counted against the daily automation budget.
+
+    The cap is database-wide and the integration suite shares one schema, so
+    tests that exercise it must budget from the CURRENT count instead of
+    assuming an empty audit_log.
+    """
+    return _run(
+        """
+        SELECT COUNT(*)::int AS n FROM audit_log
+        WHERE action = 'trend:promoted'
+          AND (actor LIKE 'automation:%' OR actor LIKE 'system:%')
+          AND created_at >= date_trunc('day', now())
+        """
+    )[0]["n"]
+
+
 def test_trend_promote_creates_offer_and_queue_row_in_one_transaction(client):
     """WP-C bridge: one click turns a radar topic into a verified-track offer
     AND a ranked queue row — transactionally, audited, human-gated upstream
@@ -5875,6 +5892,11 @@ def test_research_brief_versioning_and_human_only_claim_status(auth_client):
     assert v1.json()["version"] == 1
     claim_ids = [c["id"] for c in v1.json()["claims"]]
     assert len(claim_ids) == 2
+    # Claims are inserted with the same transaction timestamp; the API's
+    # created_at/id ordering is deterministic but not the input order. Select
+    # the claim by text instead of assuming array position.
+    claim_ids_by_text = {
+        c["claim_text"]: c["id"] for c in v1.json()["claims"]}
 
     # A second POST is a NEW VERSION — v1 is preserved, the current pointer
     # moves to v2 with its own (empty) claim set.
@@ -5894,15 +5916,16 @@ def test_research_brief_versioning_and_human_only_claim_status(auth_client):
     assert listed["current"]["version"] == 2
 
     # Automation/service actors may NEVER settle a claim status.
+    contradicted_claim = claim_ids_by_text["The protocol replaces sleep."]
     machine = auth_client.patch(
-        f"/offers/{offer_id}/research/claims/{claim_ids[1]}",
+        f"/offers/{offer_id}/research/claims/{contradicted_claim}",
         headers=SVC, json={"status": "contradicted"})
     assert machine.status_code == 403, machine.text
 
     # But a claim of the CURRENT brief can be resolved by a human: mark the
     # v1 claim contradicted → blocking_conflicts surfaces it.
     v1_claim = auth_client.patch(
-        f"/offers/{offer_id}/research/claims/{claim_ids[1]}",
+        f"/offers/{offer_id}/research/claims/{contradicted_claim}",
         headers=AUTH, json={"status": "contradicted"})
     assert v1_claim.status_code == 200, v1_claim.text
     # The contradicted claim belongs to brief v1; the CURRENT brief (v2) has
@@ -5914,7 +5937,7 @@ def test_research_brief_versioning_and_human_only_claim_status(auth_client):
     assert research["blocking_conflicts"] == []
     assert research["superseded_conflicts"] == [{
         "version": 1,
-        "claim_id": claim_ids[1],
+        "claim_id": contradicted_claim,
         "claim_text": "The protocol replaces sleep.",
         "status": "contradicted",
     }], "a superseded conflict is history, not a silent deletion"
@@ -6010,9 +6033,11 @@ def test_automation_promotion_daily_cap(auth_client):
     """G18/EP-03 'daily capacity caps': automation may auto-shortlist only
     `auto_research_max_per_day` topics per day; a human promote is never
     capped."""
-    # Tighten the guardrail to 1 for the test (audited, server-side value).
+    # Leave room for exactly one more promotion (audited, server-side value).
+    # Other tests may already have consumed part of today's budget.
+    used = _automation_research_used_today()
     policy = auth_client.get("/automation/policy", headers=SVC).json()["policy"]
-    policy["guardrails"]["auto_research_max_per_day"] = 1
+    policy["guardrails"]["auto_research_max_per_day"] = used + 1
     saved = auth_client.put("/automation/policy", headers=AUTH,
                             json={"policy": policy})
     assert saved.status_code in (200, 201), saved.text
@@ -6054,8 +6079,9 @@ def test_system_actor_counts_against_the_automation_research_cap(auth_client):
     """CODE-10: `system:` promotions are capped by the same guardrail as
     `automation:` promotions. The old count only matched `automation:%`, so a
     system actor could silently bypass the daily research budget."""
+    used = _automation_research_used_today()
     policy = auth_client.get("/automation/policy", headers=SVC).json()["policy"]
-    policy["guardrails"]["auto_research_max_per_day"] = 1
+    policy["guardrails"]["auto_research_max_per_day"] = used + 1
     saved = auth_client.put("/automation/policy", headers=AUTH,
                             json={"policy": policy})
     assert saved.status_code in (200, 201), saved.text

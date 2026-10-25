@@ -147,13 +147,16 @@ jobs:
         run: |
           API_TOKEN="e2e-$(openssl rand -hex 20)"
           SESSION_SECRET="$(openssl rand -hex 32)"
+          EXTENSION_TOKEN="ext-e2e-$(openssl rand -hex 20)"
           REVIEWER_TOKEN="$(python services/api/scripts/mint_reviewer.py --name "CI E2E" | sed -n '2p')"
           test -n "$REVIEWER_TOKEN" || { echo "reviewer mint failed"; exit 1; }
           echo "::add-mask::$API_TOKEN"
           echo "::add-mask::$SESSION_SECRET"
+          echo "::add-mask::$EXTENSION_TOKEN"
           echo "::add-mask::$REVIEWER_TOKEN"
           echo "MTK_API_TOKEN=$API_TOKEN" >> "$GITHUB_ENV"
           echo "MTK_SESSION_SECRET=$SESSION_SECRET" >> "$GITHUB_ENV"
+          echo "MTK_EXTENSION_TOKEN=$EXTENSION_TOKEN" >> "$GITHUB_ENV"
           echo "E2E_REVIEWER_TOKEN=$REVIEWER_TOKEN" >> "$GITHUB_ENV"
       - name: Start API
         run: |
@@ -174,8 +177,15 @@ jobs:
           done
       - name: Install Playwright browser
         run: pnpm --dir apps/dashboard exec playwright install --with-deps chromium
-      - name: Run E2E smoke
-        run: pnpm --dir apps/dashboard exec playwright test
+      - name: Install Xvfb (headed loaded-extension smoke)
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Run E2E smoke (dashboard + loaded extension)
+        env:
+          E2E_API_BASE_URL: http://127.0.0.1:8000
+          E2E_API_TOKEN: ${{ env.MTK_API_TOKEN }}
+          E2E_EXTENSION_TOKEN: ${{ env.MTK_EXTENSION_TOKEN }}
+          E2E_EXTENSION_DIR: ${{ github.workspace }}/apps/extension
+        run: xvfb-run -a pnpm --dir apps/dashboard exec playwright test
       - name: Upload traces on failure
         if: failure()
         uses: actions/upload-artifact@v4
