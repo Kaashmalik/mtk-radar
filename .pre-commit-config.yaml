@@ -1,0 +1,33 @@
+# Local pre-commit gates (CLAIM-01).
+#
+# Install once:  pip install pre-commit && pre-commit install
+# Run manually:  pre-commit run --all-files
+# gitleaks 8.24.2 must be on PATH (release binary or `go install`). CI installs
+# the pinned binary itself; the local hook is a convenience, never the only
+# gate.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff
+
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: gitleaks protect --verbose --redact --staged
+        language: system
+        pass_filenames: false
+
+      - id: filename-portability
+        name: filename portability (Windows)
+        entry: python scripts/check_filenames.py
+        language: system
+        pass_filenames: false
+
+      - id: docs-links
+        name: documentation links
+        entry: python scripts/check_doc_links.py
+        language: system
+        pass_filenames: false

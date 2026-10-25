@@ -1,9 +1,12 @@
 # WP01 fifth slice — collector adapters through the egress policy
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [DNS-rebinding-resistant egress](implementation-wp01-slice4-2026-10-21.md)
-**Master plan:** [§6 step 2, audit A19](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 step 2, audit A19](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 Slice 4 pinned verification fetches against DNS rebinding, but the discovery
 collectors (`fetch_rss`, `fetch_github_releases`, collector `page_watch`) still

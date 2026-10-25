@@ -1,9 +1,12 @@
 # WP01 sixth slice — robots.txt permission record
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [collector adapters through the egress policy](implementation-wp01-slice5-2026-10-21.md)
-**Master plan:** [§3 source registry, §6 steps 2–3](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§3 source registry, §6 steps 2–3](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 Slice 5 made every adapter fetch policy-bound, but nothing asked the provider
 whether the read was permitted. A three-second delay and a bounded body are

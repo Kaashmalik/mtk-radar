@@ -1,9 +1,12 @@
 # WP01 seventh slice — signed fetch provenance
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [robots.txt permission record](implementation-wp01-slice6-2026-10-21.md)
-**Master plan:** [§6 steps 2–3, audit A03/A19](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 steps 2–3, audit A03/A19](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 `fetch_identity` is a string the caller chooses. The API could prove that the
 bytes matched the hash it was given, but not who produced the record — any

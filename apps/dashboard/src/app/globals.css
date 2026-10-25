@@ -634,7 +634,20 @@ main.page tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, tran
 .inbox-controls input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .inbox-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.9rem; flex-wrap: wrap; }
 .inbox-list { display: flex; flex-direction: column; }
+.inbox-list .trend-row { grid-template-columns: minmax(0, 1fr) auto; }
 .inbox-list .trend-row + .trend-row { border-top: 1px solid var(--border); }
+.saved-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+  flex-wrap: wrap; margin: 0.6rem 0 0.4rem; padding: 0.55rem 0.7rem;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 0.82rem;
+}
+.saved-highlight {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  padding-left: 0.6rem;
+}
 
 /* Release readiness + playback sign-off (plan §17/§6.F). */
 .release-readiness { display: grid; gap: 0.7rem; }

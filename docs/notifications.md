@@ -14,7 +14,10 @@ publishing failure, expiries, dead credentials) go out as an **immediate**
 alert set. Pending human work (redaction reviews, offer/post approvals,
 verification desk, exhausted budget) goes out as a **digest**. A tick with
 both categories may deliver two messages; identical sets respect the cooldown.
-The dashboard inbox at `/attention` is always the full, current view.
+The dashboard inbox at `/attention` is the current view, but the endpoint
+returns at most **50 items per kind**. Per-kind `count` is exact, `returned`
+says how many rows came back, and `truncated` is true when the list is capped;
+the dashboard shows “showing first N” and a global note (CODE-08 fixed).
 
 > **Where this runs:** in the existing Python `monitor` worker. It does not
 > need Supabase, a serverless function, or a new service. Supabase Free is a
@@ -175,6 +178,7 @@ Current alert events:
 | `platform_account.expiring` | warning | Token expires within 3 days. |
 | `metrics.missing` | error | Published posts exist but no audience metrics were ever captured. |
 | `metrics.stale` | warning | The newest audience snapshot is older than 48 hours. |
+| `attention.<kind>` | warning/error | One alert per non-token Needs-You category (approvals, redaction, worker health, render/publish failures, budget). Delivered immediately or as a digest by category; the table above is not the full list of kinds. |
 | `monitor.test` | info | Sent only by `--test-notification`; never a production alert. |
 
 ### Webhook receiver contract

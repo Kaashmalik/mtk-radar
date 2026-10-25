@@ -1,9 +1,12 @@
 # WP01 fifteenth slice — blast radius in the legacy audit
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [read-only legacy audit](implementation-wp01-slice14-2026-10-21.md)
-**Master plan:** [§17 scheduling/publishing, legacy review](../docs/automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
+**Master plan:** [§17 scheduling/publishing, legacy review](../../automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
 
 The audit listed the verified offers that would fail today's gate, but an
 operator still had to call `/offers/{id}/impact` once per failure to learn

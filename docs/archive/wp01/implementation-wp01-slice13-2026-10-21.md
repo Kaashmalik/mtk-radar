@@ -1,9 +1,12 @@
 # WP01 thirteenth slice — a recheck deadline cannot outlive the offer
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [freshness at capture and resume](implementation-wp01-slice12-2026-10-21.md)
-**Master plan:** [§11 expiry and corrections](../docs/automation-master-plan-2026-10-21.md#11-corrections-and-impact)
+**Master plan:** [§11 expiry and corrections](../../automation-master-plan-2026-10-21.md#11-corrections-and-impact)
 
 The twelfth slice made capture and resume respect `recheck_at`. It also exposed
 an inconsistency in how that deadline is written: every transition to `verified`

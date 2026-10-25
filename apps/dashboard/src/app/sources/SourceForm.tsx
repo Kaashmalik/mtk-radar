@@ -4,28 +4,28 @@
  * registered, and registering used to require curl. Trust tier decides how
  * much the source is trusted: A_provider_owned feeds can back a VERIFIED
  * offer (§3), B_discovery_lead can only produce candidates, C_excluded is
- * ignored. */
+ * ignored.
+ *
+ * The adapter list and its config fields come from `GET /source-adapters`
+ * (the Python registry) so a new adapter cannot exist in the collector/API
+ * while this form silently omits it (CODE-09). */
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
 
-const ADAPTERS = [
-  { id: "rss", label: "RSS / Atom feed", needs: "config.feed_url" },
-  { id: "github_releases", label: "GitHub releases", needs: "config.repo" },
-  { id: "page_watch", label: "Web page (watch)", needs: "config.url" },
-  { id: "hf_papers", label: "Hugging Face daily papers", needs: "— (no config)" },
-  { id: "hn_search", label: "Hacker News search", needs: "config.query" },
-  { id: "github_stars", label: "GitHub stars (velocity)", needs: "config.repos (owner/name per line)" },
-  { id: "google_trends_rss", label: "Google Trends (trending searches)", needs: "config.geo (default US)" },
-  { id: "extension", label: "Browser extension saves", needs: "— (manual saves)" },
-  { id: "manual", label: "Manual (seed only)", needs: "—" },
-];
-// `reddit_new` is intentionally absent: the Reddit adapter is off until its
-// access/use is approved and documented (EP-02 G22). Once approved, add it
-// here AND to packages/source_adapters/registry.py — the registry, the API
-// schema and this form must stay in sync (guard-tested on the Python side).
+export type AdapterOption = {
+  kind: string;
+  label: string;
+  description: string;
+  collector_polled: boolean;
+  config_required: string[];
+  config_optional: string[];
+  approval_pending: boolean;
+  available: boolean;
+  unavailable_reason: string | null;
+};
 
 const TIERS = [
   { id: "A_provider_owned", label: "A — provider owned (can back a verified offer)" },
@@ -35,39 +35,70 @@ const TIERS = [
 
 const CADENCES = ["1 hour", "6 hours", "12 hours", "24 hours"];
 
-export default function SourceForm() {
+const CONFIG_LABELS: Record<string, string> = {
+  feed_url: "Feed URL",
+  repo: "Repository (owner/name)",
+  url: "Page URL",
+  query: "Search query",
+  repos: "Repositories (owner/name, comma or newline separated)",
+  geo: "Country code",
+  subreddit: "Subreddit",
+  min_points: "Minimum points",
+  max_age_hours: "Maximum age (hours)",
+  limit: "Maximum items per poll",
+  date: "Date (optional)",
+};
+
+function configLabel(key: string): string {
+  return CONFIG_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+export default function SourceForm({ adapters }: { adapters: AdapterOption[] }) {
   const router = useRouter();
+  const firstAvailable = adapters.find((a) => a.available);
   const [provider, setProvider] = useState("");
   const [domain, setDomain] = useState("");
   const [category, setCategory] = useState("domains");
-  const [adapter, setAdapter] = useState("rss");
-  const [feedUrl, setFeedUrl] = useState("");
-  const [repo, setRepo] = useState("");
+  const [adapter, setAdapter] = useState(firstAvailable?.kind ?? "");
+  const [config, setConfig] = useState<Record<string, string>>({});
   const [tier, setTier] = useState("B_discovery_lead");
   const [cadence, setCadence] = useState("6 hours");
-  const [query, setQuery] = useState("");
-  const [repos, setRepos] = useState("");
-  const [geo, setGeo] = useState("US");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const selected = adapters.find((a) => a.kind === adapter);
+  const configKeys = selected
+    ? [...selected.config_required, ...selected.config_optional]
+    : [];
+
+  function chooseAdapter(kind: string) {
+    setAdapter(kind);
+    setConfig({}); // never submit the previous adapter's config
+  }
+
+  function setConfigValue(key: string, value: string) {
+    setConfig((current) => ({ ...current, [key]: value }));
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (!selected || !selected.available) {
+      setError("choose an available adapter");
+      return;
+    }
     setBusy(true);
     setError(null);
     setMsg(null);
 
-    const config: Record<string, string | string[]> = {};
-    if (adapter === "rss" && feedUrl.trim()) config.feed_url = feedUrl.trim();
-    if (adapter === "github_releases" && repo.trim()) config.repo = repo.trim();
-    if (adapter === "page_watch" && feedUrl.trim()) config.url = feedUrl.trim();
-    if (adapter === "hn_search" && query.trim()) config.query = query.trim();
-    if (adapter === "github_stars" && repos.trim()) {
-      config.repos = repos.split(/[\n,]/).map((r) => r.trim())
-        .filter(Boolean);
+    const bodyConfig: Record<string, string | string[]> = {};
+    for (const key of configKeys) {
+      const value = (config[key] ?? "").trim();
+      if (!value) continue;
+      bodyConfig[key] = key === "repos"
+        ? value.split(/[\n,]/).map((part) => part.trim()).filter(Boolean)
+        : value;
     }
-    if (adapter === "google_trends_rss" && geo.trim()) config.geo = geo.trim();
 
     try {
       const res = await clientFetch("/sources", {
@@ -77,8 +108,8 @@ export default function SourceForm() {
           provider: provider.trim(),
           canonical_domain: domain.trim() || null,
           category: category.trim() || "domains",
-          adapter,
-          config,
+          adapter: selected.kind,
+          config: bodyConfig,
           polling_cadence: cadence,
           trust_tier: tier,
           enabled: true,
@@ -93,15 +124,20 @@ export default function SourceForm() {
         "Source already registered (idempotent)");
       setProvider("");
       setDomain("");
-      setFeedUrl("");
-      setRepo("");
-      setQuery("");
-      setRepos("");
-      setGeo("US");
+      setConfig({});
       router.refresh();
     } finally {
       setBusy(false);
     }
+  }
+
+  if (adapters.length === 0) {
+    return (
+      <p className="muted">
+        The adapter registry is unavailable — the API did not answer. Refusing
+        to show a hardcoded fallback list that could drift from the collector.
+      </p>
+    );
   }
 
   return (
@@ -119,54 +155,45 @@ export default function SourceForm() {
              placeholder="domains" />
 
       <label htmlFor="src-adapter" className="small">Adapter (how it is polled)</label>
-      <select id="src-adapter" value={adapter} onChange={(e) => setAdapter(e.target.value)}>
-        {ADAPTERS.map((a) => (
-          <option key={a.id} value={a.id}>{a.label}</option>
+      <select id="src-adapter" value={adapter} onChange={(e) => chooseAdapter(e.target.value)}>
+        {adapters.map((a) => (
+          <option key={a.kind} value={a.kind} disabled={!a.available}>
+            {a.label}
+            {a.available ? "" : " — approval pending"}
+          </option>
         ))}
       </select>
+      {selected ? <p className="muted small" style={{ margin: 0 }}>{selected.description}</p> : null}
 
-      {adapter === "rss" && (
-        <>
-          <label htmlFor="src-feed" className="small">Feed URL</label>
-          <input id="src-feed" value={feedUrl} onChange={(e) => setFeedUrl(e.target.value)}
-                 placeholder="https://acme.com/offers.xml" />
-        </>
-      )}
-      {adapter === "github_releases" && (
-        <>
-          <label htmlFor="src-repo" className="small">Repository (owner/name)</label>
-          <input id="src-repo" value={repo} onChange={(e) => setRepo(e.target.value)}
-                 placeholder="acme/domains" />
-        </>
-      )}
-      {adapter === "page_watch" && (
-        <>
-          <label htmlFor="src-url" className="small">Page URL</label>
-          <input id="src-url" value={feedUrl} onChange={(e) => setFeedUrl(e.target.value)}
-                 placeholder="https://acme.com/offers" />
-        </>
-      )}
-      {adapter === "hn_search" && (
-        <>
-          <label htmlFor="src-query" className="small">Search query</label>
-          <input id="src-query" value={query} onChange={(e) => setQuery(e.target.value)}
-                 placeholder='student discount' />
-        </>
-      )}
-      {adapter === "github_stars" && (
-        <>
-          <label htmlFor="src-repos" className="small">Repositories (owner/name, comma or newline separated)</label>
-          <textarea id="src-repos" value={repos} onChange={(e) => setRepos(e.target.value)}
-                    rows={3} placeholder={"acme/domains\nother/toolkit"} />
-        </>
-      )}
-      {adapter === "google_trends_rss" && (
-        <>
-          <label htmlFor="src-geo" className="small">Country code</label>
-          <input id="src-geo" value={geo} onChange={(e) => setGeo(e.target.value)}
-                 placeholder="US" />
-        </>
-      )}
+      {configKeys.map((key) => {
+        const required = selected?.config_required.includes(key) ?? false;
+        const label = `${configLabel(key)}${required ? "" : " (optional)"}`;
+        const id = `src-config-${key}`;
+        return (
+          <div key={key} style={{ display: "grid", gap: "0.3rem" }}>
+            <label htmlFor={id} className="small">{label}</label>
+            {key === "repos" ? (
+              <textarea
+                id={id}
+                value={config[key] ?? ""}
+                onChange={(e) => setConfigValue(key, e.target.value)}
+                rows={3}
+                required={required}
+                placeholder={"acme/domains\nother/toolkit"}
+              />
+            ) : (
+              <input
+                id={id}
+                value={config[key] ?? ""}
+                onChange={(e) => setConfigValue(key, e.target.value)}
+                required={required}
+                inputMode={["min_points", "max_age_hours", "limit"].includes(key) ? "numeric" : undefined}
+                placeholder={key === "geo" ? "US" : undefined}
+              />
+            )}
+          </div>
+        );
+      })}
 
       <label htmlFor="src-tier" className="small">Trust tier</label>
       <select id="src-tier" value={tier} onChange={(e) => setTier(e.target.value)}>
@@ -183,7 +210,7 @@ export default function SourceForm() {
       </select>
 
       <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
-        <button type="submit" disabled={busy || provider.trim().length < 2}>
+        <button type="submit" disabled={busy || provider.trim().length < 2 || !selected?.available}>
           {busy ? "Registering…" : "Register source"}
         </button>
         {msg && <span className="small" style={{ color: "#3fb950" }}>{msg}</span>}

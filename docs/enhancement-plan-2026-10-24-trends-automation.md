@@ -7,8 +7,8 @@ web research on 2026 trend/hashtag/LLM-cost landscape. This is a plan, **not** a
 production-readiness certificate and not a promise of views or revenue.
 
 **Related plans (this doc extends, does not replace):**
-- [enhancement-plan-2026-10-22.md](enhancement-plan-2026-10-22.md) — security/dashboard/jobs hardening (mostly implemented)
-- [system-review-2026-10-23.md](system-review-2026-10-23.md) — day-4/5 dispositions and the deferred P2/P3 table
+- [enhancement-plan-2026-10-22.md](archive/enhancement-plan-2026-10-22.md) — security/dashboard/jobs hardening (mostly implemented)
+- [system-review-2026-10-23.md](archive/system-review-2026-10-23.md) — day-4/5 dispositions and the deferred P2/P3 table
 - [automation-master-plan-2026-10-21.md](automation-master-plan-2026-10-21.md) — WP05/WP06 trend radar (still unchecked there)
 
 **Follow-up plan (supersedes sections of this doc):**
@@ -18,18 +18,23 @@ the preserved foundation but registers integration gaps G01–G28 and work
 packages EP-00–EP-07. Where this doc and that plan disagree, that plan wins;
 notably its source [S11] corrects the YouTube quota figures below (§4.1, §4.3).
 
-**Implementation status (2026-10-24): COMPLETE — all work packages shipped to
-origin/main.** WP-A `546603a` · WP-B `cd0721c` · WP-C `b95568e` · WP-D
-`031ec62` · WP-E `9ba3cde` · WP-F `3267201` · WP-G `6a610aa` · WP-H `e90a9d3`
-(docs: §7 item 9 — go-live checklist, source registry, runbook, traceability —
-updated in the same series). Suite green at WP-H: 580 API + 461
-workers/packages tests, ruff, compileall, dashboard tsc. Feature-to-code map:
+**Implementation status (reviewed 2026-10-25): WP-A–WP-H code landed.** WP-A
+`546603a` · WP-B `cd0721c` · WP-C `b95568e` · WP-D `031ec62` · WP-E `9ba3cde` ·
+WP-F `3267201` · WP-G `6a610aa` · WP-H `e90a9d3` (docs: §7 item 9 — go-live
+checklist, source registry, runbook, traceability — updated in the same series).
+At `0d3b043` the local run was **964 passed, 3 skipped, 1 failed** (the
+portable-filename guard). After the 2026-10-25 M0/M1 fixes it is **975 passed,
+3 skipped, 0 failed**. The older "580 API + 461 workers/packages" count is
+**not reproducible** and is withdrawn; Postgres integration and CI were not run
+on 2026-10-25. Feature-to-code map:
 [`master-plan-traceability.md`](master-plan-traceability.md).
 
-> **Scope caveat (added at sync, 2026-10-24):** "COMPLETE" means the WP-A–WP-H
-> *features* shipped with passing suites — it does not prove their end-to-end
+> **Scope caveat (reviewed 2026-10-25):** "landed" means the WP-A–WP-H
+> *features* exist with unit tests — it does not prove their end-to-end
 > promises (engagement observations surviving ingestion, budget fail-closed,
 > publication confirmation, Instagram privacy semantics, extension durability).
+> In particular, WP-F's budget check was **not** fail-closed at `e90a9d3`; it
+> was fixed later in `7e636cd` (EP-01 G03).
 > The [follow-up evidence-to-video plan](enhancement-plan-2026-10-24-evidence-to-video.md)
 > audits exactly these gaps (G01–G28) and proposes EP-00–EP-07 to close them.
 
@@ -181,7 +186,7 @@ Sources: [Inworld TTS benchmarks](https://inworld.ai/resources/best-voice-ai-tts
 New/changed pieces:
 
 1. **Adapters** (`packages/source_adapters/`): `hf_papers.py`, `hn_algolia.py`,
-   `github_stars.py`, `google_trends.py` (trendspyg-style, fail-open), `reddit_rss.py`,
+   `github_stars.py`, `google_trends.py` (public trending RSS; no interest-over-time call yet), `reddit_new.py`,
    plus config in the seeded registry. Each adapter records **evidence**: source URL,
    retrieval timestamp, raw payload hash — same discipline as offer snapshots
    (trend signals are *leads*, never verification evidence).
@@ -212,7 +217,7 @@ One new table + one list. This is what the operator opens every morning.
   (🔥 velocity ↑, ⏳ expires in 3 d, 🧪 evidence ready) and one primary action per
   state: Promote → Verify → Prepare capture → Record.
 - Editor mix guardrail (mirrors the 60/30/10 pillar policy in
-  [enhancement plan §7B](enhancement-plan-2026-10-22.md)): queue marks rows
+  [enhancement plan §7B](archive/enhancement-plan-2026-10-22.md)): queue marks rows
   evergreen vs timely and autopilot caps timely rows per day.
 - **Auto-expiry:** queue rows expire when their offer expires or when trend
   velocity decays below floor for 7 days → archived with reason (closes the
@@ -300,7 +305,7 @@ table** and a **trending-source bridge**:
    pinned and exempt; dry-run flag first).
 5. **Bulk un-wedge:** `POST /jobs/bulk-retry` (human-only, filter-checked) for the
    "50 jobs dead-lettered in an outage" morning.
-6. **Deferred P2 carry-over** from [system-review-2026-10-23.md](system-review-2026-10-23.md)
+6. **Deferred P2 carry-over** from [system-review-2026-10-23.md](archive/system-review-2026-10-23.md)
    folded in where adjacent: render-lease renewal for >1 h encodes; trends
    summary/bands `page_total` rename; analytics cache payload normalization.
 
@@ -315,14 +320,14 @@ Estimates assume one developer; each WP lands with tests in the same PR.
 - [ ] `packages/source_adapters/hn_algolia.py` — points/comments velocity per keyword
 - [ ] `packages/source_adapters/github_stars.py` — Δstars/day on watched repos
 - [ ] `packages/source_adapters/google_trends.py` — trending-now + interest wrapper, fail-open, Tier-B
-- [ ] `packages/source_adapters/reddit_rss.py` — lead-signal only
+- [ ] `packages/source_adapters/reddit_new.py` - lead-signal only (implemented as `reddit_new.py`)
 - [ ] Redis-backed fetch cache + per-source TTL; robots/egress policy respected
 - [ ] `seed_sources.py` + `docs/source-registry.md` updated (trust tiers: HF official = A-lead, HN/GTrends = B)
 - [ ] Tests: adapter units (fixture payloads), egress/permission tests extended
 - **Accept:** ≥20 new lead items/day flow in from ≥3 new sources with evidence hashes, deduped by story.
 
 ### WP-B — Trend engine v2: clustering, history, velocity (≈3 d)
-- [ ] Migration: `trend_topics` (cluster), `trend_observations` (time series)
+- [ ] Migration: `trend_topics` (cluster; **design only — not implemented**; current clustering uses `items.story_key` from EP-02 G09), `trend_observations` (time series)
 - [ ] Story clustering (entity normalize + title shingles)
 - [ ] Incremental re-scan (remove one-shot `processed=TRUE` semantics; keep API back-compat)
 - [ ] Velocity + corroboration scores; bands recomputed; growth-engine recommendation wiring cleaned (no more perpetual "refresh N leads")
@@ -427,8 +432,8 @@ join WP-C scope if needed.
 ## 10. Related documents
 
 - [enhancement-plan-2026-10-24-evidence-to-video.md](enhancement-plan-2026-10-24-evidence-to-video.md) — follow-up audit; gap register G01–G28 + EP-00–EP-07 (drafting order: EP-00 → EP-01 → EP-02 → EP-03)
-- [enhancement-plan-2026-10-22.md](enhancement-plan-2026-10-22.md) — baseline audit & two-month hardening (superseded sections noted in its resolution banner)
-- [system-review-2026-10-23.md](system-review-2026-10-23.md) — fixed/deferred dispositions this plan carries forward
+- [enhancement-plan-2026-10-22.md](archive/enhancement-plan-2026-10-22.md) — baseline audit & two-month hardening (superseded sections noted in its resolution banner)
+- [system-review-2026-10-23.md](archive/system-review-2026-10-23.md) — fixed/deferred dispositions this plan carries forward
 - [cost-laptop-vps-2026-10-22.md](cost-laptop-vps-2026-10-22.md) — hosting scenarios this plan's caches ride on
 - [automation-and-human-control.md](automation-and-human-control.md) — policy/guardrail system new budgets join
 - [source-registry.md](source-registry.md) — where new adapters register

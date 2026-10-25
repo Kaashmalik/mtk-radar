@@ -1,5 +1,8 @@
 # Whole-System Review — 2026-10-23 (day-4/5 hardening)
 
+> **Historical.** A dated whole-system review. Current status is tracked in the [implementation roadmap](../implementation-roadmap-2026-10-25.md); several findings here were superseded by later work.
+
+
 Four parallel read-only audits covered (1) API core & security, (2) content
 generation & analytics, (3) workers & packages, (4) dashboard/DB/docs —
 ~38 findings total. This note records what was fixed and what was deferred,

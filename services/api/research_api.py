@@ -135,7 +135,11 @@ async def _require_offer(pool, offer_id: uuid.UUID) -> dict:
 
 @router.get("/offers/{offer_id}/research")
 async def get_research(offer_id: uuid.UUID) -> dict:
-    """Every brief version (newest first) + the current version's claims."""
+    """Every brief version (newest first) + the current version's claims.
+
+    `blocking_conflicts` is the gate script generation must obey (current
+    brief only); `superseded_conflicts` is audit history, never a gate.
+    """
     pool = db.get()
     await _require_offer(pool, offer_id)
     rows = await pool.fetch(
@@ -149,6 +153,22 @@ async def get_research(offer_id: uuid.UUID) -> dict:
         offer_id,
     )
     current = await latest_brief_with_claims(pool, offer_id)
+    # CODE-10: claims on a superseded brief are historical. They must not
+    # block the current script, but they must not disappear either — surface
+    # them so a reviewer can see what changed between versions.
+    superseded = await pool.fetch(
+        """
+        SELECT b.version, c.id, c.claim_text, c.status
+        FROM research_claims c
+        JOIN research_briefs b ON b.id = c.brief_id
+        WHERE c.offer_id = $1 AND c.status = 'contradicted'
+          AND b.version < (
+            SELECT MAX(version) FROM research_briefs WHERE offer_id = $1
+          )
+        ORDER BY b.version DESC, c.created_at
+        """,
+        offer_id,
+    )
     return {
         "briefs": [_decode_brief(r) for r in rows],
         "current": current,
@@ -156,6 +176,15 @@ async def get_research(offer_id: uuid.UUID) -> dict:
         "blocking_conflicts": [
             c["claim_text"] for c in (current or {}).get("claims", [])
             if c["status"] == "contradicted"],
+        "superseded_conflicts": [
+            {
+                "version": r["version"],
+                "claim_id": str(r["id"]),
+                "claim_text": r["claim_text"],
+                "status": r["status"],
+            }
+            for r in superseded
+        ],
     }
 
 

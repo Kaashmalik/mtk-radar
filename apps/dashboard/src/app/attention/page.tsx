@@ -30,6 +30,8 @@ type Item = {
 
 type KindSummary = {
   count: number;
+  returned: number;
+  truncated: boolean;
   severity: "error" | "warning" | "info";
   href: string;
   label: string;
@@ -49,6 +51,8 @@ type Worker = {
 type Attention = {
   generated_at: string;
   total: number;
+  returned_total: number;
+  truncated: boolean;
   severity: "ok" | "error" | "warning";
   counts: Record<string, number>;
   by_kind: Record<string, KindSummary>;
@@ -127,6 +131,12 @@ export default async function AttentionPage() {
           <div><strong>{data.budget.used_today}/{data.budget.limit_per_day}</strong><span>auto posts today</span></div>
           <div><strong>{data.policy.paused ? "Paused" : data.policy.mode}</strong><span>automation</span></div>
         </div>
+        {data.truncated ? (
+          <p className="muted small" style={{ margin: "0.6rem 0 0" }}>
+            Totals are exact. Some lists are capped; open the linked page to see
+            the rest.
+          </p>
+        ) : null}
       </div>
 
       {offline.length > 0 && (
@@ -169,7 +179,10 @@ export default async function AttentionPage() {
               <div className="attention-group-head">
                 <div>
                   <h2>{summary.label}</h2>
-                  <p className="muted small">{summary.count} item{summary.count === 1 ? "" : "s"}</p>
+                  <p className="muted small">
+                    {summary.count} item{summary.count === 1 ? "" : "s"}
+                    {summary.truncated ? ` · showing first ${summary.returned}` : ""}
+                  </p>
                 </div>
                 <span className={severityClass(summary.severity)}>{summary.severity}</span>
               </div>

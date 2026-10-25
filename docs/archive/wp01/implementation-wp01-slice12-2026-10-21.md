@@ -1,9 +1,12 @@
 # WP01 twelfth slice — freshness at the capture and resume boundaries
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [bounded ToS validity and revocation](implementation-wp01-slice11-2026-10-21.md)
-**Master plan:** [§11 expiry/corrections, §17 publishing gates](../docs/automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
+**Master plan:** [§11 expiry/corrections, §17 publishing gates](../../automation-master-plan-2026-10-21.md#17-scheduling-and-publishing)
 
 Freshness was enforced at two boundaries: the transition to `scheduled`
 (`_revalidate_offer`) and the publishing worker immediately before upload. Two

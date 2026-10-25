@@ -1,0 +1,35 @@
+# gitleaks configuration (CLAIM-01).
+#
+# Default rules plus an allowlist for values that are obviously placeholders in
+# documentation and tests. Keep this list narrow: a real credential in a test
+# fixture is still a leak. Only exact placeholder patterns belong here.
+
+title = "MTK Radar"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders and test-only fixtures"
+regexes = [
+  '''(?i)your[-_ ]?(api[-_ ]?key|token|secret|password)''',
+  '''(?i)(changeme|replace-me|example[-_ ]?token|dummy[-_ ]?token)''',
+  '''(?i)sk-(test|fake|dummy)-[A-Za-z0-9]{0,16}''',
+  '''(?i)Bearer\s+<[^>]+>''',
+  # Environment-variable name lists, not values (e.g. backup script usage).
+  '''(?i)MTK_S3_SECRET_KEY\s*,''',
+]
+paths = [
+  '''pnpm-lock\.yaml''',
+  '''package-lock\.json''',
+  # These files intentionally contain fake credentials to test redaction and
+  # auth handling. Scanning its own fixture corpus is a false positive; a real
+  # credential in any OTHER test file is still reported.
+  '''apps/extension/tests/core\.test\.js''',
+  '''packages/object_storage/tests/test_sigv4\.py''',
+  '''services/api/tests/test_fetch_attestation\.py''',
+  '''services/api/tests/test_redact\.py''',
+  # Docstring only: lists the environment variable NAMES the backup script
+  # reads. No credential value lives in this file.
+  '''scripts/upload_backup\.py''',
+]

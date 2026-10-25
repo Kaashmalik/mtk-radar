@@ -7,7 +7,7 @@
 
 import "./styles.css";
 import SourceActions from "./SourceActions";
-import SourceForm from "./SourceForm";
+import SourceForm, { type AdapterOption } from "./SourceForm";
 import { apiFetch } from "@/lib/api";
 
 type Source = {
@@ -37,13 +37,20 @@ const TIER_COLORS: Record<string, string> = {
 
 export default async function SourcesPage() {
   let sources: Source[] = [];
+  let adapters: AdapterOption[] = [];
   let apiDown = false;
   try {
-    const res = await apiFetch("/sources", { cache: "no-store" });
-    if (res.ok) {
-      sources = await res.json();
+    const [sourcesRes, adaptersRes] = await Promise.all([
+      apiFetch("/sources", { cache: "no-store" }),
+      apiFetch("/source-adapters", { cache: "no-store" }),
+    ]);
+    if (sourcesRes.ok) {
+      sources = await sourcesRes.json();
     } else {
       apiDown = true;
+    }
+    if (adaptersRes.ok) {
+      adapters = await adaptersRes.json();
     }
   } catch {
     apiDown = true;
@@ -133,7 +140,7 @@ export default async function SourcesPage() {
 
           <section className="card">
             <h2>Register a source</h2>
-            <SourceForm />
+            <SourceForm adapters={adapters} />
           </section>
         </>
       )}

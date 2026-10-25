@@ -9,6 +9,21 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz \
+            | tar -xz gitleaks
+      - name: Scan full history (redacted output)
+        run: ./gitleaks detect --source . --config .gitleaks.toml --redact -v
+
   python:
     name: Python (lint, units, integration)
     runs-on: ubuntu-latest
@@ -48,6 +63,8 @@ jobs:
         run: ruff check --select E9,F63,F7,F82 services workers packages
       - name: Filename portability (Windows-invalid characters — G28/EP-00)
         run: python3 scripts/check_filenames.py
+      - name: Documentation links (relative README/docs links)
+        run: python3 scripts/check_doc_links.py
       - name: Syntax-check all Python
         run: python -m compileall services workers packages
       - name: Unit tests (discovery is defined once in pytest.ini)
@@ -89,7 +106,7 @@ jobs:
   e2e:
     name: "E2E — full stack (Postgres + API + dashboard + browser)"
     runs-on: ubuntu-latest
-    needs: [python, node]
+    needs: [secret-scan, python, node]
 
     services:
       postgres:

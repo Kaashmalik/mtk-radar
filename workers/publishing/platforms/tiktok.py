@@ -228,22 +228,34 @@ class TikTokAdapter(PublishAdapter):
             payload = self.publish_status(publish_id)
             data = payload.get("data") or {}
             status = str(data.get("status") or "").upper()
-            post_ids = (data.get("publicaly_available_post_id")
-                        or data.get("publicly_available_post_id") or [])
+            raw_ids = (data.get("publicaly_available_post_id")
+                       or data.get("publicly_available_post_id") or [])
+            # The API documents a list; tolerate a scalar without turning its
+            # first character into a fake id.
+            post_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+            post_ids = [str(pid) for pid in post_ids if pid]
             remote_url = ("https://www.tiktok.com/@me/video/"
-                          + str(post_ids[0])) if post_ids else None
+                          + post_ids[0]) if post_ids else None
             last = {
                 "processing_state": status or "unknown",
                 "remote_url": remote_url,
                 "fail_reason": data.get("fail_reason"),
             }
-            if status in ("PUBLISH_COMPLETE", "PUBLISHED") or post_ids:
-                return {**last, "confirmed": True}
             if status in ("PUBLISH_FAILED", "FAILED", "REJECTED") \
                     or last["fail_reason"]:
                 return {**last, "confirmed": False,
                         "error": f"tiktok publish failed: {status} "
                                  f"({last['fail_reason'] or 'no detail'})"}
+            # A completion status without a public post id is not proof of a
+            # public post: TikTok's unaudited visibility rules can keep it
+            # private/restricted. Fail closed and hold for a human.
+            if post_ids:
+                return {**last, "confirmed": True}
+            if status in ("PUBLISH_COMPLETE", "PUBLISHED"):
+                return {**last, "confirmed": False,
+                        "error": "tiktok reported a completion status but returned "
+                                 "no public post id — visibility is unconfirmed; "
+                                 "verify in the TikTok app before retrying"}
             if time.monotonic() >= deadline:
                 return {**last, "confirmed": False,
                         "error": "tiktok publish status never reached a terminal or "

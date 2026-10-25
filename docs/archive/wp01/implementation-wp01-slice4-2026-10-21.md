@@ -1,9 +1,12 @@
 # WP01 fourth slice — DNS-rebinding-resistant egress
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [safe egress + raw-byte provenance](implementation-wp01-slice3-2026-10-21.md)
-**Master plan:** [§6 step 2, audit A19](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 step 2, audit A19](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 Slice 3 validated the resolved addresses but let the HTTP stack resolve the name
 again when it connected. A hostile or compromised resolver could answer with a

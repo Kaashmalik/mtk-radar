@@ -22,7 +22,7 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 
 1. Confirm the fix cannot be achieved via configuration, wrapper, or an upstream issue/PR.
 2. Fork into our GitHub org, branch from the pinned release tag (not `main`).
-3. Keep our patch as one or a few small commits; document the delta in `THIRD_PARTY_NOTICES`.
+3. Keep our patch as one or a few small commits; document the delta in `docs/third-party-notices.md`.
 4. Add an automated check that rebases our patch onto each new upstream tag.
 5. Upstream the patch; delete the fork when the next upstream release includes it.
 
@@ -34,7 +34,7 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 - [ ] Triage open issues for problems related to our intended use.
 - [ ] Confirm deployment requirements (runtime, services, resources).
 - [ ] Confirm the API surface we need actually exists and is documented.
-- [ ] Record the decision (repo, version, license, integration tier) in `THIRD_PARTY_NOTICES`.
+- [ ] Record the decision (repo, version, license, integration tier) in `docs/third-party-notices.md`.
 - [ ] Define the upgrade path: how updates are tested and merged.
 
 ---
@@ -61,7 +61,14 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 
 - [x] `docs/third-party-notices.md` exists with the real pins, licenses and obligations.
 - [x] compose entries for changedetection.io / Postiz / n8n — **decided: not added** (see the table in §2 of the notices file). The in-house `page_watch` collector adapter covers page monitoring, our own workers cover orchestration, and the platform adapters cover publishing — so no extra container, licence surface or second source of truth is introduced.
-- [x] every upstream is pinned to an exact version (`fastapi==0.115.5`, `playwright==1.49.1`, `postgres:16-alpine`, `minio:RELEASE.2024-06-13T22-53-53Z`, …). Docker images are pinned by tag rather than digest — a digest pin per deployment is the next hardening step.
+- [x] every upstream is pinned or its range is recorded: `fastapi==0.146.0`,
+  `uvicorn==0.54.0`, `asyncpg==0.32.0`, `pydantic==2.14.1`,
+  `pydantic-settings==2.16.1`, `feedparser==6.0.14`, `httpx==0.28.1`,
+  `playwright==1.49.1`, `redis==5.2.1`, `pyyaml==6.0.3`,
+  `postgres:16-alpine`, `redis:7-alpine`,
+  `minio:RELEASE.2024-06-13T22-53-53Z`. TypeScript (`^5.7.2`) and zod
+  (`^3.24.1`) are recorded ranges; Docker images are pinned by tag rather than
+  digest — a digest pin per deployment is the next hardening step.
 - [x] monthly freshness check: `.github/workflows/dependency-watch.yml` (read-only report, never edits a pin).
 - [x] `docs/upgrade-checklist.md` (backup → staging → verify connectors → tag → promote → record).
 - [x] n8n vs Activepieces — **neither**: the worker loops cover the orchestration without a licence-restricted platform.
@@ -79,4 +86,6 @@ Part of the MTK RADAR AI build plan. Companion document to the [master plan](../
 
 ---
 
-*Last reviewed: October 2026 (v0.21) — every to-do above is closed with a recorded decision. Re-verify all licenses before each upgrade; see `third-party-notices.md` and `upgrade-checklist.md`.*
+*Last reviewed: 25 October 2026 (v0.30) — pins checked against the requirements
+files and compose. Re-verify all licenses before each upgrade; see
+`third-party-notices.md` and `upgrade-checklist.md`.*

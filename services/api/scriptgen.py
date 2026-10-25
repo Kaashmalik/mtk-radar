@@ -514,7 +514,7 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
         else:
             lines.append(f"- ⏰ {NO_EXPIRY_STATED.capitalize()} — this is not proof the offer "
                          "never expires. Confirm the deadline on the official page.")
-    if renewal.get("regularPrice"):
+    if renewal.get("regularPrice") and is_offer_track:
         lines.append(
             f"- ⚠️ After the free period this renews at **{renewal.get('regularPrice')}** "
             f"(auto-renew: {'on' if renewal.get('autoRenew') else 'off by default'}). "
@@ -570,14 +570,20 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
                  "Use the tracked website link, not a lookalike domain.")
     lines.append("")
     lines.append("## Wrap-up summary card")
-    lines.append(f"- Steps recap: {len(checklist)} checks above; "
-                 f"deadline: {expires or NO_EXPIRY_STATED}; "
-                 f"ongoing cost: {renewal.get('regularPrice') or ONGOING_COST_UNKNOWN}"
-                 + (" (" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
-                 + ("auto-renew on" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
-                 + (")" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
-                 + ("" if renewal.get("regularPrice") else " — unknown renewal is not free")
-                 + ".")
+    if is_offer_track:
+        lines.append(f"- Steps recap: {len(checklist)} checks above; "
+                     f"deadline: {expires or NO_EXPIRY_STATED}; "
+                     f"ongoing cost: {renewal.get('regularPrice') or ONGOING_COST_UNKNOWN}"
+                     + (" (" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                     + ("auto-renew on" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                     + (")" if renewal.get("regularPrice") and renewal.get("autoRenew") else "")
+                     + ("" if renewal.get("regularPrice") else " — unknown renewal is not free")
+                     + ".")
+    else:
+        # A research track has no price/coupon contract; rendering a stray
+        # renewal price here would invent commercial terms around a paper.
+        lines.append(f"- Steps recap: {len(checklist)} checks above; "
+                     f"deadline: {expires or NO_EXPIRY_STATED}.")
     lines.append("- Sources (also in video description):")
     for ev in evidence:
         lines.append(f"  - {ev.get('url')} — captured {_fmt_date(ev.get('captured_at'))}")
@@ -669,7 +675,7 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
         else:
             lines.append("- ⏰ آخری تاریخ درج نہیں — یہ اس بات کا ثبوت نہیں کہ آفر کبھی "
                          "ختم نہیں ہوتی۔ آفیشل صفحے پر آخری تاریخ ضرور تصدیق کریں۔")
-    if renewal.get("regularPrice"):
+    if renewal.get("regularPrice") and is_offer_track:
         lines.append(
             f"- ⚠️ مفت مدت کے بعد قیمت **{renewal.get('regularPrice')}** ہوگی "
             f"(خودکار تجدید: {'آن' if renewal.get('autoRenew') else 'آف (ڈیفالٹ)'})۔ "
@@ -723,13 +729,18 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
                  "ٹریک شدہ ویب سائٹ لنک استعمال کریں، ملتا جلتا ڈومین نہیں۔")
     lines.append("")
     lines.append("## اختتامی خلاصہ")
-    if renewal.get("autoRenew") is None:
-        auto_renew_ur = "درج نہیں"
+    if is_offer_track:
+        if renewal.get("autoRenew") is None:
+            auto_renew_ur = "درج نہیں"
+        else:
+            auto_renew_ur = "آن" if renewal.get("autoRenew") else "آف"
+        lines.append(f"- مراحل: اوپر {len(checklist)} چیک؛ آخری تاریخ {expires or '— شرائط دیکھیں'}؛ "
+                     f"جاری قیمت: {renewal.get('regularPrice') or 'درج نہیں'}؛ "
+                     f"خودکار تجدید: {auto_renew_ur}۔")
     else:
-        auto_renew_ur = "آن" if renewal.get("autoRenew") else "آف"
-    lines.append(f"- مراحل: اوپر {len(checklist)} چیک؛ آخری تاریخ {expires or '— شرائط دیکھیں'}؛ "
-                 f"جاری قیمت: {renewal.get('regularPrice') or 'درج نہیں'}؛ "
-                 f"خودکار تجدید: {auto_renew_ur}۔")
+        # Research track: no commercial price/coupon summary.
+        lines.append(f"- مراحل: اوپر {len(checklist)} چیک؛ "
+                     f"آخری تاریخ {expires or '— شرائط دیکھیں'}۔")
     lines.append("- ذرائع (ویڈیو ڈسکرپشن میں بھی):")
     for ev in evidence:
         lines.append(f"  - {ev.get('url')} — ریکارڈ شدہ {_fmt_date(ev.get('captured_at'))}")

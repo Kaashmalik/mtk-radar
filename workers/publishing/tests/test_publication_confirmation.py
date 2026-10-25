@@ -123,6 +123,29 @@ def test_tiktok_confirms_complete_status_with_available_post_id():
     assert out["remote_url"].endswith("/7301")
 
 
+def test_tiktok_complete_without_public_post_id_is_held_unconfirmed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"status": "PUBLISH_COMPLETE"}})
+
+    adapter = _tiktok(handler)
+    out = adapter.confirm_publication("pub-1", expected_privacy="public", timeout_s=0)
+    assert out["confirmed"] is False
+    assert "public post id" in out["error"]
+    assert out["remote_url"] is None
+
+
+def test_tiktok_accepts_a_scalar_post_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {
+            "status": "PUBLISH_COMPLETE", "publicly_available_post_id": "7302",
+        }})
+
+    adapter = _tiktok(handler)
+    out = adapter.confirm_publication("pub-1", expected_privacy="public", timeout_s=1)
+    assert out["confirmed"] is True
+    assert out["remote_url"].endswith("/7302")
+
+
 def test_tiktok_failure_is_terminal_unconfirmed():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {

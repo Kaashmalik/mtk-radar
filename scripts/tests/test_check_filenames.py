@@ -51,10 +51,26 @@ def test_repo_itself_is_clean():
 
 
 def test_detects_bad_name_in_a_temp_tree(tmp_path: Path):
-    bad = tmp_path / "TikTok Guide: 2026.md"
-    bad.write_text("x")
+    """Exercise the real `git ls-files` path without touching the filesystem.
+
+    A file with `:` cannot be created on Windows, so the test writes the blob
+    and adds the path to the index directly. `core.protectNTFS=false` is
+    required for Git to accept the index entry on Windows; this only affects
+    the throwaway repo, never the checkout.
+    """
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", bad.name], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "core.protectNTFS", "false"], cwd=tmp_path, check=True,
+    )
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=tmp_path, input="x", text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo",
+         f"100644,{blob},TikTok Guide: 2026.md"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    )
 
     result = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "check_filenames.py"), "."],

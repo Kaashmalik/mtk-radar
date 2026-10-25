@@ -156,8 +156,9 @@ Re-minting a name replaces its token (old one stops working). Sign in at
 `/login` with the token; the API is checked via GET `/whoami` before a signed
 HttpOnly session cookie is issued. The nav shows the authenticated name.
 Browser JavaScript never reads the token: interactive calls go through the
-same-origin `/api/backend` proxy. Revoking a reviewer invalidates the token on
-the next API call (the session cookie itself expires after 12h).
+same-origin `/api/backend` proxy. Revoking a reviewer invalidates the token
+within the 60 s positive-token cache window (the session cookie itself expires
+after 12h).
 
 Dashboard sessions require `MTK_SESSION_SECRET` (≥32 random chars). Missing or
 too-short values fail closed — only the login page renders, with a configuration
@@ -165,8 +166,9 @@ error. Rotating the secret signs every operator out.
 
 ### YouTube (OAuth2 refresh token)
 
-1. Symptom: calendar shows account `token_expired`; monitor logs
-   `ALERT token expiry … refresh rejected (400/401) — operator must re-consent`.
+1. Symptom: calendar shows account `token_expired`; the monitor logs
+   `ALERT platform account … is token_expired - publishing paused; operator must re-consent`,
+   and a publish attempt logs `ALERT credentials rejected on …`.
 2. Re-run the OAuth consent flow for the MTK RADAR AI client
    (Google Cloud Console → OAuth client) to mint a new refresh token.
 3. Update `YOUTUBE_REFRESH_TOKEN` (and rotate `YOUTUBE_CLIENT_SECRET` if it
@@ -239,7 +241,7 @@ python services/api/scripts/seed_sources.py   # idempotent canonical-URL sources
 
 | Alert | Meaning | Runbook step |
 | --- | --- | --- |
-| `ALERT token expiry …` (monitor) | dead platform session | §3 recovery |
+| `ALERT platform account … is token_expired` (monitor) / `ALERT credentials rejected on …` (publishing) | dead platform session | §3 recovery |
 | `attention.worker` | a worker heartbeat is stale/missing | run `scripts/mtk-start.sh`; check worker log |
 | `attention.render_failed` / `publish_failed` | dead-letter or held post | Queue / Calendar; never retry blindly |
 | Account `token_expired` on calendar | same, operator view | §3 recovery |
@@ -297,9 +299,12 @@ Failures appear in **Queue → Render QC & dead letter**; fix the source and
 re-render. Legacy renders are `not_checked` and must be re-rendered. Thresholds
 and intentional-still ranges are in [`render-qc.md`](render-qc.md).
 
-Save-link extension (v0.17): configure API URL + worker token via its options
-page (right-click icon → Options). The page gesture sends `POST /items` with
-the Bearer token; 401s surface on the toolbar badge with a hint.
+Save-link extension (EP-04): configure the API URL and the dedicated
+`MTK_EXTENSION_TOKEN` on its options page (right-click the icon → Options).
+Right-clicking a link saves the **link**, not the current tab; saves queue
+offline in an outbox and are delivered once. The extension requests only the
+API host permission, and **Revoke** clears local config/credentials. Not yet:
+the loaded-extension Chromium E2E proof and the store packaging/CSP review.
 
 Operator console (v0.19/v0.20): every configuration surface lives in the
 dashboard — **Sources** (register what the collectors poll, see poll
@@ -526,13 +531,16 @@ rows to refs.
   `PUT /settings/publish_windows` (defaults to a single 18:00 PKT slot);
   the ScheduleForm renders quick-picks from the setting. Still hardcoded:
   the display timezone is Asia/Karachi everywhere (fine for a PKT operator).
-- Extension (v0.17): configured via its options page (API URL + worker token);
-  the save action surfaces 401/connection problems on the badge. Not yet:
-  packaging/store hardening (icons, CSP review, MV3 store listing).
-- Backup automation (v0.18): systemd timers in `infra/systemd/` — daily
-  backup, monthly restore drill into a throwaway DB; the drill unit going red
-  means backups are unusable. Not yet: off-machine backup copy (e.g. rclone
-  to object storage) — the dumps stay on the deploy host.
+- Extension (EP-04): configured via its options page (API URL + dedicated
+  extension token); the save action surfaces 401/connection problems on the
+  badge. Not yet: loaded-extension Chromium E2E and packaging/store hardening
+  (icons, CSP review, MV3 store listing).
+- Backup automation (v0.18, off-host copy v0.24): systemd timers in
+  `infra/systemd/` — daily backup, monthly restore drill into a throwaway DB;
+  the drill unit going red means backups are unusable. When `MTK_S3_*` is
+  configured, `infra/backup.sh` copies every dump to the object store and a
+  failed copy fails the backup. Restoring from the off-host copy is still a
+  manual download followed by `infra/restore.sh` (no automatic downloader).
 - Postiz / cross-posting service: intentionally not integrated (the plan
   marks it optional; platform adapters cover it).
 - Analytics counts runs on one Postgres instance; no replication/HA.

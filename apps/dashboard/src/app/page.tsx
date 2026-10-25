@@ -8,6 +8,7 @@
 
 import "./styles.css";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 import AutomationCard from "./AutomationCard";
 import { InboxActions } from "./InboxActions";
@@ -69,7 +70,17 @@ function big(value: number | string | null | undefined): string {
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  // Old extension builds opened `/?saved_item=<id>`; keep those links working.
+  const sp = (await searchParams) ?? {};
+  const rawSaved = sp.saved_item;
+  const saved = Array.isArray(rawSaved) ? rawSaved[0] : rawSaved;
+  if (saved) redirect(`/inbox?saved_item=${encodeURIComponent(saved)}`);
+
   const [health, items, analytics, trends, attention] = await Promise.all([
     getJson<{ status?: string }>("/health", {}),
     getJson<ItemRow[] | null>("/items?processed=false&limit=12", null),

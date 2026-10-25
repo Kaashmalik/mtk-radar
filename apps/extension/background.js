@@ -33,6 +33,7 @@ import {
   createOutbox,
   denylistReason,
   findSecrets,
+  pageContextUrl,
   restrictedReason,
   resolveTarget,
   stripTrackingParams,
@@ -207,7 +208,7 @@ async function saveFromContext(info, tab) {
     observedAt: new Date().toISOString(),
     createdAt: Date.now(),
     contextType: target.contextType,
-    pageUrl: target.pageUrl,
+    pageUrl: pageContextUrl(target.pageUrl, cfg.denylistExtra || []),
   });
   if (result.error) {
     setFailure(result.error);

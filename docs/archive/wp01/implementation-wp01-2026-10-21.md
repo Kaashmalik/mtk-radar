@@ -1,5 +1,8 @@
 # WP01 implementation checkpoint — snapshot-bound verification
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 
 **Status:** First WP01 integrity slice implemented and tested locally. **WP01 remains IN_PROGRESS; public autopilot is not production-approved.**
@@ -70,4 +73,4 @@ Final combined result: **325 tests passed, zero skipped, 21 existing deprecation
 5. **Authorization and publishing:** service/reviewer role separation, fail-closed upload leases, immutable approved media/metadata/account pinning, remote reconciliation and platform-policy fixes remain WP02–WP04 work.
 6. **Editorial safety (wording addressed in [slice 2](implementation-wp01-slice2-2026-10-21.md)):** unknown eligibility, deadline and renewal now render as explicit unknowns in `scriptgen.py` and `schedules_state.py`, and the approved fact pack reaches those fields. Premium media QC, richer format-specific metadata and the remaining approved-package propagation are still unchecked.
 
-**Next smallest task:** the two follow-up items from this checkpoint are now done in [slice 2](implementation-wp01-slice2-2026-10-21.md). The next unchecked WP01 item is original HTTP/HTML byte and fetch-provenance preservation with trusted acquisition identities. Keep the safety-first work-package order in the [master plan](automation-master-plan-2026-10-21.md).
+**Next smallest task:** the two follow-up items from this checkpoint are now done in [slice 2](implementation-wp01-slice2-2026-10-21.md). The next unchecked WP01 item is original HTTP/HTML byte and fetch-provenance preservation with trusted acquisition identities. Keep the safety-first work-package order in the [master plan](../../automation-master-plan-2026-10-21.md).

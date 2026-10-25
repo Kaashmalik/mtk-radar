@@ -6,9 +6,9 @@
 
 **Scope:** Discovery → trend radar → official verification → script → capture → premium edit → optional light manual review → metadata → publication → monitoring.
 
-**Implementation update, 22 October 2026:** sixteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and coverage for claim-free pages in the acquisition window. WP01 remains in progress. See [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md), [slice 15](implementation-wp01-slice15-2026-10-21.md) and [slice 16](implementation-wp01-slice16-2026-10-22.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
+**Implementation update, 22 October 2026:** sixteen WP01 slices are now implemented — snapshot-bound verification, the offer-type fact-pack contract, safe egress with raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service review attestation, bounded review validity with revocation, freshness checks at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and coverage for claim-free pages in the acquisition window. WP01 remains in progress. See [slice 1](archive/wp01/implementation-wp01-2026-10-21.md), [slice 2](archive/wp01/implementation-wp01-slice2-2026-10-21.md), [slice 3](archive/wp01/implementation-wp01-slice3-2026-10-21.md), [slice 4](archive/wp01/implementation-wp01-slice4-2026-10-21.md), [slice 5](archive/wp01/implementation-wp01-slice5-2026-10-21.md), [slice 6](archive/wp01/implementation-wp01-slice6-2026-10-21.md), [slice 7](archive/wp01/implementation-wp01-slice7-2026-10-21.md), [slice 8](archive/wp01/implementation-wp01-slice8-2026-10-21.md), [slice 9](archive/wp01/implementation-wp01-slice9-2026-10-21.md), [slice 10](archive/wp01/implementation-wp01-slice10-2026-10-21.md), [slice 11](archive/wp01/implementation-wp01-slice11-2026-10-21.md), [slice 12](archive/wp01/implementation-wp01-slice12-2026-10-21.md), [slice 13](archive/wp01/implementation-wp01-slice13-2026-10-21.md), [slice 14](archive/wp01/implementation-wp01-slice14-2026-10-21.md), [slice 15](archive/wp01/implementation-wp01-slice15-2026-10-21.md) and [slice 16](archive/wp01/implementation-wp01-slice16-2026-10-22.md) for checkpoints, rollout requirements and remaining limitations. The audit findings below describe the pre-implementation baseline; do not treat the entire roadmap as completed.
 
-**Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
+**Start here:** read §2 for confirmed gaps, §3 for current coverage, and §12 for the ordered unchecked implementation tasks. Give a coding model one subtask using [the handoff guide](archive/coding-model-handoff-2026-10-21.md). Do not enable public autopilot before the release gates pass.
 
 ### Contents
 
@@ -567,7 +567,7 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Preserve model-reported and cross-page conflicts; require successful evidence/extraction persistence and server acceptance before the worker attempts promotion.
 - [x] Serialize new extraction and promotion in short per-offer transactions; revoke prior verification, audit the change and pause scheduled posts when extraction is replaced.
 - [x] Test fresh database installation, upgrade from migrations 001–011, legacy preservation, database hash constraints, API round trips and concurrent replacement/promotion on isolated PostgreSQL 16.15.
-- [x] Pass the combined suite: **325 tests, zero skips**; Python lint/compilation and TypeScript typecheck also pass. See [checkpoint and rollout notes](implementation-wp01-2026-10-21.md).
+- [x] Pass the combined suite: **325 tests, zero skips**; Python lint/compilation and TypeScript typecheck also pass. See [checkpoint and rollout notes](archive/wp01/implementation-wp01-2026-10-21.md).
 
 **Completed — second slice, offer-type terms contract:**
 
@@ -585,7 +585,7 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Emit the typed claims (`benefit_type`, `regions`, `excluded_regions`, `auto_renew`, price `basis`) from the rule extractor; the server still verifies every one.
 - [x] Add the semantic/type-specific tests (negation, renewal versus initial price, excluded regions, ambiguous deadlines, missing critical restrictions) and prove they fail before the implementation: **13 failed / 30 passed** plus one collection error.
 - [x] Add regression tests for the wording itself: unknown eligibility is never "open", an absent expiry is never "never expires", unknown renewal is never "none"/free, and metadata never claims a "genuine end-to-end claim".
-- [x] Pass the combined suite on isolated PostgreSQL 16.15: **394 tests, zero skips**; lint, compilation and typecheck exit 0. See [second-slice checkpoint](implementation-wp01-slice2-2026-10-21.md).
+- [x] Pass the combined suite on isolated PostgreSQL 16.15: **394 tests, zero skips**; lint, compilation and typecheck exit 0. See [second-slice checkpoint](archive/wp01/implementation-wp01-slice2-2026-10-21.md).
 
 **Completed — third slice, safe egress + raw-byte provenance:**
 
@@ -594,14 +594,14 @@ For each package: add targeted failing tests → implement the smallest vertical
 - [x] Validate **every** redirect hop against the same policy and record the chain; an HTTP error is returned as unavailable, never as proof the offer ended.
 - [x] Re-hash and re-check provenance server-side on upload: hash mismatch, URL/final-URL disagreement, off-provider hops and future timestamps are 422s.
 - [x] Require raw bytes + provenance at promotion for machine-collected official evidence, while exempting reviewer-attested snapshots; legacy text-only evidence stays storable but cannot earn `verified`.
-- [x] Prove the new tests fail before implementation: **14 failing slice cases + 2 collection errors** at `fe4764e`. Full suite on isolated PostgreSQL 16.15: **476 tests, zero skips**; lint, compilation and typecheck exit 0. See [third-slice checkpoint](implementation-wp01-slice3-2026-10-21.md).
+- [x] Prove the new tests fail before implementation: **14 failing slice cases + 2 collection errors** at `fe4764e`. Full suite on isolated PostgreSQL 16.15: **476 tests, zero skips**; lint, compilation and typecheck exit 0. See [third-slice checkpoint](archive/wp01/implementation-wp01-slice3-2026-10-21.md).
 
 **Completed — fourth slice, DNS-rebinding-resistant egress:**
 
 - [x] Pin every connection to the address that was validated, while keeping the provider hostname in `Host` and in TLS `server_hostname`, so a resolver that changes its answer at connect time has no effect.
 - [x] Re-resolve, re-validate and re-pin **every** redirect hop; resolve relative `Location` against the logical provider URL, never the pinned IP.
 - [x] Disable keep-alive and ambient proxies on the verification client, because pooled connections are keyed by the pinned IP and a proxy would bypass the pin entirely.
-- [x] Prove the behaviour over a real socket (httpcore sends `Host: example.test` while connecting to loopback), not only through a mock transport; 9 new tests, **5 failing** at `a1dd206`. Full suite: **485 passed, zero skips**. See [fourth-slice checkpoint](implementation-wp01-slice4-2026-10-21.md).
+- [x] Prove the behaviour over a real socket (httpcore sends `Host: example.test` while connecting to loopback), not only through a mock transport; 9 new tests, **5 failing** at `a1dd206`. Full suite: **485 passed, zero skips**. See [fourth-slice checkpoint](archive/wp01/implementation-wp01-slice4-2026-10-21.md).
 
 **Completed — fifth slice, collector-path egress:**
 
@@ -613,65 +613,65 @@ For each package: add targeted failing tests → implement the smallest vertical
 
 - [x] Read `robots.txt` through the same egress policy before an official page, and fail closed on `401/403/429/5xx`, transport failure, egress refusal and an unparseable file (`404/410` means "no published policy").
 - [x] Record `robots_url`, `checked_at`, `allowed` and `status` with every machine-collected snapshot; the API re-checks the host, path and ordering and rejects a missing or disallowed decision.
-- [x] Persist the record in migration 015 (`raw_content` implies a permitted decision; pre-015 rows stay readable but are re-checked by the gate) and re-check it at promotion; reviewer-attested snapshots remain exempt. 28 new tests; full suite **520 passed, zero skips**. See [sixth-slice checkpoint](implementation-wp01-slice6-2026-10-21.md).
+- [x] Persist the record in migration 015 (`raw_content` implies a permitted decision; pre-015 rows stay readable but are re-checked by the gate) and re-check it at promotion; reviewer-attested snapshots remain exempt. 28 new tests; full suite **520 passed, zero skips**. See [sixth-slice checkpoint](archive/wp01/implementation-wp01-slice6-2026-10-21.md).
 
 **Completed — seventh slice, signed fetch provenance:**
 
 - [x] Sign each machine-collected provenance record with a deployment-held HMAC-SHA256 key (`services/api/fetch_attestation.py`): fixed field list, canonical URLs, UTC timestamps, sorted-key JSON, 64-hex signature; keys under 32 bytes are refused rather than used silently.
 - [x] Verify the signature server-side after the URL-chain checks; an unconfigured key is a 503, a missing or invalid signature a 422, and the worker never invents a signature when its key is absent.
 - [x] Store `fetch_signature` in migration 016 with a hex-shape CHECK and require it at promotion for machine-collected official evidence; reviewer attestations stay exempt. `MTK_REQUIRE_FETCH_SIGNATURE=0` is the documented migration opt-out, and unsigned records stay explicitly unsigned.
-- [x] State the limit in code and docs: a valid signature proves a holder of the key produced the record, **not** that the bytes were fetched; the key is symmetric, so the API can forge it too. 28 new tests; full suite **548 passed, zero skips**. See [seventh-slice checkpoint](implementation-wp01-slice7-2026-10-21.md).
+- [x] State the limit in code and docs: a valid signature proves a holder of the key produced the record, **not** that the bytes were fetched; the key is symmetric, so the API can forge it too. 28 new tests; full suite **548 passed, zero skips**. See [seventh-slice checkpoint](archive/wp01/implementation-wp01-slice7-2026-10-21.md).
 
 **Completed — eighth slice, sectioned long-document extraction:**
 
 - [x] Replace the 250,000-character refusal and the silent `text[:8000]` LLM cut with a versioned, lossless splitter (`paragraph-groups/1`): sections are contiguous slices of the input, ≤ 6,000 characters, grouped by paragraph and cut at sentence/word boundaries when oversized; the whole-document ceiling is refused, never truncated.
 - [x] Extract every section (rules always, the model per section) and keep cross-section disagreement as a conflict, retaining the first value rather than the more attractive one; union region exclusions found in later sections.
 - [x] Send `coverage` with every extraction and have the API recompute the section count from the stored snapshot text, rejecting a truncated claim, a foreign evidence id, an unknown version or a different ceiling with a 422.
-- [x] Store the record in migration 017 (legacy rows stay `NULL`) and expose it on `GET /offers/{id}`; accept snapshots up to the egress bound (2,000,000 characters). 38 new tests; full suite **586 passed, zero skips**. See [eighth-slice checkpoint](implementation-wp01-slice8-2026-10-21.md).
+- [x] Store the record in migration 017 (legacy rows stay `NULL`) and expose it on `GET /offers/{id}`; accept snapshots up to the egress bound (2,000,000 characters). 38 new tests; full suite **586 passed, zero skips**. See [eighth-slice checkpoint](archive/wp01/implementation-wp01-slice8-2026-10-21.md).
 
 **Completed — ninth slice, mandatory extraction coverage at promotion:**
 
 - [x] Require the stored `coverage` record at promotion for machine-collected official evidence (`MTK_REQUIRE_EXTRACTION_COVERAGE`, default on): a missing or empty record blocks `verified` even when the fact pack is complete.
 - [x] Require the record to list every machine snapshot the claims use, so a truncated run cannot examine one page and cite another; reviewer-attested snapshots remain exempt because a human attested them.
-- [x] Keep the opt-out explicit and documented for legacy deployments only; all successful promotion paths in the integration suite now send coverage. 5 new tests; full suite **591 passed, zero skips**. See [ninth-slice checkpoint](implementation-wp01-slice9-2026-10-21.md).
+- [x] Keep the opt-out explicit and documented for legacy deployments only; all successful promotion paths in the integration suite now send coverage. 5 new tests; full suite **591 passed, zero skips**. See [ninth-slice checkpoint](archive/wp01/implementation-wp01-slice9-2026-10-21.md).
 
 **Completed — tenth slice, per-source terms-of-service review attestation:**
 
 - [x] Record a human terms-of-service decision per source in migration 018 (`tos_reviewed_at`, `tos_reviewer`, `tos_reference`), with an all-or-nothing CHECK: a timestamp without a named reviewer and a reference is not an attestation.
 - [x] Add `POST /sources/{id}/tos-review`: the authenticated reviewer token binds identity first, the body field is the service-caller fallback, no identity is a 403, an unknown source a 404, and the audit log keeps each recording.
 - [x] Refuse new machine-collected evidence (raw bytes + provenance) for a source with no recorded review, or with no named source at all; reviewer-attested snapshots remain exempt. `MTK_REQUIRE_TOS_ATTESTATION` defaults on with a documented legacy opt-out.
-- [x] Make the verification worker skip unattested sources with a log entry instead of fetching bytes it may not keep, and send `source_id` with every evidence record. 8 new tests; full suite **599 passed, zero skips**. See [tenth-slice checkpoint](implementation-wp01-slice10-2026-10-21.md).
+- [x] Make the verification worker skip unattested sources with a log entry instead of fetching bytes it may not keep, and send `source_id` with every evidence record. 8 new tests; full suite **599 passed, zero skips**. See [tenth-slice checkpoint](archive/wp01/implementation-wp01-slice10-2026-10-21.md).
 
 **Completed — eleventh slice, bounded ToS review validity and revocation:**
 
 - [x] Bound a review's validity with one documented deployment policy (`MTK_TOS_REVIEW_TTL_DAYS`, default 180 days, clamped 1..3650) derived from the recorded timestamp, so expiry cannot drift from the attestation it belongs to.
 - [x] Refuse new machine-collected evidence when the review has expired, and expose the computed `tos_expires_at`/`tos_valid` on `GET /sources`; the worker consumes `tos_valid` instead of trusting a bare timestamp.
-- [x] Add `DELETE /sources/{id}/tos-review`: a recorded reviewer withdraws the permission (403 without one, 404 for an unknown source, audit-logged), the three attestation columns clear together, and new machine evidence is refused while already stored evidence and reviewer-attested snapshots are untouched. 3 new tests; full suite **602 passed, zero skips**. See [eleventh-slice checkpoint](implementation-wp01-slice11-2026-10-21.md).
+- [x] Add `DELETE /sources/{id}/tos-review`: a recorded reviewer withdraws the permission (403 without one, 404 for an unknown source, audit-logged), the three attestation columns clear together, and new machine evidence is refused while already stored evidence and reviewer-attested snapshots are untouched. 3 new tests; full suite **602 passed, zero skips**. See [eleventh-slice checkpoint](archive/wp01/implementation-wp01-slice11-2026-10-21.md).
 
 **Completed — twelfth slice, freshness at capture and resume:**
 
 - [x] Share one freshness read (`offer_freshness.py`) across the action boundaries: expiry and recheck, failing closed when `recheck_at` is missing, returning a reason rather than a boolean.
 - [x] Refuse a new capture for a verified offer whose recheck is overdue or which has expired, instead of relying on the state sweep; a fresh offer still records normally.
-- [x] Revalidate the offer (state, expiry, recheck) when a paused post is resumed, reporting the specific freshness reason, so the upload check is no longer the first line of defence. 2 new tests; full suite **604 passed, zero skips**. See [twelfth-slice checkpoint](implementation-wp01-slice12-2026-10-21.md).
+- [x] Revalidate the offer (state, expiry, recheck) when a paused post is resumed, reporting the specific freshness reason, so the upload check is no longer the first line of defence. 2 new tests; full suite **604 passed, zero skips**. See [twelfth-slice checkpoint](archive/wp01/implementation-wp01-slice12-2026-10-21.md).
 
 **Completed — thirteenth slice, recheck deadline capped by expiry:**
 
 - [x] Set `recheck_at = LEAST(now() + policy, COALESCE(expires_at, 'infinity'))` on the transition to `verified`, so an offer expiring inside the policy window is never described as fresh past its own end; absent and distant expiries keep the two-day policy.
-- [x] Leave existing rows untouched (no backfill) and apply the rule at the next verification; an already-expired offer verified anyway receives a past deadline and is immediately stale at the slice-12 boundaries. 2 new tests; full suite **606 passed, zero skips**. See [thirteenth-slice checkpoint](implementation-wp01-slice13-2026-10-21.md).
+- [x] Leave existing rows untouched (no backfill) and apply the rule at the next verification; an already-expired offer verified anyway receives a past deadline and is immediately stale at the slice-12 boundaries. 2 new tests; full suite **606 passed, zero skips**. See [thirteenth-slice checkpoint](archive/wp01/implementation-wp01-slice13-2026-10-21.md).
 
 **Completed — fourteenth slice, read-only legacy audit:**
 
 - [x] Extract the promotion gate's checks into `_verified_problems()` and keep `_gate_verified` as a thin raising wrapper, so the report and a real promotion cannot drift; every existing 422 message is unchanged.
-- [x] Add `GET /offers/audit/verified`: bounded, oldest-first, read-only list of stored `verified` offers that would fail today's gate, with the exact problems and the active requirements. It never demotes, pauses or audits on its own — reclassification stays an explicit human transition. 2 new tests; full suite **608 passed, zero skips**. See [fourteenth-slice checkpoint](implementation-wp01-slice14-2026-10-21.md).
+- [x] Add `GET /offers/audit/verified`: bounded, oldest-first, read-only list of stored `verified` offers that would fail today's gate, with the exact problems and the active requirements. It never demotes, pauses or audits on its own — reclassification stays an explicit human transition. 2 new tests; full suite **608 passed, zero skips**. See [fourteenth-slice checkpoint](archive/wp01/implementation-wp01-slice14-2026-10-21.md).
 
 **Completed — fifteenth slice, blast radius in the audit:**
 
 - [x] Attach a compact `impact` object to every failing audit entry — total/scheduled/published schedules, renders and captures in one query — so an operator sees whether queued or published work depends on an offer before reclassifying it; the per-offer `/impact` view still provides ids.
-- [x] Keep the audit read-only: the added test asserts that a reported offer's scheduled post is still `scheduled` afterwards. Full suite **608 passed, zero skips**. See [fifteenth-slice checkpoint](implementation-wp01-slice15-2026-10-21.md).
+- [x] Keep the audit read-only: the added test asserts that a reported offer's scheduled post is still `scheduled` afterwards. Full suite **608 passed, zero skips**. See [fifteenth-slice checkpoint](archive/wp01/implementation-wp01-slice15-2026-10-21.md).
 
 **Completed — sixteenth slice, coverage for claim-free pages:**
 
-- [x] Count every machine snapshot inside the acquisition window, not only snapshots a claim cites: the gate derives the window from server-side `captured_at` values between the previous extraction and this one, so a page read without yielding a claim must still be listed. Reviewer-attested snapshots remain exempt. Full suite **610 passed, zero skips**. See [sixteenth-slice checkpoint](implementation-wp01-slice16-2026-10-22.md).
+- [x] Count every machine snapshot inside the acquisition window, not only snapshots a claim cites: the gate derives the window from server-side `captured_at` values between the previous extraction and this one, so a page read without yielding a claim must still be listed. Reviewer-attested snapshots remain exempt. Full suite **610 passed, zero skips**. See [sixteenth-slice checkpoint](archive/wp01/implementation-wp01-slice16-2026-10-22.md).
 
 **Remaining — WP01 is not complete:**
 
@@ -871,7 +871,7 @@ Indicative planning range: 12–20 engineer-weeks for a carefully scoped first p
 
 | Work | Current state | Proof / blocker |
 |---|---|---|
-| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and claim-free-page coverage in the acquisition window implemented; [slice 1](implementation-wp01-2026-10-21.md), [slice 2](implementation-wp01-slice2-2026-10-21.md), [slice 3](implementation-wp01-slice3-2026-10-21.md), [slice 4](implementation-wp01-slice4-2026-10-21.md), [slice 5](implementation-wp01-slice5-2026-10-21.md), [slice 6](implementation-wp01-slice6-2026-10-21.md), [slice 7](implementation-wp01-slice7-2026-10-21.md), [slice 8](implementation-wp01-slice8-2026-10-21.md), [slice 9](implementation-wp01-slice9-2026-10-21.md), [slice 10](implementation-wp01-slice10-2026-10-21.md), [slice 11](implementation-wp01-slice11-2026-10-21.md), [slice 12](implementation-wp01-slice12-2026-10-21.md), [slice 13](implementation-wp01-slice13-2026-10-21.md), [slice 14](implementation-wp01-slice14-2026-10-21.md), [slice 15](implementation-wp01-slice15-2026-10-21.md), [slice 16](implementation-wp01-slice16-2026-10-22.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, run-bound (not merely time-windowed) claim-free coverage, downstream invalidation and human/bulk legacy reclassification remain open. |
+| WP01 | IN_PROGRESS | Snapshot/quote/ownership integrity, the offer-type fact-pack contract, safe egress + raw-byte fetch provenance, DNS-rebinding-resistant pinning, collector-path egress, a robots.txt permission record, signed fetch provenance, sectioned long-document extraction, a mandatory extraction-coverage gate, per-source terms-of-service attestation, bounded review validity/revocation, freshness at capture/resume, an expiry-capped recheck deadline, a read-only legacy audit, its blast-radius counts and claim-free-page coverage in the acquisition window implemented; [slice 1](archive/wp01/implementation-wp01-2026-10-21.md), [slice 2](archive/wp01/implementation-wp01-slice2-2026-10-21.md), [slice 3](archive/wp01/implementation-wp01-slice3-2026-10-21.md), [slice 4](archive/wp01/implementation-wp01-slice4-2026-10-21.md), [slice 5](archive/wp01/implementation-wp01-slice5-2026-10-21.md), [slice 6](archive/wp01/implementation-wp01-slice6-2026-10-21.md), [slice 7](archive/wp01/implementation-wp01-slice7-2026-10-21.md), [slice 8](archive/wp01/implementation-wp01-slice8-2026-10-21.md), [slice 9](archive/wp01/implementation-wp01-slice9-2026-10-21.md), [slice 10](archive/wp01/implementation-wp01-slice10-2026-10-21.md), [slice 11](archive/wp01/implementation-wp01-slice11-2026-10-21.md), [slice 12](archive/wp01/implementation-wp01-slice12-2026-10-21.md), [slice 13](archive/wp01/implementation-wp01-slice13-2026-10-21.md), [slice 14](archive/wp01/implementation-wp01-slice14-2026-10-21.md), [slice 15](archive/wp01/implementation-wp01-slice15-2026-10-21.md), [slice 16](archive/wp01/implementation-wp01-slice16-2026-10-22.md). Risk-based recheck intervals, non-symmetric acquisition identity, semantic applicable-terms proof, terms-change detection, run-bound (not merely time-windowed) claim-free coverage, downstream invalidation and human/bulk legacy reclassification remain open. |
 | WP02 | TODO | A05–A10/A18 open |
 | WP03 | TODO | Docker/FFmpeg/Bash not on audit PATH; deployment gaps open |
 | WP04 | TODO / externally gated | No live account/API audit proof; TikTok intended-use blocker |
@@ -893,7 +893,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 
 - **Status:** implemented; locally VERIFIED for snapshot/quote/ownership and proposal/promotion regression scope only. Whole WP01 stays **IN_PROGRESS**.
 - **Implementation commit:** [`0dbd7df`](https://github.com/Kaashmalik/mtk-radar/commit/0dbd7df), pushed to `origin/main`. Completed subtask checkboxes above reflect this commit; no other work package is marked complete.
-- **Changes:** API extraction/evidence contracts and verification checks; append-only migration 012; single-snapshot verification worker; active Tier-A filtering; final-URL/full-text collector option; model/cross-page conflict preservation; unit and real-Postgres regression/upgrade tests. See [checkpoint and compatibility notes](implementation-wp01-2026-10-21.md).
+- **Changes:** API extraction/evidence contracts and verification checks; append-only migration 012; single-snapshot verification worker; active Tier-A filtering; final-URL/full-text collector option; model/cross-page conflict preservation; unit and real-Postgres regression/upgrade tests. See [checkpoint and compatibility notes](archive/wp01/implementation-wp01-2026-10-21.md).
 - **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q --tb=short` against a newly created isolated PostgreSQL 16.15 database: **325 passed, 21 warnings, zero skips**, exit 0. Historical FastAPI/Starlette/UTC deprecation warnings remain.
 - **Additional checks:** `pnpm typecheck`, `.venv/Scripts/python.exe -m ruff check --select E9,F63,F7,F82,F821 services workers packages`, and `.venv/Scripts/python.exe -m compileall -q services workers packages`: all exit 0.
 - **Safety:** no real `.env`, existing application database, live offer/model/OAuth service or publishing account touched. Only the isolated test database received migrations; remote Git publication is separate from application deployment.
@@ -904,7 +904,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 
 - **Status:** implemented; locally VERIFIED for the offer-type completeness and unknown/conflict scope only. Whole WP01 stays **IN_PROGRESS**.
 - **Implementation commit:** uncommitted working-tree change on `main` at the time of writing; commit hash to be recorded when it lands. No other work package is marked complete.
-- **Changes:** new `services/api/offer_terms.py` (four statuses, sentence-scoped negation/exclusion, price basis, region exclusions, deadline specificity, offer-type checklists); extended `schemas.py` field vocabulary (9 claims, typed `basis`/`excluded_regions`); append-only migration `013_extraction_fact_pack.sql`; `offers_api.py` derives/persists/returns the pack, re-derives it at promotion against the current offer type and treats `offer_type` as material; `verification_checks.py` exposes per-field established/unestablished claims; unknown-safe wording in `scriptgen.py` and `schedules_state.py`; typed rule extraction in `workers/verification/extractors.py`. See [second-slice checkpoint](implementation-wp01-slice2-2026-10-21.md).
+- **Changes:** new `services/api/offer_terms.py` (four statuses, sentence-scoped negation/exclusion, price basis, region exclusions, deadline specificity, offer-type checklists); extended `schemas.py` field vocabulary (9 claims, typed `basis`/`excluded_regions`); append-only migration `013_extraction_fact_pack.sql`; `offers_api.py` derives/persists/returns the pack, re-derives it at promotion against the current offer type and treats `offer_type` as material; `verification_checks.py` exposes per-field established/unestablished claims; unknown-safe wording in `scriptgen.py` and `schedules_state.py`; typed rule extraction in `workers/verification/extractors.py`. See [second-slice checkpoint](archive/wp01/implementation-wp01-slice2-2026-10-21.md).
 - **Failing first:** in a throwaway worktree at `fe4764e` with only the new test files copied in, `pytest services/api/tests/test_verification_gate.py workers/verification/tests/test_verification.py -q` gave **13 failed / 30 passed**, and `test_offer_terms.py` failed collection because `offer_terms` did not exist. The 13 failures map to missing billing terms, negated eligibility, renewal-as-initial price, ambiguous deadline, typed classification, price basis and region/auto-renew extraction.
 - **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q` against a newly created isolated PostgreSQL 16.15 database (`postgres:16-alpine`, `127.0.0.1:55499`): **394 passed, 26 warnings, zero skips**, exit 0. Historical FastAPI/Starlette/UTC deprecation warnings remain.
 - **Additional checks:** `ruff check services workers packages scripts` exit 0; `compileall -q services workers packages` exit 0; `pnpm typecheck` exit 0.
@@ -919,7 +919,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 
 - **Status:** implemented; locally VERIFIED for the egress/raw-byte/provenance scope only. Whole WP01 stays **IN_PROGRESS**.
 - **Implementation commit:** uncommitted working-tree change on `main` at the time of writing; commit hash to be recorded when it lands.
-- **Changes:** new `packages/source_adapters/egress.py` (HTTPS-only, permitted ports, no URL credentials, public-address-only DNS answers with all-answers checking, per-hop redirect validation, bounded streaming body, text-only content types); `Fetcher.safe_fetch` with a dedicated non-redirecting client; `fetch_page_snapshot(policy=...)` returns exact bytes plus provenance; append-only migration `014_evidence_fetch_provenance.sql` (`raw_content BYTEA`, `raw_hash`, `requested_url`, `fetch_status`, `fetch_content_type`, `fetched_at`, `fetch_redirects`, `parser_version`, `fetch_identity`); `schemas.EvidenceProvenance` + server-side re-hashing and URL-chain re-checks; `_gate_verified` requires raw bytes and provenance for machine-collected official evidence (reviewer attestations exempt, `MTK_REQUIRE_FETCH_PROVENANCE` opt-out); worker forwards bytes and provenance, and skips a non-2xx page instead of storing an error page as terms. See [third-slice checkpoint](implementation-wp01-slice3-2026-10-21.md).
+- **Changes:** new `packages/source_adapters/egress.py` (HTTPS-only, permitted ports, no URL credentials, public-address-only DNS answers with all-answers checking, per-hop redirect validation, bounded streaming body, text-only content types); `Fetcher.safe_fetch` with a dedicated non-redirecting client; `fetch_page_snapshot(policy=...)` returns exact bytes plus provenance; append-only migration `014_evidence_fetch_provenance.sql` (`raw_content BYTEA`, `raw_hash`, `requested_url`, `fetch_status`, `fetch_content_type`, `fetched_at`, `fetch_redirects`, `parser_version`, `fetch_identity`); `schemas.EvidenceProvenance` + server-side re-hashing and URL-chain re-checks; `_gate_verified` requires raw bytes and provenance for machine-collected official evidence (reviewer attestations exempt, `MTK_REQUIRE_FETCH_PROVENANCE` opt-out); worker forwards bytes and provenance, and skips a non-2xx page instead of storing an error page as terms. See [third-slice checkpoint](archive/wp01/implementation-wp01-slice3-2026-10-21.md).
 - **Failing first:** throwaway worktree at `fe4764e` → **14 failing slice cases + 18 passing** for the schema/gate files, plus **2 collection errors** (`source_adapters.egress` and `EgressPolicy` did not exist). The remaining 5 failures in that run are slice-2 offer-type tests carried in the same modified file.
 - **Proof:** `.venv/Scripts/python.exe -m pytest packages/object_storage/tests packages/source_adapters/tests services/api/tests workers/verification/tests workers/render/tests workers/publishing/tests workers/metrics/tests workers/batch/tests workers/monitor/tests -q` against a newly created isolated PostgreSQL 16.15 database (`postgres:16-alpine`, `127.0.0.1:55499`): **476 passed, 26 warnings, zero skips**, exit 0.
 - **Additional checks:** `ruff check services workers packages scripts` exit 0; `compileall -q services workers packages` exit 0; `pnpm typecheck` exit 0. `packages/source_adapters/tests` added to the `scripts/verify.sh` pytest list.
@@ -938,7 +938,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   `fetch_rss` and `fetch_github_releases` take an optional `policy` parameter
   (default `EgressPolicy()`); the collector `page_watch` path uses `fetch_policy`
   without attaching provenance; callers may pass an explicit permissive policy
-  for fixtures, but never for production. See [fifth-slice checkpoint](implementation-wp01-slice5-2026-10-21.md).
+  for fixtures, but never for production. See [fifth-slice checkpoint](archive/wp01/implementation-wp01-slice5-2026-10-21.md).
 - **Failing first:** at `f56bb9e`, the adapter/collector suite failed where the
   `Fetcher` fakes lacked `fetch_policy` and where no `fetch_policy` coverage
   existed; after implementation, **103 passed** across
@@ -971,7 +971,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   `provenance.robots`; `EvidenceProvenance.robots` validates it server-side;
   migration 015 stores `robots_url/robots_checked_at/robots_allowed/robots_status`;
   the promotion gate requires a permitted decision for machine-collected official
-  evidence. See [sixth-slice checkpoint](implementation-wp01-slice6-2026-10-21.md).
+  evidence. See [sixth-slice checkpoint](archive/wp01/implementation-wp01-slice6-2026-10-21.md).
 - **Fail-closed:** `401/403/429` and every `5xx` are refusals, as are transport
   failure, egress refusal, an unparseable file and a non-bare host; `400/404/410/451`
   mean "no published policy" and permit the read.
@@ -1007,7 +1007,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   deployment key is unset; migration 016 stores `fetch_signature` with a
   hex-shape CHECK; the promotion gate requires it for machine-collected official
   evidence, with reviewer attestations exempt. See
-  [seventh-slice checkpoint](implementation-wp01-slice7-2026-10-21.md).
+  [seventh-slice checkpoint](archive/wp01/implementation-wp01-slice7-2026-10-21.md).
 - **Limit, stated in code and docs:** a valid signature proves that a holder of
   the deployment key produced the record — **not** that the bytes were fetched.
   The key is symmetric, so the API can forge the same record. Replacing it with
@@ -1047,7 +1047,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   unknown version or a different ceiling; migration 017 stores the record;
   `captured_content` now accepts the 2,000,000-character egress bound and a
   larger document is refused for review, never cut. See
-  [eighth-slice checkpoint](implementation-wp01-slice8-2026-10-21.md).
+  [eighth-slice checkpoint](archive/wp01/implementation-wp01-slice8-2026-10-21.md).
 - **Failing first:** at `eeb5912` the splitter module does not exist, the evidence
   schema rejects a 300k-character snapshot, the worker raises above 250k, the
   model prompt is cut at 8,000 characters, `ExtractionIn` rejects the unknown
@@ -1079,7 +1079,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   missing or empty coverage record blocks promotion, and the record must list
   every such snapshot. Reviewer-attested snapshots are exempt. The opt-out is
   documented in `.env.example` and the compose file as a legacy-migration setting
-  only. See [ninth-slice checkpoint](implementation-wp01-slice9-2026-10-21.md).
+  only. See [ninth-slice checkpoint](archive/wp01/implementation-wp01-slice9-2026-10-21.md).
 - **Failing first:** at `cec97fd` the gate ignores `coverage`, so a machine
   extraction with `coverage = NULL` promotes; `test_missing_coverage_blocks_promotion`
   fails because no exception is raised, and the helper/flag do not exist.
@@ -1114,7 +1114,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   record names no source, with reviewer-attested snapshots exempt and
   `MTK_REQUIRE_TOS_ATTESTATION` on by default; the worker skips unattested
   sources and sends `source_id` with each snapshot. See
-  [tenth-slice checkpoint](implementation-wp01-slice10-2026-10-21.md).
+  [tenth-slice checkpoint](archive/wp01/implementation-wp01-slice10-2026-10-21.md).
 - **Failing first:** at `ccf9761` there is no endpoint, column or flag, so machine
   evidence for a source with no review is stored with 201; `_official_pages`
   returns bare URLs and the payload has no `source_id`.
@@ -1148,7 +1148,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   recorded reviewer withdraw the permission (403 without identity, 404 unknown,
   audit-logged) and clears all three columns; the worker reads `tos_valid` and
   falls back to the timestamp only for an older API. See
-  [eleventh-slice checkpoint](implementation-wp01-slice11-2026-10-21.md).
+  [eleventh-slice checkpoint](archive/wp01/implementation-wp01-slice11-2026-10-21.md).
 - **Failing first:** at `f33efa6` the ingest helper only checks `IS NULL`, there
   is no `DELETE` route, `/sources` has no validity fields, and the worker skips
   only a missing timestamp — an expired or revoked review still authorises
@@ -1183,7 +1183,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   offer after the state check; `POST /schedules/{id}/resume` re-runs
   `_revalidate_offer` after the script-hash check and reports the specific
   freshness reason. No migration. See
-  [twelfth-slice checkpoint](implementation-wp01-slice12-2026-10-21.md).
+  [twelfth-slice checkpoint](archive/wp01/implementation-wp01-slice12-2026-10-21.md).
 - **Failing first:** at `1e70bde` captures check only the video-allowed state and
   resume checks only the script hash, so an overdue offer accepts a capture and
   re-queues a paused post with 200.
@@ -1214,7 +1214,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   instead of a window it cannot honour; absent and distant expiries keep the
   policy. No migration, no backfill — existing rows are unchanged and the rule
   applies at the next verification. See
-  [thirteenth-slice checkpoint](implementation-wp01-slice13-2026-10-21.md).
+  [thirteenth-slice checkpoint](archive/wp01/implementation-wp01-slice13-2026-10-21.md).
 - **Failing first:** at `5807251` an offer expiring in six hours is verified with
   `recheck_at = now() + 2 days`; the new cap assertion fails.
 - **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
@@ -1244,7 +1244,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   bounded, oldest-first, read-only inventory of stored `verified` offers that
   would fail today's gate, with the exact problems and active requirements. It
   never demotes, pauses or audits; reclassification stays a human transition. See
-  [fourteenth-slice checkpoint](implementation-wp01-slice14-2026-10-21.md).
+  [fourteenth-slice checkpoint](archive/wp01/implementation-wp01-slice14-2026-10-21.md).
 - **Failing first:** at `b8aa54c` the route does not exist (404) and the gate
   logic exists only inside the raising function.
 - **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
@@ -1275,7 +1275,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   inventory answers "does queued or published work depend on this?" without a
   second call per offer. Counts only; `/offers/{id}/impact` still lists ids. The
   audit remains read-only. See
-  [fifteenth-slice checkpoint](implementation-wp01-slice15-2026-10-21.md).
+  [fifteenth-slice checkpoint](archive/wp01/implementation-wp01-slice15-2026-10-21.md).
 - **Failing first:** at `35db816` a failing audit entry has no `impact` key, so
   the extended test raises `KeyError`.
 - **Proof:** full suite against isolated PostgreSQL 16.15 (`127.0.0.1:55499`):
@@ -1308,7 +1308,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
   claim-cited snapshots and that window. Reviewer-attested snapshots remain
   exempt. No schema change: `evidence.captured_at` is not part of the request and
   defaults to `now()`, so the window uses server time, not a worker-chosen id.
-  See [sixteenth-slice checkpoint](implementation-wp01-slice16-2026-10-22.md).
+  See [sixteenth-slice checkpoint](archive/wp01/implementation-wp01-slice16-2026-10-22.md).
 - **Failing first:** at `a22fae8` the gate only resolved evidence ids cited by
   claims, so an offer with a second stored official snapshot and coverage for the
   cited page only promoted successfully; the new integration test expects 422.
@@ -1331,7 +1331,7 @@ For each update append: date UTC, task/subtask ID, status (`TODO/IN_PROGRESS/BLO
 
 ## 13. Coding-model execution guide
 
-Use [the model handoff guide](coding-model-handoff-2026-10-21.md) when asking GLM, MiniMax or any other coding model to implement this roadmap. It provides the compact session prompt, change/report contract and no-garbage rules.
+Use [the model handoff guide](archive/coding-model-handoff-2026-10-21.md) when asking GLM, MiniMax or any other coding model to implement this roadmap. It provides the compact session prompt, change/report contract and no-garbage rules.
 
 Required session order:
 

@@ -1,9 +1,12 @@
 # WP01 fourteenth slice — a read-only legacy audit of verified offers
 
+> **Historical.** Superseded by the [implementation roadmap](../../implementation-roadmap-2026-10-25.md) and the [EP implementation log](../../ep-implementation-log.md). Kept for the audit trail; test counts and statuses are historical.
+
+
 **Date:** 21 October 2026 (UTC)
 **Work package:** WP01 — P0 evidence and verification integrity (still **IN_PROGRESS**)
 **Preceding slice:** [expiry-capped recheck deadline](implementation-wp01-slice13-2026-10-21.md)
-**Master plan:** [§6 official verification, legacy review](../docs/automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
+**Master plan:** [§6 official verification, legacy review](../../automation-master-plan-2026-10-21.md#6-official-verification-and-source-attribution)
 
 The plan's legacy step — "review/reclassify existing verified records and queued
 legacy releases as unverifiable where necessary" — has no starting point. Rows
