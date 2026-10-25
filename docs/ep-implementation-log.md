@@ -7,13 +7,16 @@ work package: what landed (commit), what was actually run/checked, and what
 remains **unproven**. No stale green claims — every entry separates executed
 checks from operator/owner actions.
 
-> **2026-10-25 review (`0d3b043`):** the per-EP `COMPLETE` labels below are
-> historical. Current status: **EP-00 PARTIAL** (local filename guard now passes;
-> CI execution is still blocked), **EP-01–EP-03 IMPLEMENTED_UNVERIFIED**
-> (Postgres integration was not run), **EP-04 PARTIAL** (loaded-browser E2E
-> unproven). After the M0/M1 fix batches the local suite is **975 passed /
-> 3 skipped / 0 failed**; the extension has 29 Node tests. Open work is tracked
-> in [`implementation-roadmap-2026-10-25.md`](implementation-roadmap-2026-10-25.md).
+> **2026-10-25 review (`75b03e4`):** the per-EP `COMPLETE` labels below are
+> historical. Current status: **EP-00 PARTIAL** (local filename guard passes;
+> CI execution is still blocked), **EP-01–EP-03 IMPLEMENTED_UNVERIFIED for
+> live providers/LLMs** (the Postgres integration layer now runs locally),
+> **EP-04 PARTIAL** (the loaded-extension Chromium E2E now passes; store and
+> manual permission-prompt coverage remain). After the M2 runtime-proof batch
+> the local suite is **1176 passed / 0 failed** with 158 real-Postgres
+> integration tests, **9/9 Playwright** tests (including the unpacked
+> extension), and 29 extension Node tests. Open work is tracked in
+> [`implementation-roadmap-2026-10-25.md`](implementation-roadmap-2026-10-25.md).
 
 ## Baseline checks at EP-00 start (2026-10-24, commit `e5df8ca`)
 
@@ -42,13 +45,16 @@ action by design, so remote CI is still `UNPROVEN`.
 **Checks executed for this EP (historical, 2026-10-24):** full `pytest -q`
 green (887/3) on Linux including the new guard tests; lint run clean over the
 repo; CI YAML parses. **Re-run on 2026-10-25 after CODE-05 and the M1 batch:**
-975 passed, 3 skipped, **0 failed**; the portable filename test adds the bad
-path to a throwaway Git index instead of creating an invalid file. CI execution
-is still `UNPROVEN` (billing lock).
+975 passed, 3 skipped, **0 failed**. **M2 re-run (`75b03e4`):** 1176 passed,
+0 failed, including 158 real-Postgres integration tests and 9/9 Playwright
+tests. The portable filename test adds the bad path to a throwaway Git index
+instead of creating an invalid file. CI execution is still `UNPROVEN`
+(billing lock); live provider posting is also unproven.
 
-**Still unproven:** CI execution itself (billing lock), real-Postgres
-integration and browser e2e on this machine (no docker), and live-platform
-behavior. Do not treat this log as a go-live certificate.
+**Still unproven:** CI execution itself (billing lock) and live-platform
+behavior. The real-Postgres integration suite and the browser E2E now run
+locally on Windows with portable PostgreSQL 16.15 (`75b03e4`; 1176 passed,
+9/9 Playwright). Do not treat this log as a go-live certificate.
 
 ## EP-01 — Safety & financial correctness (G01–G05, G12, G21, G27)
 
@@ -60,7 +66,7 @@ remains operator-verified territory.
 | Gap | Commit / evidence |
 |---|---|
 | G01 Instagram privacy | `66b73ea` — `UnsupportedPrivacyError` in `platforms/base.py`; Instagram supports `public` only, refuses BEFORE container creation; worker pre-flight in `_publish` (held+paused, never retried); lying "draft state" docstring removed |
-| G02 publication reconciliation | `d889b67` — `confirm_publication` implemented for Facebook (video_status/published match), Instagram (permalink present), TikTok (`PUBLISH_COMPLETE` **plus a public post id**); synthetic `confirmed=True` fallback replaced with `confirmed: False` + hold; fakes reconcile like real adapters. TikTok's no-post-id completion was fixed on 2026-10-25 (CODE-02): completion alone is held |
+| G02 publication reconciliation | `d889b67` — `confirm_publication` implemented for Facebook (video_status/published match), Instagram (permalink present), TikTok (public: `PUBLISH_COMPLETE` **plus a public post id**; private/unlisted: `SELF_ONLY` completion, `visibility: self_only`, never public); synthetic `confirmed=True` fallback replaced with `confirmed: False` + hold; fakes reconcile like real adapters. TikTok's private-mode exception is `a6138d7` (CODE-02) |
 | G03 fail-closed budget gate | `7e636cd` — `budget_ok` permits paid work ONLY on explicit `allowed: true`; unreachable/non-2xx/ambiguous all DENY |
 | G12 worker config parity | `7e636cd` — `CostClient` reads `MTK_API_URL`/`MTK_WORKER_TOKEN` first, legacy names as fallbacks. This is **CostClient parity only**; `workers/verification/main.py` and `workers/collectors/main.py` still read `API_URL` directly |
 | G04 atomic reservations | `69f8e1f` — `check_budget` runs read-decide-insert in one transaction under a per-kind advisory lock; allowed requests insert a reservation the usage report settles (`settle_reservation`); unsettled reservations stay as recorded liability; extraction predicts tokens (chars/4 + hard `max_tokens` cap) instead of asking with 0 |
@@ -68,12 +74,13 @@ remains operator-verified territory.
 | G21 derived-data permission switches | `a0964a7` — shared `MTK_ENABLE_DERIVED_ENGAGEMENT` switch (off by default) now gates best-times' views+2×(likes+comments) blend AND the hashtag measured-performance lift; default outputs use native metrics with explicit editorial-heuristic labels; dashboard renders the API's `ranking_method`. With the gate off, unmeasured hashtag ties now keep source priority (CODE-03 fixed 2026-10-25) |
 | G27 media GC | `eee66cb` — reference/hold-aware mark-and-sweep: pins by ref VALUE as well as row; failed/paused/held schedules pin their artifacts (only `cancelled` releases, and only its own cover); apply runs in one advisory-locked transaction shared with schedule creation, with a second pin re-check inside the lock; dry-run default unchanged |
 
-**Checks executed for this EP (historical, 2026-10-24):** full unit suite green
-(921 passed, 3 skipped). The claimed **591 API integration tests against a
-REAL local Postgres 16** were **not re-run on 2026-10-25** (no Docker/Postgres),
-so that row is `UNPROVEN` on this baseline. Typecheck (offer-schema +
-dashboard) clean; `ruff --select E9,F63,F7,F82,F821` clean;
-extension `node --check` clean.
+**Checks executed for this EP:** historical 2026-10-24 unit suite 921 passed /
+3 skipped. **Re-run 2026-10-25 (`75b03e4`):** full suite **1176 passed / 0
+failed**, including **158 API integration tests** against PostgreSQL 16.15 and
+the real migration runner; 9/9 Playwright tests; typecheck (offer-schema +
+dashboard) clean; `ruff --select E9,F63,F7,F82,F821` clean; extension
+`node --check` clean. Live provider endpoints remain mocked-transport tested
+only.
 
 **Still unproven:** remote CI execution (owner billing lock), live publishing
 against real Graph/TikTok endpoints (adapters are mocked-transport tested),
@@ -108,10 +115,11 @@ on 2026-10-25 (no Docker/Postgres).
 | G16 real cooling duration | `b0e4c2c` — cooling measured from last MEANINGFUL growth (`COALESCE(last_growth_at, first_at)`), so the daily rescan cadence cannot reset the clock; archive when latest velocity ≤ 0 AND cooling since > 7 days |
 | G13 compose env matrix | `4481042` — collectors +REDIS_URL; verification +VERIFY_LLM_*; api +VERIFY_LLM_*/TTS_*/COST_*; render +TTS_* incl. _UR overrides; publishing +INSTAGRAM_*/FACEBOOK_APP_*/MTK_PUBLIC_MEDIA_BASE_URL/MTK_TOKEN_REFRESH_*; metrics +INSTAGRAM_*; guard test enforces the matrix BOTH directions (documented var → container receives it; compose var → documented or explicitly internal) and now maps **every** matrix variable to a named reader, including dynamic TTS/Urdu and per-account Instagram forms (CODE-11 fixed) |
 
-**Checks executed for this EP (historical, 2026-10-24):** unit suite 951 passed,
-3 skipped; the claimed **620 API integration tests** were **not re-run on
-2026-10-25** and are `UNPROVEN` on this baseline; `ruff --select
-E9,F63,F7,F82,F821` clean; `docker compose config -q` clean;
+**Checks executed for this EP:** historical 2026-10-24 unit suite 951 passed /
+3 skipped. **Re-run 2026-10-25 (`75b03e4`):** full suite **1176 passed / 0
+failed**, including **158 API integration tests** on PostgreSQL 16.15 (the
+claimed 620-test figure was a cumulative historical count, not the current
+suite); `ruff --select E9,F63,F7,F82,F821` clean; `docker compose config -q` clean;
 dashboard `tsc --noEmit` clean (offer-schema + dashboard); extension
 `node --check` clean. New failure-path tests: identical payload hashes cannot
 fake new information, append-only trigger refuses rewrites, zero-evidence
@@ -132,8 +140,10 @@ title variants beyond the tested patterns is operator-observed territory).
 
 ## EP-03 - Research briefs & content-type gates (G17-G18, 2026-10-24)
 
-**Status: IMPLEMENTED_UNVERIFIED (reviewed 2026-10-25).** The code and unit
-tests exist; the Postgres integration tests were not run. The contradiction gate
+**Status: IMPLEMENTED_UNVERIFIED (reviewed 2026-10-25).** The database path is
+now locally verified: the research versioning, claim-status and daily-cap
+integration tests ran in the 158-test PostgreSQL 16.15 suite (`75b03e4`).
+Live research-provider/LLM behavior remains unproven. The contradiction gate
 checks the **current** brief only; a superseded contradiction is exposed as
 `superseded_conflicts` history and never blocks. The daily cap counts both
 `automation:%` and `system:%` actors (CODE-10 fixed). Research tracks suppress
@@ -177,15 +187,14 @@ never means "verified".
 | Gap | Commit / evidence |
 |---|---|
 | G17 queue detail SQL/readiness | `c8f2893` — shared `_RANKED_SELECT_TEMPLATE`; detail reuses the list's ranked projection (no GROUP BY anywhere in queue reads); `test_queue_detail_matches_list_rank_and_never_500s` |
-| G18 research tracks + claim ledger | `995c4ad` — migration 040 + `research_api.py` + promote/brief wiring + scriptgen gates/attribution + guardrail; unit `test_scriptgen_research.py` (**15 tests**, corrected 2026-10-25), integration: `test_promote_creates_research_brief_v1_and_queue_content_type`, `test_research_brief_versioning_and_human_only_claim_status`, `test_paper_explainer_script_is_attributed_and_coupon_free`, `test_automation_promotion_daily_cap` (all **not run** 2026-10-25) |
+| G18 research tracks + claim ledger | `995c4ad` — migration 040 + `research_api.py` + promote/brief wiring + scriptgen gates/attribution + guardrail; unit `test_scriptgen_research.py` (**15 tests**, corrected 2026-10-25), integration: `test_promote_creates_research_brief_v1_and_queue_content_type`, `test_research_brief_versioning_and_human_only_claim_status`, `test_paper_explainer_script_is_attributed_and_coupon_free`, `test_automation_promotion_daily_cap` (**all passed** against PostgreSQL 16.15 on 2026-10-25) |
 
-**Checks executed for this EP (historical, 2026-10-24):** full suite 1147 passed
-(unit + a claimed **155 API integration tests** that were **not re-run on
-2026-10-25**); `ruff check .` clean; `docker compose config -q` clean; dashboard
-`tsc --noEmit` clean; extension `node --check` clean. The acceptance claim is
-therefore `IMPLEMENTED_UNVERIFIED` on this baseline. The coupon/price claim is
-now verified at unit level (`CODE-04` fixed; 15 research tests), while the
-integration layer remains unrun.
+**Checks executed for this EP:** historical 2026-10-24 full suite 1147 passed.
+**Re-run 2026-10-25 (`75b03e4`):** full suite **1176 passed / 0 failed**,
+including 158 real-Postgres integration tests and the four G18 tests above;
+`ruff check .` clean; `docker compose config -q` clean; dashboard `tsc
+--noEmit` clean; extension `node --check` clean. The local DB path is verified;
+live LLM/research endpoints and CI remain unproven.
 
 **Still unproven:** remote CI execution (owner billing lock — logged, not
 touched); the dashboard's queue/offer UIs do not yet surface `content_type`
@@ -202,11 +211,13 @@ scoping landed. Saving options no longer wipes a masked token (CODE-01 fixed),
 the granted origin is persisted and retired on change/revoke (CODE-06 fixed),
 page-context URLs are sanitized before upload (CODE-12 fixed), and the contract
 test asserts context persistence in both `items.extra` and observation
-provenance (CODE-13 fixed; DB execution unrun). Saves now deep-link to the exact
+provenance (CODE-13 fixed; DB execution passed). Saves now deep-link to the exact
 inbox row via `GET /items/{id}` and `/inbox?saved_item=<id>` (CODE-07). 29 Node
-tests pass. Still open: the Node tests exercise `core.js` only —
-`background.js`/`options.js` are not loaded, so a loaded-browser E2E proof is
-required.
+tests pass. The loaded-extension Chromium E2E now loads the unpacked MV3
+extension in a persistent profile, pairs with the real API, delivers a queued
+save, and proves the duplicate path creates no second inbox row. Remaining
+open: store packaging/CSP review and the manual permission-prompt/badge/alarm
+surfaces.
 
 The extension was a syntax-checked stub with a wrong context-menu target and
 a shared token story. It is now a real intake tool: the right-clicked LINK is
@@ -236,22 +247,22 @@ resolution aliased the flag (fixed).
 
 | Work | Commit / evidence |
 |---|---|
-| Targets, pairing, host grants, outbox, statuses, privacy | `42a6f53` — `apps/extension/core.js` (pure logic) + worker/options rewrite + manifest v0.3.0 + `apps/extension/README.md` (tester install steps); 29 unit tests; `test_extension_intake_contract_idempotent_with_context` now asserts context in `items.extra` and observation provenance (CODE-13; DB execution unrun) |
+| Targets, pairing, host grants, outbox, statuses, privacy | `42a6f53` — `apps/extension/core.js` (pure logic) + worker/options rewrite + manifest v0.3.0 + `apps/extension/README.md` (tester install steps); 29 unit tests; `test_extension_intake_contract_idempotent_with_context` now asserts context in `items.extra` and observation provenance (CODE-13; DB execution passed 2026-10-25) |
+| Loaded-extension E2E | `21b9a85` — `apps/dashboard/e2e/loaded-extension.spec.ts`; 9/9 Playwright tests including real Chromium persistent profile, API health probe, outbox delivery and duplicate dedupe; [evidence](evidence/loaded-extension-e2e.json) |
 | Intake provenance bug | `42a6f53` — `services/api/main.py` records `intake: extension` from the pre-resolution flag |
 
 **Checks executed for this EP** (at documentation commit, historical): full suite
 1148 passed (incl. **156 integration** on real Postgres, migrations 001→040);
 extension `node --test` 25/25; `node --check` on
 all three JS files; manifest JSON parses; `ruff check .`, `docker compose
-config -q`, dashboard `tsc --noEmit` clean. **Re-run 2026-10-25:** full suite
-975 passed / 3 skipped / 0 failed; extension 29/29; `ruff`, `pnpm typecheck`,
-doc-link and filename guards clean. Postgres integration, loaded-browser E2E and
-CI remain `UNPROVEN`.
+config -q`, dashboard `tsc --noEmit` clean. **Re-run 2026-10-25 (`75b03e4`):**
+full suite **1176 passed / 0 failed** including 158 real-Postgres integration
+tests; extension 29/29; `pnpm verify` 9/9 Playwright tests including the loaded
+extension; `ruff`, `pnpm typecheck`, doc-link and filename guards clean; gitleaks
+132 commits/no leaks. The loaded-browser layer is no longer unproven.
 
-**Still unproven:** the loaded-extension layer — a persistent-context
-Chromium E2E run against the real API and a manual Chrome/Edge smoke on a
-real profile (step-by-step smoke documented in `apps/extension/README.md`;
-Chrome-API surfaces such as `chrome.permissions.request` UI, badge painting
-and alarm cadence are stubbed in tests, not exercised in a real browser);
-no Firefox claim (Chrome MV3 only); remote CI execution still blocked by the
-owner billing lock (logged, not touched).
+**Still unproven:** store packaging/CSP review; Chrome-API surfaces such as the
+`chrome.permissions.request` UI, badge painting and alarm cadence are stubbed in
+unit tests and not exercised by the E2E; no Firefox claim (Chrome MV3 only);
+remote CI execution still blocked by the owner billing lock (logged, not
+touched).

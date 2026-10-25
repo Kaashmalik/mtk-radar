@@ -43,6 +43,17 @@ still planned.
 - [External tool-stack alignment](tool-stack-alignment-2026-10-23.md) — decisions
   are proposals; check the roadmap before treating any as implemented.
 
+## Evidence artifacts
+
+- [Full `pnpm verify` log (2026-10-25)](evidence/verify-pnpm-2026-10-25.log) -
+  1176 Python tests, 9 Playwright tests, lint/typecheck/build/secret scan.
+- [Verify metadata (2026-10-25)](evidence/verify-pnpm-2026-10-25.json) - exact
+  commit, environment, counts and artifact links.
+- [Loaded-extension E2E evidence](evidence/loaded-extension-e2e.json) - real
+  Chromium pairing, delivery and duplicate dedupe.
+- [Provider private-smoke dry run](evidence/provider-private-smoke-dry-run.json) -
+  harness safety only; **not** live-provider proof.
+
 ## History
 
 - [Archive index](archive/README.md) — WP01 slices, dated audits and handoffs.

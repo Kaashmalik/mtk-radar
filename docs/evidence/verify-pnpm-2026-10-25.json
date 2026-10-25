@@ -1,0 +1,62 @@
+{
+  "schema": "mtk-verify-evidence/1",
+  "recorded_at": "2026-10-25T16:25:08Z",
+  "commit": "75b03e4acdbc8de6873e9c41ea0c8a0b271e77b1",
+  "commit_subject": "feat: add fail-closed private provider smoke harness",
+  "command": "corepack pnpm verify",
+  "shell": "Git Bash 2.51 on Windows",
+  "result": "pass",
+  "exit_code": 0,
+  "environment": {
+    "os": "Microsoft Windows 11 Pro (10.0.22000)",
+    "python": "3.13.5",
+    "node": "v22.17.0",
+    "pnpm": "10.34.7",
+    "postgres": "PostgreSQL 16.15 (Visual C++ build 1944, 64-bit)",
+    "postgres_start": "portable local server on 127.0.0.1:55499 (no Docker daemon)",
+    "disposable_databases": [
+      "mtk_verify",
+      "mtk_verify_e2e"
+    ],
+    "database_url_redacted": "postgresql://mtk@127.0.0.1:55499/postgres"
+  },
+  "checks": {
+    "filename_portability": "pass",
+    "documentation_links": "pass (48 files)",
+    "gitleaks": {
+      "version": "8.24.2",
+      "commits_scanned": 132,
+      "leaks_found": 0
+    },
+    "ruff": "pass (E9,F63,F7,F82,F821)",
+    "python_compile": "pass",
+    "python_tests": {
+      "passed": 1176,
+      "failed": 0,
+      "warnings": 56,
+      "duration_s": 144.88,
+      "integration_tests": 158,
+      "database": "PostgreSQL 16.15, migrations applied by the real runner"
+    },
+    "typecheck": "pass (offer-schema + dashboard)",
+    "dashboard_build": "pass",
+    "compose_config": "pass (production + dev override)",
+    "ci_workflow_yaml": "pass",
+    "extension": {
+      "syntax": "pass",
+      "node_tests": 29
+    },
+    "playwright": {
+      "passed": 9,
+      "duration_s": 33.1,
+      "loaded_extension": "pass"
+    }
+  },
+  "loaded_extension_evidence": "docs/evidence/loaded-extension-e2e.json",
+  "raw_log": "docs/evidence/verify-pnpm-2026-10-25.log",
+  "notes": [
+    "The command ran at HEAD 75b03e4 with only untracked evidence files in the working tree.",
+    "GitHub Actions was not executed; the owner account is billing-locked.",
+    "No live provider private/test post was made; see provider-private-smoke-dry-run.json."
+  ]
+}

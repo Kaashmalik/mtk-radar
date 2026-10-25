@@ -1,0 +1,9 @@
+{
+  "schema": "mtk-loaded-extension-e2e/1",
+  "extension_id": "lbahblnjbmnbnbmpgnceaiinmgbllabo",
+  "api_base": "http://127.0.0.1:8000",
+  "probe": "Connection OK — authenticated as the extension intake credential (class: extension).",
+  "item_id": "d82234a1-d5d0-4760-bd72-4551730c7609",
+  "duplicate_without_second_row": true,
+  "checked_at": "2026-10-25T16:18:28.098Z"
+}
