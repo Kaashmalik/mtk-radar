@@ -284,20 +284,35 @@ class RenderJob:
         scenes = explainer_mod.plan_scenes(offer, brief, total_s=total)
         out_dir = self.project / "assets" / "explainer"
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "cards.ass").write_text(explainer_mod.cards_ass(scenes), encoding="utf-8")
         manifest = explainer_mod.scene_manifest(self.offer_id, brief, scenes)
         (out_dir / "scene_manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
         duration = scenes[-1]["end"]
-        cmd = explainer_mod.base_video_cmd(
-            "assets/explainer/cards.ass", "assets/explainer/base.mp4", duration)
-        log.info("explainer base (%d scenes, %.1fs, manifest %s) :: %s",
-                 len(scenes), duration, manifest["sha256"][:12], render_mod.describe(cmd))
-        proc = render_mod.run(cmd, self.project)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"explainer base render failed: {(proc.stderr or '')[-600:]}")
+        # One base per orientation: the vertical export gets natively
+        # composed 9:16 cards (see _video_for_preset), not a shrunken strip.
+        for orientation, suffix in (("landscape", ""), ("vertical", "-vertical")):
+            cards = f"assets/explainer/cards{suffix}.ass"
+            (self.project / cards).write_text(
+                explainer_mod.cards_ass(scenes, orientation), encoding="utf-8")
+            cmd = explainer_mod.base_video_cmd(
+                cards, f"assets/explainer/base{suffix}.mp4", duration, orientation)
+            log.info("explainer %s base (%d scenes, %.1fs, manifest %s) :: %s",
+                     orientation, len(scenes), duration, manifest["sha256"][:12],
+                     render_mod.describe(cmd))
+            proc = render_mod.run(cmd, self.project)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"explainer base render failed: {(proc.stderr or '')[-600:]}")
         return str(out_dir / "base.mp4"), scenes
+
+    def _video_for_preset(self, video_rel: str, preset_key: str) -> str:
+        """The natively composed vertical explainer base when it exists."""
+        if preset_key == "vertical" and video_rel.replace("\\", "/").endswith(
+                "assets/explainer/base.mp4"):
+            vertical = self.project / "assets" / "explainer" / "base-vertical.mp4"
+            if vertical.exists():
+                return os.path.relpath(vertical, self.project)
+        return video_rel
 
     def run(self, capture_video: str | None, preset_keys: list[str],
             skip_narration: bool, capture_id: str | None = None,
@@ -508,7 +523,7 @@ class RenderJob:
                 template=self.motion_template,
             )
             cmd = render_mod.build_ffmpeg_cmd(
-                video_rel, output, preset,
+                self._video_for_preset(video_rel, preset.key), output, preset,
                 captions=captions_rel,
                 narration=narration_file,  # mixed track maps 1:a
                 motion=motion_filter,
