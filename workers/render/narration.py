@@ -14,11 +14,15 @@ When not configured (or on any failure) narration is skipped and the capture's
 own audio is used — verification must never depend on TTS being available.
 """
 
+import hashlib
 import ipaddress
+import logging
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Final, Optional
+from urllib.parse import urlparse
+
+log = logging.getLogger("render.narration")
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
@@ -148,18 +152,19 @@ def synthesize(text: str, out_path: Path, *,
     provider = "local" if local else "openai-compatible"
     model_id = model or model_for(language)
     voice_id = voice or voice_for(language)
-    cache_key = _costing().tts_cache_key(text, voice=voice_id, model=model_id)
+    endpoint = urlparse(base)
+    cache_key = _costing().tts_cache_key(
+        text, voice=voice_id, model=model_id,
+        provider=f"{endpoint.netloc}{endpoint.path}".rstrip("/"))
     reservation_id = None
 
     if cost is not None:
-        cached = cost.cache_lookup("tts", cache_key)
-        if isinstance(cached, dict) and cached.get("path"):
-            cached_path = Path(cached["path"])
-            if cached_path.exists() and cached_path.stat().st_size > 0:
-                cost.report("tts", units=0, provider=provider,
-                            model=model_id, unit_type="chars",
-                            meta={"cache_hit": True, "local": local})
-                return cached_path
+        cached_path = _cached_audio(cost.cache_lookup("tts", cache_key), out_path)
+        if cached_path is not None:
+            cost.report("tts", units=0, provider=provider,
+                        model=model_id, unit_type="chars",
+                        meta={"cache_hit": True, "local": local})
+            return cached_path
         if not local:
             # G04: reserve the predicted char count atomically before the
             # call; the usage report after success settles this reservation.
@@ -187,7 +192,7 @@ def synthesize(text: str, out_path: Path, *,
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(resp.content)
         if cost is not None:
-            cost.cache_store("tts", cache_key, {"path": str(out_path)})
+            cost.cache_store("tts", cache_key, _shareable_entry(out_path))
             cost.report("tts", units=len(text or ""), provider=provider,
                         model=model_id, unit_type="chars",
                         settle_reservation=reservation_id,
@@ -197,6 +202,70 @@ def synthesize(text: str, out_path: Path, *,
         # G04: a failed/sent TTS request leaves its reservation standing —
         # the provider may still bill for it; unknown usage is not free.
         return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _storage():
+    """Configured object storage (None when MTK_STORAGE_BACKEND is unset)."""
+    from object_storage import make_from_env
+    return make_from_env()
+
+
+def _shareable_entry(audio: Path) -> dict:
+    """Cache value for a fresh synthesis (G25).
+
+    With object storage configured the audio is uploaded content-addressed
+    and the entry carries its ref + sha256, so ANY render host can reuse it.
+    The local path stays as a same-host fast path (and for setups without
+    storage, which keep the previous single-host behaviour).
+    """
+    entry: dict = {"path": str(audio), "sha256": _sha256_file(audio)}
+    try:
+        storage = _storage()
+        if storage is not None:
+            from object_storage import tts_key
+            entry["ref"] = storage.put(audio, tts_key(entry["sha256"]))
+    except Exception as exc:  # noqa: BLE001 — sharing is an optimisation
+        log.warning("narration audio not shared to storage: %s", exc)
+    return entry
+
+
+def _cached_audio(entry, out_path: Path) -> Optional[Path]:
+    """A verified local copy of cached narration, or None (= cache miss).
+
+    Order: the original file on this host; else download the shared ref next
+    to `out_path`. Either way the bytes must match the recorded sha256 — a
+    truncated or replaced file is a miss, never silently reused.
+    """
+    if not isinstance(entry, dict):
+        return None
+    expected = entry.get("sha256")
+    local = Path(entry["path"]) if entry.get("path") else None
+    if local is not None and local.is_file() and local.stat().st_size > 0:
+        if not expected or _sha256_file(local) == expected:
+            return local
+    ref = entry.get("ref")
+    if not ref or not expected:
+        return None
+    try:
+        from object_storage import materialize
+        fetched = materialize(str(ref), out_path.parent / "shared-cache")
+    except Exception as exc:  # noqa: BLE001 — a miss, not a failure
+        log.warning("shared narration audio unavailable: %s", exc)
+        return None
+    if fetched is None or not Path(fetched).is_file():
+        return None
+    if _sha256_file(Path(fetched)) != expected:
+        log.warning("shared narration audio failed its sha256 check — re-synthesizing")
+        return None
+    return Path(fetched)
 
 
 def synthesize_all(segments: list[str], out_dir: Path,

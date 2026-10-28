@@ -255,7 +255,18 @@ def extraction_cache_key(model: str, text: str) -> str:
     return f"{sha256_of(text[:8000])}:{model}"
 
 
+#: Bump when the narration request or stored-value shape changes, so stale
+#: entries miss instead of being reused under a different meaning (G25).
+TTS_CACHE_VERSION = "v2"
+
+
 def tts_cache_key(text: str, *, voice: str, model: str,
-                  response_format: str = "mp3") -> str:
-    """`tts:{sha256(text+voice+model)}` — unchanged narration ⇒ free."""
-    return sha256_of(text, voice, model, response_format)
+                  response_format: str = "mp3", provider: str = "",
+                  speed: str = "1.0") -> str:
+    """`tts:{sha256(version+provider+text+voice+model+format+speed)}`.
+
+    Context-complete (G25): the same words from a different endpoint, voice,
+    speed or format are different audio, so they must not share an entry.
+    """
+    return sha256_of(TTS_CACHE_VERSION, provider, text, voice, model,
+                     response_format, speed)
