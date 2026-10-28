@@ -6124,3 +6124,43 @@ def test_approve_and_queue_is_atomic_per_target_and_rejects_stale_previews(auth_
         assert entry["ok"] is True and entry["already_queued"] is True
     rows = _run("SELECT count(*) AS n FROM schedules WHERE offer_id = $1", offer_id)
     assert rows[0]["n"] == 2, "approve-and-queue never creates posts"
+
+
+def test_attention_lists_due_and_contradicted_research_claims_of_current_brief(auth_client):
+    """EP-03 follow-up: a due claim recheck or a standing contradiction on the
+    CURRENT brief is operator attention; superseded versions are not."""
+    provider = f"ResearchAttention {uuid.uuid4()}"
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": provider, "category": "research_intro", "offer_type": "trend_topic",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    past = "2026-01-01T00:00:00+00:00"
+
+    old = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "claims": [{"claim_text": "Superseded claim, recheck long overdue.",
+                    "claim_class": "author_reported", "recheck_at": past}],
+    })
+    assert old.status_code == 201, old.text
+    current = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "claims": [
+            {"claim_text": "Current claim whose recheck is due.",
+             "claim_class": "author_reported", "recheck_at": past},
+            {"claim_text": "Current claim a reviewer found contradicted.",
+             "claim_class": "editorial_analysis", "status": "contradicted"},
+            {"claim_text": "Current claim, fine, recheck in the future.",
+             "claim_class": "author_reported", "recheck_at": "2099-01-01T00:00:00+00:00"},
+        ],
+    })
+    assert current.status_code == 201, current.text
+    due_id, contradicted_id, future_id = [c["id"] for c in current.json()["claims"]]
+    old_id = old.json()["claims"][0]["id"]
+
+    attention = auth_client.get("/attention", headers=SVC).json()
+    ours = {i["entity_id"]: i for i in attention["items"] if i["kind"] == "research_claim"}
+    assert ours[contradicted_id]["severity"] == "error"
+    assert ours[due_id]["severity"] == "warning"
+    assert future_id not in ours and old_id not in ours
+    assert ours[due_id]["href"] == f"/offers/{offer_id}#research"

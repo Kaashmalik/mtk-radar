@@ -9,6 +9,7 @@ import OfferActions from "../../review/OfferActions";
 import { PlaybackReview } from "./PlaybackReview";
 import RedactionReview from "./RedactionReview";
 import { ReleaseReadiness } from "./ReleaseReadiness";
+import ResearchPanel, { type ResearchBrief } from "./ResearchPanel";
 import ScheduleForm from "./ScheduleForm";
 import SnapshotInspector from "./SnapshotInspector";
 import { apiFetch } from "@/lib/api";
@@ -253,6 +254,21 @@ async function getImpact(id: string): Promise<ImpactRow | null> {
   }
 }
 
+type ResearchState =
+  | { status: "ok"; current: ResearchBrief | null; versions: number }
+  | { status: "unavailable" };
+
+async function getResearch(id: string): Promise<ResearchState> {
+  try {
+    const res = await apiFetch(`/offers/${id}/research`, { cache: "no-store" });
+    if (!res.ok) return { status: "unavailable" };
+    const body = (await res.json()) as { current: ResearchBrief | null; briefs?: unknown[] };
+    return { status: "ok", current: body.current ?? null, versions: body.briefs?.length ?? 0 };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 export default async function OfferPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const offer = await getOffer(id);
@@ -262,7 +278,9 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
     getRenders(id),
     getSources(),
   ]);
-  const [corrections, impact] = await Promise.all([getCorrections(id), getImpact(id)]);
+  const [corrections, impact, research] = await Promise.all([
+    getCorrections(id), getImpact(id), getResearch(id),
+  ]);
 
   if (!offer) {
     return (
@@ -344,6 +362,18 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
             conflicts={extraction.conflicts as ExtractionConflict[]}
             fields={extraction.fields ?? {}}
           />
+        )}
+      </section>
+
+      <section className="card" id="research">
+        <h2>Research brief &amp; claim ledger</h2>
+        {research.status === "unavailable" ? (
+          <p className="notice small" role="status">
+            Research data unavailable — the API did not answer. This is not
+            &ldquo;no claims&rdquo;; reload once it is reachable.
+          </p>
+        ) : (
+          <ResearchPanel offerId={offer.id} brief={research.current} versions={research.versions} />
         )}
       </section>
 

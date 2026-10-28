@@ -43,6 +43,15 @@ type QueueRow = {
   preset_fit: number | null;
   rank_pinned: number | null;
   rank: number;
+  /** EP-03 track: decides capture/render requirements and copy rules. */
+  content_type?: string | null;
+};
+
+const TRACK_LABEL: Record<string, string> = {
+  explainer: "Explainer",
+  tested_tutorial: "Tested tutorial",
+  claim_walkthrough: "Claim walkthrough",
+  offer: "Offer",
 };
 
 /** `status` distinguishes a genuinely empty queue from an outage (nothing
@@ -314,12 +323,19 @@ export default async function QueuePage() {
                     {row.rank_pinned !== null ? `📌 ${row.rank_pinned}` : row.rank.toFixed(0)}
                   </span>
                   <div className="pq-main">
-                    <strong>{row.title}</strong>
+                    <strong>
+                      {row.offer_id ? <a href={`/offers/${row.offer_id}#research`}>{row.title}</a> : row.title}
+                    </strong>
                     <span className="muted small">
                       {row.provider ?? "unknown"} · {row.kind} · rank {row.rank.toFixed(0)}
                       {row.offer_state ? ` · ${row.offer_state}` : ""}
                     </span>
                     <span className="pq-chips">
+                      {row.content_type && (
+                        <span className="tag tag-accent" title="Content track (research brief)">
+                          {TRACK_LABEL[row.content_type] ?? row.content_type}
+                        </span>
+                      )}
                       {(row.velocity ?? 0) > 0 && (
                         <span className="pill pill-accent" title="Score gained per hour between radar observations">
                           🔥 {(row.velocity as number).toFixed(1)}/h
