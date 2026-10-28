@@ -71,18 +71,6 @@ def plan_scenes(offer: dict, brief: dict,
         storyboard.suggest(offer, brief, page_captures), total_s)
 
 
-def scenes_from_storyboard(saved: list[dict], brief: dict, page_captures: list[dict],
-                           total_s: Optional[float] = None) -> tuple[list[dict], list[str]]:
-    """A reviewer-saved storyboard, re-validated against TODAY's ledger.
-
-    A claim contradicted since the storyboard was saved (or a page capture
-    that disappeared) is dropped, never drawn; the problems are returned so
-    the render log and manifest say what changed.
-    """
-    scenes, problems = storyboard.validate(saved, brief, page_captures)
-    return storyboard.apply_timing(scenes, total_s), problems
-
-
 def _ass_text(value: str) -> str:
     """Escape for an ASS dialogue line: braces open override blocks and a
     backslash starts a tag, so neither may pass through from claim text."""
@@ -177,19 +165,30 @@ def base_video_cmd(cards_rel: str, out_rel: str, duration_s: float,
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
            "-f", "lavfi",
            "-i", f"color=c={BACKGROUND}:s={width}x{height}:r={FPS}:d={duration_s:.3f}"]
-    for image, _start, end in pages:
-        cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{end:.3f}", "-i", image]
+    target_h = int(target_w * 9 / 16) // 2 * 2  # screenshots are 16:9 viewports
+    for image, start, end in pages:
+        # Loop each screenshot ONLY for its own scene: frames outside the
+        # scene are never decoded or scaled.
+        span = max(0.5, end - start)
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{span:.3f}", "-i", image]
     graph = ["[0:v]noise=alls=4:allf=t,vignette=PI/5[bg0]"]
     for index, (_image, start, end) in enumerate(pages):
         span = max(0.5, end - start)
+        frames = max(1, int(round(span * FPS)))
         fade = min(0.35, span / 4)
+        # zoompan (long-standing filter, no `t` in scale) gives a 5 % push-in
+        # on the scene's own timeline; setpts then places it at the scene
+        # start, and overlay shows the main video alone until then.
         graph.append(
-            f"[{index + 1}:v]scale=w='{target_w}*(1+0.05*max(0,t-{start:.3f})/{span:.3f})'"
-            f":h=-2:eval=frame:flags=lanczos,format=yuva420p,"
-            f"fade=t=in:st={start:.3f}:d={fade:.3f}:alpha=1,"
-            f"fade=t=out:st={end - fade:.3f}:d={fade:.3f}:alpha=1[p{index}]")
+            f"[{index + 1}:v]scale={target_w}:{target_h}:flags=lanczos,"
+            f"zoompan=z='min(1.05,1+0.05*on/{frames})':x='iw/2-(iw/zoom/2)'"
+            f":y='ih/2-(ih/zoom/2)':d=1:s={target_w}x{target_h}:fps={FPS},"
+            f"format=yuva420p,"
+            f"fade=t=in:st=0:d={fade:.3f}:alpha=1,"
+            f"fade=t=out:st={span - fade:.3f}:d={fade:.3f}:alpha=1,"
+            f"setpts=PTS-STARTPTS+{start:.3f}/TB[p{index}]")
         graph.append(
-            f"[bg{index}][p{index}]overlay=x=(W-w)/2:y=(H-h)/2:eval=frame:"
+            f"[bg{index}][p{index}]overlay=x=(W-w)/2:y=(H-h)/2:"
             f"enable='between(t,{start:.3f},{end:.3f})'[bg{index + 1}]")
     graph.append(f"[bg{len(pages)}]subtitles={cards_rel}[vout]")
     return cmd + [

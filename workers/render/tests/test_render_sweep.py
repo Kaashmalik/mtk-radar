@@ -400,6 +400,10 @@ def test_explainer_base_writes_cards_manifest_and_covers_the_speech(tmp_path, mo
     monkeypatch.setattr(render_main.render_mod, "run", fake_run)
     job = render_main.RenderJob.__new__(render_main.RenderJob)
     job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = __import__("httpx").Client(  # an API without the storyboard route
+        transport=__import__("httpx").MockTransport(
+            lambda request: __import__("httpx").Response(404)),
+        base_url="http://api")
     brief = {"id": "b1", "version": 1, "content_type": "explainer",
              "viewer_question": "Does it work?",
              "claims": [{"id": "c1", "claim_text": "It improved recall by 12%.",
@@ -427,6 +431,10 @@ def test_explainer_base_failure_is_loud(tmp_path, monkeypatch):
                         lambda cmd, cwd: subprocess.CompletedProcess(cmd, 1, "", "boom"))
     job = render_main.RenderJob.__new__(render_main.RenderJob)
     job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = __import__("httpx").Client(  # an API without the storyboard route
+        transport=__import__("httpx").MockTransport(
+            lambda request: __import__("httpx").Response(404)),
+        base_url="http://api")
     brief = {"id": "b", "version": 1, "content_type": "explainer", "viewer_question": "Q?",
              "claims": []}
     with pytest.raises(RuntimeError, match="explainer base render failed"):
@@ -477,7 +485,8 @@ def test_saved_storyboard_drives_the_explainer_and_verifies_page_images(tmp_path
 
     def handler(request):
         if request.url.path.endswith("/storyboard"):
-            return httpx.Response(200, json={"current": {"version": 4, "scenes": saved},
+            return httpx.Response(200, json={"current": {"version": 4, "brief_id": "b1",
+                                                         "scenes": saved},
                                              "page_captures": pages})
         return httpx.Response(200, content=png)
 
@@ -501,3 +510,39 @@ def test_saved_storyboard_drives_the_explainer_and_verifies_page_images(tmp_path
     assert any("p2" in d for d in manifest["dropped"]), "tampered screenshot never drawn"
     assert (tmp_path / "assets/explainer/pages/p1.png").read_bytes() == png
     assert "assets/explainer/pages/p1.png" in commands[0]
+
+
+def _storyboard_job(tmp_path, handler):
+    import httpx
+
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    return job
+
+
+def test_transient_storyboard_api_error_stops_the_render_instead_of_guessing(tmp_path):
+    """Review fix: a 5xx must not silently swap the reviewer's storyboard
+    for the auto-suggestion."""
+    import httpx
+
+    job = _storyboard_job(tmp_path, lambda request: httpx.Response(503))
+    brief = {"id": "b1", "version": 1, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": []}
+    with pytest.raises(httpx.HTTPStatusError):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=10.0)
+
+
+def test_storyboard_saved_for_an_older_brief_is_refused(tmp_path, monkeypatch):
+    import httpx
+
+    saved = {"version": 3, "brief_id": "old-brief", "scenes": [{"kind": "title", "heading": "Q"}]}
+    job = _storyboard_job(tmp_path, lambda request: httpx.Response(
+        200, json={"current": saved, "page_captures": []}))
+    monkeypatch.setattr(render_main.render_mod, "run",
+                        lambda cmd, cwd: pytest.fail("must not render"))
+    brief = {"id": "new-brief", "version": 2, "content_type": "explainer",
+             "viewer_question": "Q?", "claims": []}
+    with pytest.raises(RuntimeError, match="older research brief"):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=10.0)
+

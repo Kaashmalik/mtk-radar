@@ -114,10 +114,14 @@ def test_page_scenes_are_overlaid_with_motion_and_fades():
     cmd = base_video_cmd("c.ass", "b.mp4", 20, "landscape",
                          pages=[("assets/explainer/pages/p1.png", 4.0, 10.0)])
     joined = " ".join(cmd)
-    assert "-loop 1 -framerate 30 -t 10.000 -i assets/explainer/pages/p1.png" in joined
+    assert "-loop 1 -framerate 30 -t 6.000 -i assets/explainer/pages/p1.png" in joined, \
+        "the screenshot is looped only for its own scene"
     graph = cmd[cmd.index("-filter_complex") + 1]
-    assert "scale=w='1612*(1+0.05*max(0,t-4.000)/6.000)'" in graph, "slow push-in"
-    assert "fade=t=in:st=4.000" in graph and "alpha=1" in graph
+    assert "scale=1612:906" in graph
+    assert "zoompan=z='min(1.05,1+0.05*on/180)'" in graph, "slow push-in, no `t` in scale"
+    assert "setpts=PTS-STARTPTS+4.000/TB" in graph, "placed at the scene start"
+    assert "fade=t=in:st=0" in graph and "alpha=1" in graph
+    assert "eval=frame" not in graph
     assert "enable='between(t,4.000,10.000)'" in graph
     assert graph.endswith("[bg1]subtitles=c.ass[vout]")
     assert cmd[cmd.index("-map") + 1] == "[vout]"

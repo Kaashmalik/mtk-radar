@@ -115,8 +115,14 @@ async def get_storyboard(offer_id: uuid.UUID) -> dict:
     current = await _current_storyboard(pool, offer_id)
     problems: list[str] = []
     if current and brief:
-        # What the renderer would drop TODAY (e.g. a claim contradicted since).
-        _, problems = storyboard.validate(current["scenes"], brief, pages)
+        if current.get("brief_id") and current["brief_id"] != str(brief["id"]):
+            # The renderer refuses this storyboard (claim ids are per brief).
+            problems = [f"storyboard v{current['version']} was saved for an older research "
+                        f"brief (now v{brief.get('version')}) — review and save it again; "
+                        "renders are blocked until then"]
+        else:
+            # What the renderer would drop TODAY (e.g. a claim contradicted since).
+            _, problems = storyboard.validate(current["scenes"], brief, pages)
     return {
         "brief": ({"id": str(brief["id"]), "version": brief.get("version"),
                    "content_type": brief.get("content_type")} if brief else None),
