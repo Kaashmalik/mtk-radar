@@ -105,22 +105,24 @@ Total ≈ 20–29 developer-days. Progress is recorded in
 [`ep-implementation-log.md`](ep-implementation-log.md) with executed vs
 unproven checks, following the existing convention.
 
-## Still open after the 2026-10-28 implementation pass
+## Second implementation pass (2026-10-28) — previously open items
 
-Ordered by value; each needs either live infrastructure or a decision:
+| Item | Commit | Notes |
+|---|---|---|
+| EP-07 durable outbox (cost telemetry + notifications) + failure-injection tests | `5331ba2`, `e09d869` | migration 041 `usage_events.event_id`; compose `outbox-data` volume |
+| G25/V8 shared, content-addressed, sha256-verified narration audio | `fb5761e` | needs `MTK_STORAGE_BACKEND` to share across hosts |
+| Q1 YouTube quota reservation ledger | `998bfdf` | migration 042; copy real limits/costs from the Cloud console |
+| G23 UX TikTok creator info + consent screen | `7307887` | migration 043; consent enforced by the worker |
+| V9 font-measured caption widths | `e71aa76` | Pillow pinned; install the Urdu Nastaliq face for Urdu |
+| V5 activity-following vertical reframing | `b2be8a8` | opt-in `MTK_VERTICAL_REFRAME=auto` |
+
+## Still open
 
 1. **Owner:** H1 (personal-data export in a public repo), H2 (Actions billing).
-2. **M9 proof:** run `pnpm verify` with Postgres (the new integration tests —
-   approve-and-queue, job fencing, research attention, explainer renders,
-   videos-vs-posts — have only been written, not executed); one real FFmpeg
-   render of a capture AND an explainer through QC; one private YouTube post.
-3. **Q1:** bucketed YouTube quota reservation ledger (needs a migration).
-4. **TikTok consent UI:** surface `creator_info` (handle, offered privacy,
-   disabled interactions) in the schedule form before a Direct Post.
-5. **V8/G25:** content-addressed shared TTS audio in object storage (the cache
-   still stores a worker-local path).
-6. **EP-07 rest:** durable notification/cost-telemetry outbox; failure-
-   injection suite (timeout, duplicate delivery, Redis/API outage, worker death).
-7. **V5/V9 for captures:** keyframed vertical reframing from capture callouts;
-   font-metric caption widths (Urdu Nastaliq).
-
+2. **M9 proof on a full machine:** follow
+   [`verify-at-home-2026-10-28.md`](verify-at-home-2026-10-28.md) — Postgres
+   integration tests, real FFmpeg renders, one private YouTube post.
+3. **Validate then decide defaults:** run `MTK_VERTICAL_REFRAME=auto` on a
+   few real captures before making it the default.
+4. **Beat/storyboard editor** for scenes (V7 UI) and the public-page capture
+   recipe worker (M2 second half) — product work, not gaps in safety.

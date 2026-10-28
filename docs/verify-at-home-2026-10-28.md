@@ -35,6 +35,9 @@ pnpm verify          # lint → tests on a REAL Postgres → typecheck → build
 | `test_research_explainer_renders_without_capture_only_as_official_explainer` | M3 API gate + candidates |
 | `test_cost_per_video_counts_unique_packages_not_cross_posts` | M7 unit economics |
 | `test_same_platform_within_an_hour_is_flagged_as_conflict` (existing) | G26 rewrite kept behaviour |
+| `test_replayed_usage_event_is_counted_once` | outbox replay dedup (migration 041) |
+| `test_youtube_quota_ledger_reserves_atomically_and_refuses_past_the_limit` | Q1 ledger (migration 042) |
+| `test_tiktok_options_and_consent_are_part_of_the_hashed_package` | TikTok consent (migration 043) |
 
 If one fails, it is a real defect in that commit — fix the code, not the test.
 
@@ -95,6 +98,21 @@ Keep notifications off — the recorder sees everything in that region.
   Queue says "Queue unavailable", not "Empty".
 - Theme switch (system → light → dark) at the bottom of the sidebar, and the
   mobile drawer at a narrow window width.
+
+## 5b. Second-pass features
+
+- **Quota:** Settings → *YouTube quota today* appears; after a YouTube upload
+  the account shows the reserved/consumed units and the Pacific reset time.
+- **Outbox:** stop the API, let a render worker report usage, start the API
+  again → the usage appears once (check the `outbox-data` volume empties).
+- **TikTok:** with a connected TikTok account, wait one publishing sweep →
+  the schedule form shows `@handle`, the creator's privacy levels (no
+  default), interaction toggles and the consent line; Schedule stays
+  disabled until consent is ticked.
+- **Captions:** a render's QC report shows `width_method: font:DejaVuSans.ttf`.
+- **Vertical reframe:** render one capture with `MTK_VERTICAL_REFRAME=auto`;
+  compare the 9:16 export with the default. Keep it opt-in until it looks
+  right on several captures.
 
 ## 6. One private YouTube post
 
