@@ -81,7 +81,8 @@ class FakeApi:
 
 
 def test_drain_reports_each_page_and_settles_the_job(tmp_path, monkeypatch):
-    monkeypatch.delenv("MTK_STORAGE_BACKEND", raising=False)
+    monkeypatch.setenv("MTK_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("MTK_STORAGE_LOCAL_ROOT", str(tmp_path / "bucket"))
     rows = [
         {"id": "c1", "url": "https://example.org/paper", "status": "requested"},
         {"id": "c2", "url": "https://intranet.local/", "status": "requested"},
@@ -102,6 +103,7 @@ def test_drain_reports_each_page_and_settles_the_job(tmp_path, monkeypatch):
                if path.startswith("/page-captures/")}
     assert results["c1"]["status"] == "ok" and results["c1"]["title"] == "Paper title"
     assert len(results["c1"]["image_sha256"]) == 64
+    assert results["c1"]["image_ref"] == "local://pages/offer-1/c1.png"
     assert (tmp_path / "offer-1" / "c1.png").read_bytes() == b"\x89PNG-bytes"
     assert results["c2"]["status"] == "refused"
     assert results["c3"]["status"] == "failed" and "timed out" in results["c3"]["detail"]
@@ -169,7 +171,11 @@ class _FakePlaywright:
             def close(self):
                 pass
 
-        self.chromium = SimpleNamespace(launch=lambda **kw: Browser())
+        def launch(**kw):
+            fake.launch_kwargs = kw
+            return Browser()
+
+        self.chromium = SimpleNamespace(launch=launch)
         return self
 
     def __exit__(self, *exc):
@@ -181,11 +187,14 @@ def test_capture_aborts_private_subrequests_in_a_fresh_sandboxed_context():
     fake = _FakePlaywright(["https://cdn.example.org/app.js",
                             "https://intranet.local/beacon",
                             "http://metadata.internal/latest"], "https://example.org/paper")
-    shot = pc.capture("https://example.org/paper", guard, playwright_factory=fake)
+    shot = pc.capture("https://example.org/paper", guard, playwright_factory=fake,
+                      proxy_factory=_DummyProxy)
     assert shot.png == b"PNG" and shot.title == "A public page" and shot.http_status == 200
     assert fake.decisions["https://cdn.example.org/app.js"] == "continue"
     assert fake.decisions["https://intranet.local/beacon"] == "abort"
     assert fake.decisions["http://metadata.internal/latest"] == "abort"
+    assert fake.launch_kwargs["proxy"] == {"server": "http://127.0.0.1:9"}
+    assert "--proxy-bypass-list=<-loopback>" in fake.launch_kwargs["args"]
     kwargs = fake.context_kwargs
     assert kwargs["accept_downloads"] is False and kwargs["service_workers"] == "block"
     assert "storage_state" not in kwargs, "never a logged-in profile"
@@ -195,4 +204,85 @@ def test_redirect_to_a_private_host_is_refused():
     guard = pc.HostGuard(resolver=_resolver(PUBLIC))
     fake = _FakePlaywright([], "https://intranet.local/after-redirect")
     with pytest.raises(pc.Refused, match="non-public"):
-        pc.capture("https://example.org/paper", guard, playwright_factory=fake)
+        pc.capture("https://example.org/paper", guard, playwright_factory=fake,
+                   proxy_factory=_DummyProxy)
+
+
+class _DummyProxy:
+    url = "http://127.0.0.1:9"
+    refused: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+# ------------------------------------------------- review fixes: robustness
+
+class _Resp(SimpleNamespace):
+    pass
+
+
+def _worker(tmp_path, capture_fn=None):
+    def ok_capture(url, guard):
+        return pc.Shot(url, "T", 200, b"PNG")
+    return pc.Worker("http://api", tmp_path, guard=pc.HostGuard(resolver=_resolver(PUBLIC)),
+                     capture_fn=capture_fn or ok_capture, fetch=_fetch(404))
+
+
+def test_missing_storage_is_reported_as_failed_not_a_local_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("MTK_STORAGE_BACKEND", raising=False)
+    worker = _worker(tmp_path)
+    worker.api = FakeApi([{"id": "c1", "url": "https://example.org/a", "status": "requested"}])
+    worker.drain()
+    body = [b for p, b in worker.api.posts if p == "/page-captures/c1/result"][0]
+    assert body["status"] == "failed" and "MTK_STORAGE_BACKEND" in body["detail"]
+    assert "image_ref" not in body
+
+
+def test_unrecorded_result_makes_the_job_retry_instead_of_succeeding(tmp_path, monkeypatch):
+    monkeypatch.setenv("MTK_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("MTK_STORAGE_LOCAL_ROOT", str(tmp_path / "bucket"))
+    worker = _worker(tmp_path)
+    api = FakeApi([{"id": "c1", "url": "https://example.org/a", "status": "requested"}])
+    original = api.post
+
+    def post(path, json=None):
+        if path.startswith("/page-captures/"):
+            api.posts.append((path, json))
+            return _Resp(status_code=500, json=lambda: {})
+        return original(path, json)
+
+    api.post = post
+    worker.api = api
+    worker.drain()
+    job = [b for p, b in api.posts if p == "/jobs/job-1/result"][0]
+    assert job["ok"] is False and job["retry_after_s"] == 120
+    assert "not recorded" in job["detail"]
+
+
+def test_queue_or_job_errors_never_escape_drain(tmp_path):
+    import httpx
+
+    worker = _worker(tmp_path)
+
+    class Down:
+        def post(self, path, json=None):
+            raise httpx.ConnectError("api down")
+
+    worker.api = Down()
+    assert worker.drain() == 0, "claim failure ends the sweep quietly"
+
+    api = FakeApi([])
+
+    def broken_get(path):
+        raise httpx.ReadTimeout("slow")
+
+    api.get = broken_get
+    worker.api = api
+    assert worker.drain() == 0
+    job = [b for p, b in api.posts if p == "/jobs/job-1/result"][0]
+    assert job["ok"] is False and "job failed" in job["detail"], "the claimed job is settled"
+
