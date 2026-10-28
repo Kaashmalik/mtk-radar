@@ -241,7 +241,12 @@ async def page_capture_image(capture_id: uuid.UUID, request: Request):
     )
     if not row or not row["image_ref"]:
         raise HTTPException(status_code=404, detail="page capture has no image")
-    return _serve_ref(str(row["image_ref"]), request)
+    ref = str(row["image_ref"])
+    if not is_managed_ref(ref):
+        # Screenshots are only ever served from managed storage — never a
+        # host path (the legacy path fallback would open any readable file).
+        raise HTTPException(status_code=404, detail="page capture image is not in storage")
+    return _serve_ref(ref, request)
 
 
 # ------------------------------------------------------- media GC (WP-G §5.6.4)

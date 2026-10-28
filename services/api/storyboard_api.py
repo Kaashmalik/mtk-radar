@@ -44,6 +44,25 @@ from source_adapters.egress import EgressError, EgressPolicy, validate_url  # no
 router = APIRouter(tags=["storyboard"])
 
 MAX_URLS_PER_REQUEST = 10
+#: A request no worker has answered within this window is marked failed, so
+#: the editor never shows a capture that silently never finishes.
+STALE_REQUEST_AFTER = "1 hour"
+
+
+def expected_image_ref_ok(ref: str, offer_id: str, capture_id: str) -> bool:
+    """Only the managed storage key of THIS capture is acceptable.
+
+    A worker credential could otherwise register any path (e.g. the API
+    host's .env) and have /page-captures/{id}/image serve it.
+    """
+    key = f"pages/{offer_id}/{capture_id}.png"
+    if ref == f"local://{key}":
+        return True
+    if ref.startswith("s3://"):
+        bucket_and_key = ref[len("s3://"):]
+        bucket, _, rest = bucket_and_key.partition("/")
+        return bool(bucket) and "/" not in bucket and rest == key
+    return False
 
 
 def _require_human(request: Request, what: str) -> str:
@@ -73,6 +92,17 @@ def _capture_row(row) -> dict[str, Any]:
 
 
 async def _page_captures(pool, offer_id: uuid.UUID) -> list[dict]:
+    await pool.execute(
+        f"""
+        UPDATE page_captures
+        SET status = 'failed', captured_at = now(),
+            detail = 'no page-capture worker answered within {STALE_REQUEST_AFTER} — '
+                     'check that the page-capture service is running, then request again'
+        WHERE offer_id = $1 AND status = 'requested'
+          AND created_at < now() - interval '{STALE_REQUEST_AFTER}'
+        """,
+        offer_id,
+    )
     rows = await pool.fetch(
         """
         SELECT id, offer_id, url, final_url, title, status, detail, image_ref,
@@ -258,6 +288,15 @@ async def page_capture_result(capture_id: uuid.UUID, body: PageCaptureResultIn) 
     if body.status == "ok" and not (body.image_ref and body.image_sha256):
         raise HTTPException(status_code=422, detail="an ok capture needs image_ref + image_sha256")
     pool = db.get()
+    offer_id = await pool.fetchval("SELECT offer_id FROM page_captures WHERE id = $1", capture_id)
+    if offer_id is None:
+        raise HTTPException(status_code=404, detail="page capture not found")
+    if body.image_ref is not None and not expected_image_ref_ok(
+            body.image_ref, str(offer_id), str(capture_id)):
+        raise HTTPException(
+            status_code=422,
+            detail="image_ref must be this capture's managed storage key "
+                   "(pages/<offer>/<capture>.png in local:// or s3://)")
     row = await pool.fetchrow(
         """
         UPDATE page_captures
