@@ -99,3 +99,13 @@ def test_scene_manifest_is_hashed_and_deterministic():
     assert a["sha256"] == b["sha256"] and len(a["sha256"]) == 64
     assert a["brief_version"] == 2 and a["track"] == "explainer"
     assert {cid for s in a["scenes"] for cid in s["claim_ids"]} == {"c1", "c2"}
+
+
+def test_vertical_cards_and_base_are_composed_natively():
+    scenes = plan_scenes(OFFER, _brief())
+    ass = cards_ass(scenes, "vertical")
+    assert "PlayResX: 1080" in ass and "PlayResY: 1920" in ass
+    assert "Style: Body,DejaVu Sans,66" in ass or ",66," in ass, "larger type on 9:16"
+    cmd = base_video_cmd("c.ass", "b.mp4", 5, "vertical")
+    assert "s=1080x1920" in " ".join(cmd)
+

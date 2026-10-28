@@ -140,21 +140,35 @@ def _ts(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def cards_ass(scenes: list[dict]) -> str:
+#: Frame sizes per delivery orientation. The vertical base is composed
+#: natively for 9:16 (larger type, narrower margins) instead of shrinking the
+#: 16:9 cards into a strip on the Shorts/Reels/TikTok export.
+FRAMES: Final[dict[str, tuple[int, int]]] = {
+    "landscape": (WIDTH, HEIGHT),
+    "vertical": (HEIGHT, WIDTH),
+}
+
+
+def cards_ass(scenes: list[dict], orientation: str = "landscape") -> str:
     """Styled card text for every scene (libass wraps long claims)."""
+    width, height = FRAMES[orientation]
+    vertical = orientation == "vertical"
+    title, kicker, body, source = (84, 44, 66, 36) if vertical else (76, 40, 58, 34)
+    side = 90 if vertical else 180
+    kicker_v, source_v = (560, 520) if vertical else (250, 230)
     header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: {WIDTH}
-PlayResY: {HEIGHT}
+PlayResX: {width}
+PlayResY: {height}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Title,{FONT},76,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,2,5,180,180,0,1
-Style: Kicker,{FONT},40,&H00FFB37B,&H00FFB37B,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,8,180,180,250,1
-Style: Body,{FONT},58,&H00F0EAE8,&H00F0EAE8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,2,5,200,200,0,1
-Style: Source,{FONT},34,&H00C3B4A8,&H00C3B4A8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,180,180,230,1
+Style: Title,{FONT},{title},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,2,5,{side},{side},0,1
+Style: Kicker,{FONT},{kicker},&H00FFB37B,&H00FFB37B,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,8,{side},{side},{kicker_v},1
+Style: Body,{FONT},{body},&H00F0EAE8,&H00F0EAE8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,2,5,{side + 20},{side + 20},0,1
+Style: Source,{FONT},{source},&H00C3B4A8,&H00C3B4A8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,{side},{side},{source_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -176,7 +190,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(lines) + "\n"
 
 
-def base_video_cmd(cards_rel: str, out_rel: str, duration_s: float) -> list[str]:
+def base_video_cmd(cards_rel: str, out_rel: str, duration_s: float,
+                   orientation: str = "landscape") -> list[str]:
     """Mid-tone background + light temporal grain + cards → silent base MP4.
 
     Paths are RELATIVE (run with cwd = project dir) like render.py, so the
@@ -184,10 +199,11 @@ def base_video_cmd(cards_rel: str, out_rel: str, duration_s: float) -> list[str]
     """
     if Path(cards_rel).is_absolute() or Path(out_rel).is_absolute():
         raise ValueError("use relative paths; run with cwd=project folder")
+    width, height = FRAMES[orientation]
     return [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         "-f", "lavfi",
-        "-i", f"color=c={BACKGROUND}:s={WIDTH}x{HEIGHT}:r={FPS}:d={duration_s:.3f}",
+        "-i", f"color=c={BACKGROUND}:s={width}x{height}:r={FPS}:d={duration_s:.3f}",
         "-vf", f"noise=alls=4:allf=t,vignette=PI/5,subtitles={cards_rel}",
         "-c:v", "libx264", "-preset", "medium", "-crf", "16",
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-an",

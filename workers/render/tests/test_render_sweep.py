@@ -411,7 +411,13 @@ def test_explainer_base_writes_cards_manifest_and_covers_the_speech(tmp_path, mo
     manifest = _json.loads((tmp_path / "assets/explainer/scene_manifest.json").read_text())
     assert manifest["scenes"][1]["claim_ids"] == ["c1"] and len(manifest["sha256"]) == 64
     assert (tmp_path / "assets/explainer/cards.ass").read_text().startswith("[Script Info]")
-    assert calls and calls[0][1] == tmp_path
+    assert "PlayResX: 1080" in (tmp_path / "assets/explainer/cards-vertical.ass").read_text()
+    assert [c[0][-1] for c in calls] == ["assets/explainer/base.mp4",
+                                        "assets/explainer/base-vertical.mp4"]
+    rel = "assets/explainer/base.mp4"
+    assert job._video_for_preset(rel, "vertical").replace("\\", "/") ==         "assets/explainer/base-vertical.mp4", "9:16 export uses native vertical cards"
+    assert job._video_for_preset(rel, "landscape") == rel
+    assert job._video_for_preset("assets/captures/cap.mkv", "vertical") ==         "assets/captures/cap.mkv", "real captures keep the full-frame composition"
 
 
 def test_explainer_base_failure_is_loud(tmp_path, monkeypatch):
