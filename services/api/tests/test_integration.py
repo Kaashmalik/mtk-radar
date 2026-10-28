@@ -6216,3 +6216,27 @@ def test_research_explainer_renders_without_capture_only_as_official_explainer(a
     })
     assert refused.status_code == 422, refused.text
     assert "official_explainer" in refused.json()["detail"]
+
+
+def test_tiktok_options_and_consent_are_part_of_the_hashed_package(auth_client):
+    """G23 UX: the reviewed TikTok choices + who consented are stored in the
+    schedule metadata (inside the metadata hash); branded content cannot be
+    posted as private."""
+    marker = uuid.uuid4().hex
+    offer_id = _wpd_ready_offer(auth_client, marker)
+    branded_private = auth_client.post(f"/offers/{offer_id}/schedules", headers=AUTH, json={
+        "platform": "tiktok", "local_time": "2027-06-01T13:00:00+00:00",
+        "privacy": "private", "tiktok": {"brand_content": True, "consent": True}})
+    assert branded_private.status_code == 422, branded_private.text
+    assert "branded content" in branded_private.json()["detail"]
+
+    created = auth_client.post(f"/offers/{offer_id}/schedules", headers=AUTH, json={
+        "platform": "tiktok", "local_time": "2027-06-02T13:00:00+00:00",
+        "privacy": "private",
+        "tiktok": {"consent": True, "disable_duet": True, "creator_username": "mtk"}})
+    assert created.status_code == 201, created.text
+    row = _run("SELECT metadata::text AS m FROM schedules WHERE id = $1",
+               uuid.UUID(created.json()["id"]))[0]
+    tiktok = json.loads(row["m"])["tiktok"]
+    assert tiktok["consent"] is True and tiktok["disable_duet"] is True
+    assert tiktok["consent_by"], "the consenting reviewer is recorded"

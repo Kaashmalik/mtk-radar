@@ -28,7 +28,45 @@ type RenderOption = {
   qc_status?: string;
 };
 
-type Account = { id: string; platform: string; account_handle: string; status?: string };
+type CreatorInfo = {
+  creator_username?: string;
+  creator_nickname?: string;
+  privacy_level_options?: string[];
+  comment_disabled?: boolean;
+  duet_disabled?: boolean;
+  stitch_disabled?: boolean;
+  max_video_post_duration_sec?: number;
+};
+
+type Account = {
+  id: string;
+  platform: string;
+  account_handle: string;
+  status?: string;
+  /** TikTok: the worker's latest creator_info snapshot (G23 UX). */
+  capabilities?: CreatorInfo;
+  capabilities_checked_at?: string | null;
+};
+
+type TikTokOptions = {
+  disable_comment: boolean;
+  disable_duet: boolean;
+  disable_stitch: boolean;
+  brand_organic: boolean;
+  brand_content: boolean;
+  consent: boolean;
+};
+
+const NO_TIKTOK_OPTIONS: TikTokOptions = {
+  disable_comment: false, disable_duet: false, disable_stitch: false,
+  brand_organic: false, brand_content: false, consent: false,
+};
+
+/** Our privacy model mapped to TikTok privacy levels (others are not offered). */
+const TIKTOK_LEVEL: Record<string, string> = {
+  public: "PUBLIC_TO_EVERYONE",
+  private: "SELF_ONLY",
+};
 
 type Platform = "youtube" | "facebook" | "instagram" | "tiktok";
 
@@ -74,7 +112,7 @@ const CAPABILITIES: Record<Platform, {
 };
 const ALL_PLATFORMS = Object.keys(CAPABILITIES) as Platform[];
 
-type Target = { accountId: string; renderId: string; privacy: string };
+type Target = { accountId: string; renderId: string; privacy: string; tiktok: TikTokOptions };
 
 export default function ScheduleForm({
   offerId,
@@ -154,6 +192,34 @@ export default function ScheduleForm({
       render.qc_status === "passed",
   );
 
+  function accountFor(platform: Platform): Account | undefined {
+    const list = activeAccounts[platform] ?? [];
+    const chosen = targets[platform]?.accountId;
+    return list.find((a) => a.id === chosen) ?? (list.length === 1 ? list[0] : undefined);
+  }
+
+  function creatorFor(platform: Platform): CreatorInfo | undefined {
+    const caps = accountFor(platform)?.capabilities;
+    return caps && Object.keys(caps).length ? caps : undefined;
+  }
+
+  /** What still blocks a TikTok Direct Post in this form, or null. */
+  function tiktokProblem(): string | null {
+    const target = targets.tiktok;
+    if (!target) return null;
+    const creator = creatorFor("tiktok");
+    if (!creator) return "creator info not loaded yet (the publishing worker refreshes it)";
+    if (!target.privacy) return "choose who can view this TikTok post";
+    if (target.tiktok.brand_content && target.privacy !== "public")
+      return "branded content must be public";
+    const chosen = renders.find((r) => r.id === target.renderId);
+    const max = creator.max_video_post_duration_sec;
+    if (max && chosen?.duration_s && Number(chosen.duration_s) > max)
+      return `this creator can post at most ${max}s; pick a shorter render`;
+    if (!target.tiktok.consent) return "tick the consent declaration";
+    return null;
+  }
+
   /** Why a platform cannot be targeted right now, or null when it can. */
   function blockedReason(platform: Platform): string | null {
     if (accountsState === "loading") return "checking connected accounts…";
@@ -173,7 +239,9 @@ export default function ScheduleForm({
       [platform]: {
         accountId: activeAccounts[platform]?.length === 1 ? activeAccounts[platform][0].id : "",
         renderId: "",
-        privacy: CAPABILITIES[platform].privacy[0].value,
+        // TikTok guidelines: no default audience; the operator must choose.
+        privacy: platform === "tiktok" ? "" : CAPABILITIES[platform].privacy[0].value,
+        tiktok: NO_TIKTOK_OPTIONS,
       },
     });
   }
@@ -197,10 +265,14 @@ export default function ScheduleForm({
     };
     const pin = (platform: Platform) => {
       const target = targets[platform];
+      const creator = creatorFor(platform);
       return {
         privacy: target.privacy,
         ...(target.accountId ? { platform_account_id: target.accountId } : {}),
         ...(target.renderId ? { render_id: target.renderId } : {}),
+        ...(platform === "tiktok"
+          ? { tiktok: { ...target.tiktok, creator_username: creator?.creator_username ?? null } }
+          : {}),
       };
     };
     try {
@@ -388,12 +460,26 @@ export default function ScheduleForm({
                     value={target.privacy}
                     onChange={(e) => setTarget(platform, { privacy: e.target.value })}
                     aria-label={`${cap.label} privacy`}
+                    required
                   >
-                    {cap.privacy.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
+                    {platform === "tiktok" && <option value="" disabled>Who can view this post?</option>}
+                    {cap.privacy
+                      .filter((option) => platform !== "tiktok" || !creatorFor("tiktok")
+                        || (creatorFor("tiktok")?.privacy_level_options ?? [])
+                          .includes(TIKTOK_LEVEL[option.value]))
+                      .map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
                   </select>
                   {cap.note && <p className="muted small schedule-note">{cap.note}</p>}
+                  {platform === "tiktok" && (
+                    <TikTokPanel
+                      creator={creatorFor("tiktok")}
+                      options={target.tiktok}
+                      problem={tiktokProblem()}
+                      onChange={(patch) => setTarget("tiktok", { tiktok: { ...target.tiktok, ...patch } })}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -407,7 +493,7 @@ export default function ScheduleForm({
           className="btn btn-primary"
           disabled={busy || platforms.length === 0 || platforms.some(
             (p) => (activeAccounts[p]?.length ?? 0) > 1 && !targets[p]?.accountId,
-          )}
+          ) || (platforms.includes("tiktok") && tiktokProblem() !== null)}
           onClick={schedule}
         >
           {busy ? "Scheduling…"
@@ -418,6 +504,97 @@ export default function ScheduleForm({
         {msg && <span className="small" style={{ color: "var(--ok)" }}>{msg}</span>}
         {error && <span className="small" role="alert" style={{ color: "var(--danger)" }}>{error}</span>}
       </div>
+    </div>
+  );
+}
+
+/**
+ * TikTok Direct Post panel (TikTok Content Sharing Guidelines): the creator
+ * the post goes to, interaction settings the creator has turned off shown as
+ * disabled, explicit commercial-content disclosure and the consent line.
+ */
+function TikTokPanel({
+  creator,
+  options,
+  problem,
+  onChange,
+}: {
+  creator: CreatorInfo | undefined;
+  options: TikTokOptions;
+  problem: string | null;
+  onChange: (patch: Partial<TikTokOptions>) => void;
+}) {
+  if (!creator) {
+    return (
+      <p className="notice small" role="status">
+        Creator info for this TikTok account has not been loaded yet. The publishing
+        worker refreshes it on its next sweep; until then TikTok cannot be scheduled
+        here (export and post natively instead).
+      </p>
+    );
+  }
+  const interactions: [keyof TikTokOptions, string, boolean | undefined][] = [
+    ["disable_comment", "Comments", creator.comment_disabled],
+    ["disable_duet", "Duet", creator.duet_disabled],
+    ["disable_stitch", "Stitch", creator.stitch_disabled],
+  ];
+  return (
+    <div className="tiktok-panel">
+      <p className="small" style={{ margin: 0 }}>
+        Posting to <strong>@{creator.creator_username ?? "unknown"}</strong>
+        {creator.creator_nickname ? ` (${creator.creator_nickname})` : ""}
+        {creator.max_video_post_duration_sec
+          ? ` · max ${creator.max_video_post_duration_sec}s per video` : ""}
+      </p>
+      <fieldset className="tiktok-group">
+        <legend className="small muted">Allow viewers to</legend>
+        {interactions.map(([key, label, offForCreator]) => (
+          <label
+            key={key}
+            className="small"
+            title={offForCreator ? "Turned off in this creator's TikTok settings" : undefined}
+          >
+            <input
+              type="checkbox"
+              checked={!offForCreator && !options[key]}
+              disabled={Boolean(offForCreator)}
+              onChange={(e) => onChange({ [key]: !e.target.checked } as Partial<TikTokOptions>)}
+            />
+            {label}{offForCreator ? " (off for this creator)" : ""}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset className="tiktok-group">
+        <legend className="small muted">Content disclosure</legend>
+        <label className="small">
+          <input type="checkbox" checked={options.brand_organic}
+            onChange={(e) => onChange({ brand_organic: e.target.checked })} />
+          Your brand: promoting yourself or your own business
+        </label>
+        <label className="small">
+          <input type="checkbox" checked={options.brand_content}
+            onChange={(e) => onChange({ brand_content: e.target.checked })} />
+          Branded content: paid partnership (must be public)
+        </label>
+      </fieldset>
+      <label className="small tiktok-consent">
+        <input type="checkbox" checked={options.consent}
+          onChange={(e) => onChange({ consent: e.target.checked })} />
+        <span>
+          By posting, I agree to TikTok&apos;s{" "}
+          <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en"
+            target="_blank" rel="noreferrer noopener">Music Usage Confirmation</a>
+          {options.brand_content && (
+            <>
+              {" "}and{" "}
+              <a href="https://www.tiktok.com/legal/page/global/bc-policy/en"
+                target="_blank" rel="noreferrer noopener">Branded Content Policy</a>
+            </>
+          )}
+          .
+        </span>
+      </label>
+      {problem && <p className="small" style={{ color: "var(--warn)", margin: 0 }}>{problem}</p>}
     </div>
   );
 }

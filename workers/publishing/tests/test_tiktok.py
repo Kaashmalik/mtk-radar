@@ -221,3 +221,29 @@ class TestDirectPostRules:
         monkeypatch.setenv("TIKTOK_APP_AUDITED", "1")
         assert adapter.supports_privacy("public") is True
 
+
+
+def test_reviewed_options_under_meta_tiktok_reach_the_post_body(tmp_path):
+    import json
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "oauth/token" in url:
+            return httpx.Response(200, json={"data": {"access_token": "t", "expires_in": 86400}})
+        if url.endswith("/post/publish/video/init/"):
+            seen["body"] = json.loads(request.read())
+            return httpx.Response(200, json={"error": {"code": "ok"},
+                                             "data": {"publish_id": "p", "upload_url": "https://u/c"}})
+        if url == "https://u/c":
+            return httpx.Response(201)
+        return httpx.Response(404)
+
+    adapter = _adapter(tmp_path, config=TikTokConfig("k", "s", "r"), handler=handler)
+    adapter.upload(_video(tmp_path),
+                   {"tiktok": {"consent": True, "disable_duet": True, "brand_organic": True}},
+                   privacy="private")
+    info = seen["body"]["post_info"]
+    assert info["disable_duet"] is True and info["brand_organic_toggle"] is True
+    assert info["disable_comment"] is False and info["brand_content_toggle"] is False

@@ -151,3 +151,15 @@
 .claim-actions [aria-pressed="true"] { color: var(--claim); border-color: var(--claim); }
 @media (max-width: 640px) { .research-brief { grid-template-columns: 1fr; } }
 
+/* TikTok Direct Post panel (creator info + disclosure + consent). */
+.tiktok-panel {
+  display: grid; gap: 0.5rem; padding: 0.6rem 0.7rem; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-inset) 70%, transparent);
+  border: 1px solid var(--border-subtle);
+}
+.tiktok-group { border: 0; margin: 0; padding: 0; display: flex; gap: 0.35rem 0.9rem; flex-wrap: wrap; }
+.tiktok-group legend { width: 100%; margin-bottom: 0.15rem; }
+.tiktok-group label, .tiktok-consent { display: inline-flex; gap: 0.35rem; align-items: center; }
+.tiktok-consent { align-items: flex-start; }
+.tiktok-consent input { margin-top: 0.2rem; }
+
