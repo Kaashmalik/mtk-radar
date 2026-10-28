@@ -65,7 +65,7 @@ export default function OfferActions({ offerId, state }: Props) {
           fontSize: "0.74rem",
           borderRadius: 6,
           border: "1px solid #30363d",
-          background: "#0d1117",
+          background: "var(--bg-inset)",
           color: "#e8eaf0",
         }}
       />
