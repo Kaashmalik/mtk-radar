@@ -5,11 +5,22 @@ URGENT permission note: TikTok requires an approved developer app with
 video.publish scopes. This adapter is implemented "as permissions allow"
 (§18 week 11) — it stays unconfigured until TIKTOK_* env credentials exist.
 
-Flow: refresh-token auth (tokens in memory only) -> video/init (FILE_UPLOAD,
-single chunk for clips under our size cap) -> PUT bytes to the returned
-upload_url -> publish_id. Test uploads default to SELF_ONLY (private).
+Flow: refresh-token auth (tokens in memory only) -> creator_info/query ->
+video/init (FILE_UPLOAD, single chunk for clips under our size cap) -> PUT
+bytes to the returned upload_url -> publish_id. Test uploads default to
+SELF_ONLY (private).
+
+Direct Post rules (G23, evidence-to-video plan; TikTok "Content Sharing
+Guidelines"): every post must first query creator_info and may only use a
+privacy level the creator currently offers, must honor the creator's
+disabled comment/duet/stitch settings and maximum duration, and an
+UNAUDITED client may only post SELF_ONLY. Public posting therefore stays
+off until the operator sets TIKTOK_APP_AUDITED=1 after TikTok approves the
+app; until then the default delivery for TikTok is the export bundle +
+native/manual scheduling.
 """
 
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -23,12 +34,14 @@ from .base import (
     RateLimited,
     TokenExpiredError,
     TransportUnauthorized,
+    UnsupportedPrivacyError,
     retry_after_from_response,
 )
 
 TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
 INIT_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/"
 STATUS_URL = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
+CREATOR_INFO_URL = "https://open.tiktokapis.com/v2/post/publish/creator_info/query/"
 TOKEN_MIN_TTL_S = 120
 MAX_SINGLE_CHUNK_BYTES = 64 * 1024 * 1024  # API allows 128MB/chunk; stay under
 
@@ -37,6 +50,19 @@ PRIVACY_LEVELS = {
     "unlisted": "SELF_ONLY",   # TikTok has no unlisted tier; closest is SELF_ONLY
     "private": "SELF_ONLY",
 }
+
+#: Creator-side refusals that mean "not now", not "broken": retry later.
+_CREATOR_THROTTLE_CODES = frozenset({
+    "spam_risk_too_many_posts",
+    "spam_risk_user_banned_from_posting",
+    "reached_active_user_cap",
+    "rate_limit_exceeded",
+})
+
+
+def app_audited() -> bool:
+    """Operator attestation that TikTok approved this app for public posts."""
+    return os.environ.get("TIKTOK_APP_AUDITED", "").strip().lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -71,6 +97,17 @@ class TikTokAdapter(PublishAdapter):
         self._access = access_token
         self._expires_monotonic = 0.0
         self._http = http or httpx.Client(timeout=600)
+
+    def supports_privacy(self, privacy: str) -> bool:
+        """Pre-flight capability probe (worker calls it before any side effect).
+
+        Unaudited TikTok clients are restricted to SELF_ONLY, so a public
+        request is refused up front instead of failing after upload.
+        """
+        level = PRIVACY_LEVELS.get(privacy)
+        if level is None:
+            return False
+        return level == "SELF_ONLY" or app_audited()
 
     # ------------------------------------------------------------------ auth
 
@@ -137,11 +174,38 @@ class TikTokAdapter(PublishAdapter):
                 f"video {size}B exceeds single-chunk cap — split before uploading"
             )
 
+        level = PRIVACY_LEVELS.get(privacy, "SELF_ONLY")
+        # Read-only and BEFORE init: nothing is published if this refuses.
+        creator = self.creator_info()
+        options = creator.get("privacy_level_options") or []
+        if level not in options:
+            raise UnsupportedPrivacyError(
+                f"TikTok creator does not currently offer privacy '{level}' "
+                f"(offered: {', '.join(options) or 'none'}) — reschedule with an "
+                "offered level; public needs an audited app")
+        max_duration = creator.get("max_video_post_duration_sec")
+        duration = meta.get("duration_s")
+        if max_duration and duration and float(duration) > float(max_duration):
+            raise UnsupportedPrivacyError(
+                f"video is {float(duration):.0f}s but this creator may post at most "
+                f"{int(max_duration)}s — export a shorter edit")
+
         body = {
             "post_info": {
                 "title": (meta.get("title") or "MTK RADAR AI")[:88],
                 "description": (meta.get("caption") or "")[:2200],
-                "privacy_level": PRIVACY_LEVELS.get(privacy, "SELF_ONLY"),
+                "privacy_level": level,
+                # The creator's own disabled interactions always win.
+                "disable_comment": bool(creator.get("comment_disabled")
+                                        or meta.get("disable_comment")),
+                "disable_duet": bool(creator.get("duet_disabled")
+                                     or meta.get("disable_duet")),
+                "disable_stitch": bool(creator.get("stitch_disabled")
+                                       or meta.get("disable_stitch")),
+                # Commercial-content disclosure is the operator's explicit
+                # choice per post; never inferred.
+                "brand_content_toggle": bool(meta.get("brand_content")),
+                "brand_organic_toggle": bool(meta.get("brand_organic")),
                 "self_declared": {"is_aigc": bool(meta.get("synthetic_narration"))},
             },
             "source_info": {
@@ -193,6 +257,40 @@ class TikTokAdapter(PublishAdapter):
             raise TransportUnauthorized("upload rejected: token expired mid-flight")
         put.raise_for_status()
         return str(publish_id)
+
+    def creator_info(self) -> dict:
+        """POST creator_info/query — required before every Direct Post.
+
+        Returns the `data` object (privacy_level_options, *_disabled flags,
+        max_video_post_duration_sec, creator handle). Token problems surface
+        as TransportUnauthorized so the caller's refresh-once path applies.
+        """
+        resp = self._http.post(
+            CREATOR_INFO_URL,
+            json={},
+            headers={"Authorization": f"Bearer {self._access}",
+                     "Content-Type": "application/json; charset=UTF-8"},
+        )
+        if resp.status_code == 401:
+            raise TransportUnauthorized("creator_info rejected: token invalid")
+        if resp.status_code == 429:
+            raise RateLimited("tiktok creator_info throttled (HTTP 429)",
+                              retry_after_from_response(resp))
+        resp.raise_for_status()
+        payload = resp.json()
+        err = payload.get("error") or {}
+        code = err.get("code")
+        if code in ("invalid_token", "access_token_invalid", "auth_link_invalid"):
+            raise TransportUnauthorized(err.get("message", "tiktok token invalid"))
+        if code in _CREATOR_THROTTLE_CODES:
+            raise RateLimited(f"tiktok creator cannot post now: {code}",
+                              retry_after_from_response(resp))
+        if code not in (None, "ok"):
+            raise RuntimeError(f"creator_info error {code}: {err.get('message')}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("creator_info returned no data")
+        return data
 
     def publish_status(self, publish_id: str) -> dict:
         """Optional post-upload status poll; requires the same token."""
