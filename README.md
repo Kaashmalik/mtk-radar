@@ -273,6 +273,13 @@ browser step.
 | 8. Automation & control | Manual / assisted / autopilot policy per stage | Every gated write re-checks the policy; human stages cannot be bypassed | ✅ v0.26 |
 | 9. Production polish | Trend radar, bilingual studio, covers/motion, English-first packaging, growth analytics | English package + captions for every video; Urdu voiceover opt-in; verified render/schedule path | ✅ v0.27 |
 
+> **Status note (2026-10-28):** the ✅ marks above record the original v0.x
+> delivery, not production certification. Current open work — scene-based
+> video (EP-05), one-click reviewed scheduling (EP-06) and recovery/robustness
+> (EP-07) — is tracked in
+> [`docs/enhancement-plan-2026-10-28-gap-audit.md`](docs/enhancement-plan-2026-10-28-gap-audit.md)
+> and [`docs/ep-implementation-log.md`](docs/ep-implementation-log.md).
+
 Remaining, with reasons: SSO/self-serve logins (single-operator token model is
 sufficient — see runbook §9), Postgres HA (single instance at this scale), and
 TikTok publishing (requires an approved developer app).

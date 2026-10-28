@@ -217,3 +217,25 @@ Chrome-API surfaces such as `chrome.permissions.request` UI, badge painting
 and alarm cadence are stubbed in tests, not exercised in a real browser);
 no Firefox claim (Chrome MV3 only); remote CI execution still blocked by the
 owner billing lock (logged, not touched).
+
+## 2026-10-28 audit follow-up — M1 Full HD encoding + M8 shell (slice 1)
+
+Plan: [`enhancement-plan-2026-10-28-gap-audit.md`](enhancement-plan-2026-10-28-gap-audit.md).
+
+| Work | Commit / evidence |
+|---|---|
+| M1 delivery encoding: explicit yuv420p / H.264 High@4.2 / BT.709 / 2 s GOP / 48 kHz stereo; 1080p presets CRF 18, maxrate 12 Mbps; render applies `loudnorm` at the QC target (QC measured −16 LUFS but nothing normalized) | `1d93070` — `workers/render/render.py` `delivery_args()`/`loudnorm_filter()`, `presets.py`, `main.py`; 4 new tests in `test_render.py` |
+| M8 slice 1: grouped sidebar shell (Discover/Produce/Publish/System) with icons and mobile drawer, refreshed light/dark tokens, operator theme switch (system/light/dark, no-flash boot script), skip link, arrival/hover/press motion under `prefers-reduced-motion`, unified form controls, non-color-only status dots; hard-coded dark backgrounds replaced by tokens | this commit — `SiteNav.tsx`, `ThemeToggle.tsx`, `layout.tsx`, `globals.css` |
+
+**Checks executed** (Windows 10, Python 3.13, Node 24): render worker
+`pytest` 97 passed; `ruff check workers/render` clean; `pnpm typecheck`
+clean; `next build` clean; built dashboard served locally with a signed
+preview session and screenshotted in Edge (desktop dark/light, mobile +
+drawer) with zero page errors. E2E selectors `.brand`, `.site-nav a`,
+`.site-header [aria-label='API online']` are preserved.
+
+**Still unproven:** a real ffmpeg encode of both presets through QC (ffmpeg
+not installed on this machine — loudnorm/flags are asserted on argv only);
+full `pnpm verify` incl. API integration and Playwright e2e (no Postgres
+here); remote CI (owner billing lock).
+

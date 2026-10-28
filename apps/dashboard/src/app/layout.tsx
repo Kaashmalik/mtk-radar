@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { SESSION_COOKIE, sessionSecret, verifySessionCookie } from "@/lib/session";
 
 import SiteNav from "./SiteNav";
+import { THEME_BOOT_SCRIPT } from "./ThemeToggle";
 
 import "./globals.css";
 
@@ -18,8 +19,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: dark)", color: "#0d1117" },
-    { media: "(prefers-color-scheme: light)", color: "#f6f8fa" },
+    { media: "(prefers-color-scheme: dark)", color: "#0b0d12" },
+    { media: "(prefers-color-scheme: light)", color: "#f7f8fb" },
   ],
 };
 
@@ -33,10 +34,22 @@ export default async function RootLayout({
     : null;
 
   return (
-    <html lang="en">
+    // The boot script sets data-theme before hydration, so React must not
+    // treat that attribute as a mismatch.
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
+      </head>
       <body>
-        {session ? <SiteNav actor={session.actor} /> : null}
-        {children}
+        <a href="#main-content" className="skip-link">Skip to content</a>
+        {session ? (
+          <div className="app-shell">
+            <SiteNav actor={session.actor} />
+            <div className="app-main" id="main-content">{children}</div>
+          </div>
+        ) : (
+          <div id="main-content">{children}</div>
+        )}
       </body>
     </html>
   );

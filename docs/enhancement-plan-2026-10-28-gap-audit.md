@@ -76,6 +76,8 @@ does not recompute thumbnail-text parity.
 
 - Hand-rolled CSS without a token system for light/dark, motion or focus states.
 - Pages lack consistent loading/empty/error/unavailable states and keyboard/ARIA polish.
+- Settings renders default "running / assisted" state while the API is
+  unreachable — must show "unavailable" instead (same class as §C).
 - Target: one design-token layer (colour, type scale, radius, elevation, motion), dark mode, reduced-motion support, accessible focus rings, skeleton loaders and subtle transitions — no heavy UI framework required.
 
 ## What "fully automated" can honestly mean
@@ -88,15 +90,15 @@ does not recompute thumbnail-text parity.
 
 | # | Milestone | Scope | Estimate | Status |
 |---|---|---|---|---|
-| M0 | Hygiene | H1 (owner), H2 (owner), H3 README status | 0.5 d | H3 in progress |
-| M1 | Full HD encoding | V2, V3, V4 + tests on argv/filters | 1–2 d | **in progress** |
+| M0 | Hygiene | H1 (owner), H2 (owner), H3 README status | 0.5 d | H3 done; H1/H2 owner |
+| M1 | Full HD encoding | V2, V3, V4 + tests on argv/filters | 1–2 d | **done** (`1d93070`); real-encode proof pending ffmpeg |
 | M2 | Capture v2 | V1 + public-page capture worker with URL recipes | 2–3 d | open |
 | M3 | Explainer track & scenes | V5–V9 | 4–6 d | open |
 | M4 | One-click scheduling | G19, G20, G23, G24, G26, Q1 | 3–4 d | open |
 | M5 | Robustness | §C | 3–4 d | open |
 | M6 | Research UI | §D | 2 d | open |
 | M7 | Cost | §F | 1–2 d | open |
-| M8 | Dashboard design system | §G | 2–3 d | **in progress** |
+| M8 | Dashboard design system | §G | 2–3 d | slice 1 done (shell, tokens, themes, motion); per-page polish open |
 | M9 | Proof | integration+e2e on real Postgres, one real private YouTube post, real-browser extension smoke; update the EP log | 1–2 d | open |
 
 Total ≈ 20–29 developer-days. Progress is recorded in
