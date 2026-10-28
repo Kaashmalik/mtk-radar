@@ -14,8 +14,10 @@ When not configured (or on any failure) narration is skipped and the capture's
 own audio is used — verification must never depend on TTS being available.
 """
 
+import ipaddress
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Final, Optional
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
@@ -24,12 +26,40 @@ FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
 _MARKDOWN_NOISE = ("```", "---", "> ", "# ", "- ", "  -")
 
 
+def _is_local_endpoint(base_url: str) -> bool:
+    """Loopback, private-range IP, or a single-label host (a Docker/compose
+    service name such as `kokoro:8880`). Public hostnames never qualify."""
+    host = (urlparse(base_url).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost" or "." not in host and ":" not in host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
+def tts_local(base_url: str) -> bool:
+    """TTS_LOCAL=1 declares a self-hosted, keyless, free TTS server (e.g. a
+    Kokoro/Piper OpenAI-compatible server on the same machine or network).
+
+    Fail-closed: the flag is honoured ONLY when the endpoint really is local.
+    Pointing TTS_LOCAL at a public (paid) API keeps normal paid accounting
+    and the budget gate, so a misconfiguration can never spend unbudgeted.
+    """
+    if os.environ.get("TTS_LOCAL", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    return _is_local_endpoint(base_url)
+
+
 def tts_configured(language: str = "en") -> bool:
     base = (os.environ.get(f"TTS_BASE_URL_{language.upper()}")
             or os.environ.get("TTS_BASE_URL"))
     key = (os.environ.get(f"TTS_API_KEY_{language.upper()}")
            or os.environ.get("TTS_API_KEY"))
-    return bool(base and key)
+    return bool(base and (key or tts_local(base)))
 
 
 def voice_for(language: str = "en") -> str:
@@ -112,28 +142,33 @@ def synthesize(text: str, out_path: Path, *,
     key = (api_key
            or os.environ.get(f"TTS_API_KEY_{language.upper()}")
            or os.environ.get("TTS_API_KEY", ""))
-    if not base or not key:
+    local = tts_local(base)
+    if not base or not (key or local):
         return None
+    provider = "local" if local else "openai-compatible"
     model_id = model or model_for(language)
     voice_id = voice or voice_for(language)
     cache_key = _costing().tts_cache_key(text, voice=voice_id, model=model_id)
+    reservation_id = None
 
     if cost is not None:
         cached = cost.cache_lookup("tts", cache_key)
         if isinstance(cached, dict) and cached.get("path"):
             cached_path = Path(cached["path"])
             if cached_path.exists() and cached_path.stat().st_size > 0:
-                cost.report("tts", units=0, provider="openai-compatible",
+                cost.report("tts", units=0, provider=provider,
                             model=model_id, unit_type="chars",
-                            meta={"cache_hit": True})
+                            meta={"cache_hit": True, "local": local})
                 return cached_path
-        # G04: reserve the predicted char count atomically before the call;
-        # the usage report after success settles this reservation.
-        gate = cost.budget_check("tts", units=len(text or ""),
-                                 provider="openai-compatible", model=model_id)
-        if not gate.get("allowed"):
-            return None
-        reservation_id = gate.get("reservation_id")
+        if not local:
+            # G04: reserve the predicted char count atomically before the
+            # call; the usage report after success settles this reservation.
+            # A verified-local server costs nothing, so it needs no reservation.
+            gate = cost.budget_check("tts", units=len(text or ""),
+                                     provider=provider, model=model_id)
+            if not gate.get("allowed"):
+                return None
+            reservation_id = gate.get("reservation_id")
     body = {
         "model": model_id,
         "voice": voice_id,
@@ -143,7 +178,8 @@ def synthesize(text: str, out_path: Path, *,
     try:
         resp = httpx.post(
             f"{base}/audio/speech",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     **({"Authorization": f"Bearer {key}"} if key else {})},
             json=body,
             timeout=60,
         )
@@ -152,9 +188,10 @@ def synthesize(text: str, out_path: Path, *,
         out_path.write_bytes(resp.content)
         if cost is not None:
             cost.cache_store("tts", cache_key, {"path": str(out_path)})
-            cost.report("tts", units=len(text or ""), provider="openai-compatible",
+            cost.report("tts", units=len(text or ""), provider=provider,
                         model=model_id, unit_type="chars",
-                        settle_reservation=reservation_id)
+                        settle_reservation=reservation_id,
+                        meta={"local": local})
         return out_path
     except Exception:  # noqa: BLE001
         # G04: a failed/sent TTS request leaves its reservation standing —

@@ -373,6 +373,11 @@ services:
       TTS_API_KEY_UR: ${TTS_API_KEY_UR:-}
       TTS_MODEL_UR: ${TTS_MODEL_UR:-}
       TTS_VOICE_UR: ${TTS_VOICE_UR:-}
+      # M7: 1 = the TTS endpoint is a self-hosted, keyless, free server. Only
+      # honoured for loopback/private/compose-service hosts (fail-closed).
+      TTS_LOCAL: ${TTS_LOCAL:-0}
+      # M1: x264 speed/size trade-off for the delivery encode.
+      MTK_RENDER_X264_PRESET: ${MTK_RENDER_X264_PRESET:-medium}
       # v0.29 measured QC — see docs/render-qc.md. Blank inherits the code default.
       MTK_RENDER_QC_TARGET_LUFS: ${MTK_RENDER_QC_TARGET_LUFS:-}
       MTK_RENDER_QC_LUFS_TOLERANCE: ${MTK_RENDER_QC_LUFS_TOLERANCE:-}

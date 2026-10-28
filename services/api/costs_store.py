@@ -68,6 +68,10 @@ def estimate_cost(kind: str, units: int, meta: dict[str, Any] | None = None) -> 
         return round((units or 0) * (_LLM_INPUT_PER_MTOK + _LLM_OUTPUT_PER_MTOK)
                      / 1_000_000, 6)
     if kind == "tts":
+        if meta.get("local") is True:
+            # Self-hosted TTS (worker verified the endpoint is local): no
+            # per-character bill; compute/electricity is tracked separately.
+            return 0.0
         return round((units or 0) * _TTS_PER_MCHAR / 1_000_000, 6)
     # Trend fetches are (typically) free APIs; YouTube quota is billed monthly
     # against a free allotment — recorded for visibility, estimated at 0.
@@ -173,17 +177,26 @@ async def spend_summary(pool) -> dict[str, Any]:
         GROUP BY kind, unit_type ORDER BY kind
         """
     )
-    # Cost per published video (30 d) — published posts over spend.
-    published_raw = await pool.fetchval(
+    # Unit economics (30 d). A VIDEO is one produced package — the offer's
+    # story in one language — however many platforms it is posted to; a
+    # POST is one platform publication. Dividing spend by posts understated
+    # production cost whenever one video went to several platforms.
+    published_row = await pool.fetchrow(
         """
-        SELECT COUNT(*) FROM schedules
+        SELECT COUNT(*) AS posts,
+               COUNT(DISTINCT (offer_id, COALESCE(language, 'en'))) AS videos
+        FROM schedules
         WHERE state = 'published' AND updated_at >= now() - interval '30 days'
         """
     )
-    try:
-        published = int(published_raw or 0)
-    except (TypeError, ValueError):
-        published = 0
+
+    def _count(name: str) -> int:
+        try:
+            return int((published_row or {})[name] or 0)
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    published, posts = _count("videos"), _count("posts")
     usd_30d = _num(totals, "usd_30d") if totals else 0.0
     return {
         "usd_today": _num(totals, "usd_today") if totals else 0.0,
@@ -193,6 +206,9 @@ async def spend_summary(pool) -> dict[str, Any]:
         "published_videos_30d": published,
         "cost_per_published_video_usd_30d":
             round(usd_30d / published, 4) if published else None,
+        "published_posts_30d": posts,
+        "cost_per_published_post_usd_30d":
+            round(usd_30d / posts, 4) if posts else None,
         "pricing": pricing_view(),
     }
 

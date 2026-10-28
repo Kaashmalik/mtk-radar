@@ -599,3 +599,20 @@ def test_best_times_derived_blend_is_permission_gated(client, monkeypatch):
         "with permission granted, the derived blend ranks H1 above H2"
     assert mine[0]["avg_views"] == 100.0 and mine[1]["avg_views"] == 200.0
 
+
+
+def test_cost_per_video_counts_unique_packages_not_cross_posts(client):
+    """M7: one video posted to two platforms is ONE video and TWO posts."""
+    before = client.get("/costs/summary").json()
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    _add_schedule(marker, offer_id, project_id, platform="youtube",
+                  offset_min=-30, state="published")
+    _add_schedule(marker, offer_id, project_id, platform="facebook",
+                  offset_min=-20, state="published")
+    after = client.get("/costs/summary").json()
+    assert after["published_posts_30d"] - before["published_posts_30d"] == 2
+    assert after["published_videos_30d"] - before["published_videos_30d"] == 1
+    if after["usd_30d"] > 0:
+        assert after["cost_per_published_video_usd_30d"] >= \
+            after["cost_per_published_post_usd_30d"]
