@@ -119,3 +119,14 @@ permission to bypass a gate.
   and freeze checks pass on their merits — no exemption ranges are used.
   Contradicted claims are never shown; unknown claims are labelled.
 
+## Caption width measurement (V9)
+
+Caption QC measures every wrapped line with the font file libass will use
+(`MTK_CAPTION_FONT_FILE`, else `fc-match`, else the usual font folders), via
+Pillow (Raqm shaping for Urdu when available), scaled by libass's rule that an
+ASS font size equals ascender + descender. The QC report's
+`width_method` says `font:<file>` or `estimate`; the estimate (0.60 × size
+per character) is only a labelled fallback when the font or Pillow is
+missing. For Urdu, install the Nastaliq face on the render host so both the
+burn-in and the measurement use it.
+
