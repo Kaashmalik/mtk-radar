@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from api_paging import fetch_all  # noqa: E402
 from circuit import AccountBreaker  # noqa: E402
+import quota as quota_mod  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
@@ -1060,12 +1061,37 @@ class Publisher:
             if public_url:
                 meta["public_url"] = public_url
 
+        # Q1: reserve the WHOLE YouTube package's quota before the first
+        # request, so a day never ends with a video uploaded but its
+        # thumbnail/captions refused. Fail-closed when the ledger says no.
+        quota_reservation = None
+        if platform == "youtube":
+            reservation = quota_mod.reserve(
+                self.api, account=breaker_key[1], schedule_id=post["id"],
+                buckets=quota_mod.youtube_package_units(
+                    thumbnail=bool(cover_file), captions=bool(captions_file),
+                    playlist=bool(post.get("youtube_playlist_id")),
+                    comment=bool(post.get("pinned_comment"))))
+            if not reservation.allowed:
+                if reservation.retry_after_s:
+                    # Not this post's fault: fail it with the reset as the
+                    # earliest retry; nothing was sent, so no duplicate risk.
+                    log.warning("schedule %s: %s", post["id"], reservation.reason)
+                    self._report(post["id"], ok=False, detail=reservation.reason,
+                                 retry_after_s=int(reservation.retry_after_s))
+                else:
+                    log.error("schedule %s: %s — not uploading this sweep",
+                              post["id"], reservation.reason)
+                return False
+            quota_reservation = reservation.reservation_id
+
         attempt_token = self._announce_attempt(post["id"])
         if not attempt_token:
             # No claim = no upload. A lost response may have created a marker;
             # the next sweep will see it and hold rather than duplicate.
             log.error("schedule %s: could not claim an upload attempt — not uploading",
                       post["id"])
+            quota_mod.settle(self.api, quota_reservation, sent=False)
             return False
 
         if hasattr(adapter, "set_upload_session_store"):
@@ -1216,6 +1242,10 @@ class Publisher:
                           "repeated failures — its posts wait %ss before one probe",
                           platform, breaker_key[1], int(self.breaker.cooldown_s))
             return False
+        finally:
+            # Requests may have reached YouTube on every path through the
+            # upload block (failed and retried calls still cost quota).
+            quota_mod.settle(self.api, quota_reservation, sent=True)
 
     def _render_for_post(self, post: dict) -> dict | None:
         render_id = post.get("render_id")

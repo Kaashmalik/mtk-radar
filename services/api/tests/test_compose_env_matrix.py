@@ -69,6 +69,16 @@ MATRIX: dict[str, tuple[str, ...]] = {
     # workers/render/narration.py (verified-local TTS) + render.py (x264)
     "TTS_LOCAL": ("render",),
     "MTK_RENDER_X264_PRESET": ("render",),
+    # Q1 quota ledger: limits (services/api/quota_api.py), operation costs
+    # (workers/publishing/quota.py)
+    "YOUTUBE_QUOTA_UNITS_PER_DAY": ("api",),
+    "YOUTUBE_QUOTA_UPLOADS_PER_DAY": ("api",),
+    "YOUTUBE_QUOTA_COST_UPLOAD": ("publishing",),
+    "YOUTUBE_QUOTA_COST_THUMBNAIL": ("publishing",),
+    "YOUTUBE_QUOTA_COST_CAPTIONS": ("publishing",),
+    "YOUTUBE_QUOTA_COST_PLAYLIST": ("publishing",),
+    "YOUTUBE_QUOTA_COST_COMMENT": ("publishing",),
+    "YOUTUBE_QUOTA_COST_STATUS_POLLS": ("publishing",),
 }
 
 #: Compose names that are intentionally compose-internal: interpolated from

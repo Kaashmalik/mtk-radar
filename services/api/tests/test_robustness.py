@@ -616,3 +616,40 @@ def test_cost_per_video_counts_unique_packages_not_cross_posts(client):
     if after["usd_30d"] > 0:
         assert after["cost_per_published_video_usd_30d"] >= \
             after["cost_per_published_post_usd_30d"]
+
+
+def test_youtube_quota_ledger_reserves_atomically_and_refuses_past_the_limit(client, monkeypatch):
+    """Q1: reservations count against the Pacific quota day; a request that
+    would exceed the limit is refused with the reset time; released units
+    return, consumed units stay spent."""
+    monkeypatch.setenv("YOUTUBE_QUOTA_UNITS_PER_DAY", "5000")
+    account = f"acct-{uuidlib.uuid4().hex[:8]}"
+
+    def reserve(units):
+        return client.post("/quota/reserve", json={
+            "provider": "youtube", "account": account,
+            "buckets": {"units": units}, "operation": "upload_package"})
+
+    first = reserve(3000)
+    assert first.status_code == 200 and first.json()["allowed"] is True, first.text
+    refused = reserve(2500).json()
+    assert refused["allowed"] is False and refused["reservation_id"] is None
+    assert refused["buckets"]["units"]["remaining"] == 2000
+    assert refused["retry_after_s"] > 0 and refused["resets_at"]
+
+    rid = first.json()["reservation_id"]
+    released = client.post(f"/quota/{rid}/settle", json={"status": "released"})
+    assert released.status_code == 200 and released.json()["settled"] == 1
+    assert reserve(4500).json()["allowed"] is True, "released units return to the pool"
+
+    again = client.post(f"/quota/{rid}/settle", json={"status": "consumed"})
+    assert again.json()["settled"] == 0, "a settled reservation never flips"
+    assert client.post(f"/quota/{uuidlib.uuid4()}/settle",
+                       json={"status": "consumed"}).status_code == 404
+    unknown = client.post("/quota/reserve", json={
+        "provider": "youtube", "account": account, "buckets": {"bogus": 1}})
+    assert unknown.status_code == 422
+
+    usage = client.get("/quota", params={"provider": "youtube"}).json()
+    mine = [a for a in usage["accounts"] if a["account"] == account]
+    assert mine and mine[0]["reserved"] == 4500

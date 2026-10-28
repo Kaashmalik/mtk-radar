@@ -142,6 +142,8 @@ class JobQueueAPI:
         return FakeResponse({})
 
     def post(self, path, json=None):  # noqa: A002
+        if path == "/quota/reserve":  # Q1 ledger: reservation granted
+            return FakeResponse({"allowed": True, "reservation_id": "q-1"})
         if path == "/jobs/claim":
             self.claims += 1
             if self.results:  # job already resolved — the queue is dry

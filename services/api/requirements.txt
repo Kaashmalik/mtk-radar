@@ -7,3 +7,6 @@ pydantic-settings==2.16.1
 PyYAML==6.0.3
 # optional cache layer (v0.22) — the system runs without it
 redis==5.2.1
+# IANA time-zone data for zoneinfo on hosts without a system tz database
+# (Windows): YouTube quota day (America/Los_Angeles), schedule display zones.
+tzdata==2026.4
