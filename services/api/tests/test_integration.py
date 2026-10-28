@@ -6326,9 +6326,15 @@ def test_page_capture_requests_filter_unsafe_urls_and_record_results(auth_client
     incomplete = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
                                   json={"status": "ok"})
     assert incomplete.status_code == 422, "ok needs the image ref + sha256"
+    for hostile in ("/app/.env", "../services/api/.env", "local://pages/other/x.png",
+                    f"local://pages/{offer_id}/{capture_id}.png/../../secret"):
+        bad = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC, json={
+            "status": "ok", "image_ref": hostile, "image_sha256": "a" * 64})
+        assert bad.status_code == 422, hostile
     done = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC, json={
         "status": "ok", "final_url": "https://example.org/paper", "title": "Paper",
-        "image_ref": "local://pages/x/y.png", "image_sha256": "a" * 64, "http_status": 200})
+        "image_ref": f"local://pages/{offer_id}/{capture_id}.png",
+        "image_sha256": "a" * 64, "http_status": 200})
     assert done.status_code == 200, done.text
     again = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
                              json={"status": "failed"})
