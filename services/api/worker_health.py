@@ -34,6 +34,8 @@ EXPECTED_WORKERS: dict[str, dict[str, Any]] = {
     "publishing": {"label": "Publishing", "interval_s": 60},
     "monitor": {"label": "Monitor / alerts", "interval_s": 300},
     "metrics": {"label": "Metrics", "interval_s": 3600},
+    # Storyboard source-page screenshots (workers/capture/page_capture.py).
+    "page-capture": {"label": "Page capture", "interval_s": 60},
 }
 
 _WORKER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")

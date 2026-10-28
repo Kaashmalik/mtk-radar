@@ -424,6 +424,39 @@ services:
       api:
         condition: service_healthy
 
+  # Storyboard source pages: screenshots of PUBLIC pages a reviewer asked
+  # for (sandboxed Chromium behind a validating egress proxy). Its own image:
+  # Chromium + system libraries come from the pinned Playwright image.
+  page-capture:
+    profiles: ["workers"]
+    image: mtk-radar-page-capture:local
+    build:
+      context: ../..
+      dockerfile: workers/capture/Dockerfile
+    restart: unless-stopped
+    working_dir: /repo
+    # Chromium needs more shared memory than Docker's 64 MB default.
+    shm_size: "1gb"
+    volumes:
+      - storage-data:/data
+    environment:
+      API_URL: http://api:8000
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      # Screenshots are served by the API from managed storage only.
+      MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
+      MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+      MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+    command: >
+      python workers/capture/page_capture.py --watch --api http://api:8000 --out /tmp/page-captures
+    depends_on:
+      api:
+        condition: service_healthy
+
   monitor:
     profiles: ["workers"]
     image: mtk-radar-workers:local
