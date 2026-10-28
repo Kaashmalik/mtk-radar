@@ -109,3 +109,17 @@ def test_vertical_cards_and_base_are_composed_natively():
     cmd = base_video_cmd("c.ass", "b.mp4", 5, "vertical")
     assert "s=1080x1920" in " ".join(cmd)
 
+
+def test_page_scenes_are_overlaid_with_motion_and_fades():
+    cmd = base_video_cmd("c.ass", "b.mp4", 20, "landscape",
+                         pages=[("assets/explainer/pages/p1.png", 4.0, 10.0)])
+    joined = " ".join(cmd)
+    assert "-loop 1 -framerate 30 -t 10.000 -i assets/explainer/pages/p1.png" in joined
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=w='1612*(1+0.05*max(0,t-4.000)/6.000)'" in graph, "slow push-in"
+    assert "fade=t=in:st=4.000" in graph and "alpha=1" in graph
+    assert "enable='between(t,4.000,10.000)'" in graph
+    assert graph.endswith("[bg1]subtitles=c.ass[vout]")
+    assert cmd[cmd.index("-map") + 1] == "[vout]"
+    with pytest.raises(ValueError):
+        base_video_cmd("c.ass", "b.mp4", 5, pages=[("C:/abs/p.png", 0, 2)])

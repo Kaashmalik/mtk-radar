@@ -97,6 +97,12 @@ def capture_key(offer_id: str, session_id: str, filename: str) -> str:
             f"{_safe_part(session_id, 'session id')}/{safe_name}")
 
 
+def page_capture_key(offer_id: str, capture_id: str) -> str:
+    """Public-page screenshot used by a storyboard `page` scene."""
+    return (f"pages/{_safe_part(offer_id, 'offer id')}/"
+            f"{_safe_part(capture_id, 'capture id')}.png")
+
+
 def tts_key(sha256_hex: str, extension: str = "mp3") -> str:
     """Content-addressed narration audio (G25): identical speech is stored
     once and shared by every render host; the digest IS the identity."""

@@ -6240,3 +6240,101 @@ def test_tiktok_options_and_consent_are_part_of_the_hashed_package(auth_client):
     tiktok = json.loads(row["m"])["tiktok"]
     assert tiktok["consent"] is True and tiktok["disable_duet"] is True
     assert tiktok["consent_by"], "the consenting reviewer is recorded"
+
+
+def _explainer_offer(auth_client, marker):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": f"Storyboard {marker}", "category": "research_intro",
+        "offer_type": "trend_topic",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    brief = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer", "viewer_question": "Does it hold up?",
+        "claims": [
+            {"claim_text": "Recall improved by 12 percent.",
+             "claim_class": "author_reported", "status": "supported"},
+            {"claim_text": "It replaces sleep entirely.",
+             "claim_class": "editorial_analysis", "status": "contradicted"},
+        ],
+    })
+    assert brief.status_code == 201, brief.text
+    return offer_id, [c["id"] for c in brief.json()["claims"]]
+
+
+def test_storyboard_is_versioned_derived_from_the_ledger_and_human_only(auth_client):
+    """V7: the editor saves scene SELECTION/ORDER; claim text is always the
+    ledger's; contradicted claims are refused; concurrent edits conflict."""
+    offer_id, (supported, contradicted) = _explainer_offer(auth_client, uuid.uuid4().hex)
+
+    board = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()
+    assert board["current"] is None
+    kinds = [s["kind"] for s in board["suggested"]]
+    assert kinds == ["title", "claim", "close"], "the contradicted claim is not suggested"
+
+    machine = auth_client.post(f"/offers/{offer_id}/storyboard", headers=SVC, json={
+        "scenes": board["suggested"]})
+    assert machine.status_code == 403
+
+    refused = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": [{"kind": "claim", "claim_ids": [contradicted]}]})
+    assert refused.status_code == 422
+    assert "contradicted" in str(refused.json()["detail"])
+
+    rewritten = [{"kind": "close", "heading": "Sources", "weight": 2},
+                 {"kind": "claim", "claim_ids": [supported], "body": "It is PROVEN!"}]
+    saved = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten})
+    assert saved.status_code == 201, saved.text
+    body = saved.json()
+    assert body["version"] == 1 and len(body["sha256"]) == 64
+    assert [s["kind"] for s in body["scenes"]] == ["close", "claim"], "order kept"
+    assert body["scenes"][1]["body"] == "Recall improved by 12 percent."
+
+    stale = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten, "expected_version": 0})
+    assert stale.status_code == 409, "an editor that started before v1 must reload"
+    second = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten, "expected_version": 1})
+    assert second.status_code == 201 and second.json()["version"] == 2
+
+    current = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()["current"]
+    assert current["version"] == 2
+
+
+def test_page_capture_requests_filter_unsafe_urls_and_record_results(auth_client):
+    """M2: only https public URLs are queued (a page_capture job is armed);
+    results are written once; screenshots stream only for ok captures."""
+    offer_id, _ = _explainer_offer(auth_client, uuid.uuid4().hex)
+    denied = auth_client.post(f"/offers/{offer_id}/page-captures/request", headers=SVC,
+                              json={"urls": ["https://example.org/paper"]})
+    assert denied.status_code == 403
+
+    asked = auth_client.post(f"/offers/{offer_id}/page-captures/request", headers=AUTH, json={
+        "urls": ["https://example.org/paper", "http://example.org/insecure",
+                 "https://user:pw@example.org/", "https://127.0.0.1/admin",
+                 "https://example.org/paper"]})
+    assert asked.status_code == 202, asked.text
+    queued, refused = asked.json()["queued"], asked.json()["refused"]
+    assert len(queued) == 1, "duplicates collapse; unsafe URLs never queue"
+    assert len(refused) == 3
+    jobs = _run("SELECT count(*) AS n FROM jobs WHERE kind = 'page_capture' AND entity_id = $1",
+                uuid.UUID(offer_id))
+    assert jobs[0]["n"] == 1
+
+    capture_id = queued[0]
+    incomplete = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
+                                  json={"status": "ok"})
+    assert incomplete.status_code == 422, "ok needs the image ref + sha256"
+    done = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC, json={
+        "status": "ok", "final_url": "https://example.org/paper", "title": "Paper",
+        "image_ref": "local://pages/x/y.png", "image_sha256": "a" * 64, "http_status": 200})
+    assert done.status_code == 200, done.text
+    again = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
+                             json={"status": "failed"})
+    assert again.status_code == 409, "a recorded result is never overwritten"
+
+    listed = auth_client.get(f"/offers/{offer_id}/page-captures", headers=SVC).json()
+    assert listed[0]["status"] == "ok" and "image_ref" not in listed[0]
+    board = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()
+    assert [s["kind"] for s in board["suggested"]][:2] == ["title", "page"]

@@ -50,6 +50,7 @@ from settings_api import router as settings_router
 from trends_api import router as trends_router
 from queue_api import router as queue_router
 from quota_api import router as quota_router
+from storyboard_api import router as storyboard_router
 from research_api import router as research_router
 from worker_health import router as workers_router
 from upload_sessions_api import router as upload_sessions_router
@@ -113,6 +114,7 @@ app.include_router(analytics_router)
 app.include_router(trends_router)
 app.include_router(queue_router)
 app.include_router(quota_router)
+app.include_router(storyboard_router)
 app.include_router(research_router)
 app.include_router(studio_router)
 app.include_router(attention_router)
