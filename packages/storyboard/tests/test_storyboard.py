@@ -82,3 +82,15 @@ def test_timing_uses_weights_and_skips_excluded_scenes():
     assert [s["id"] for s in timed] == ["a", "b"]
     assert timed[0]["end"] == pytest.approx(10) and timed[1]["end"] == pytest.approx(40)
     assert sb.digest(timed) == sb.digest(sb.apply_timing(scenes, total_s=40))
+
+
+@pytest.mark.parametrize("claim_ids", [5, {"a": 1}, "c1", ["c1", "c2"], [None], [{"x": 1}]])
+def test_malformed_claim_ids_are_a_problem_not_a_crash(claim_ids):
+    _, problems = sb.validate([{"kind": "close", "heading": "End"},
+                               {"kind": "claim", "claim_ids": claim_ids}], BRIEF, PAGES)
+    assert any("not in the current research brief" in p for p in problems)
+
+
+def test_single_claim_id_field_still_works():
+    scenes, problems = sb.validate([{"kind": "claim", "claim_id": "c1"}], BRIEF, PAGES)
+    assert not problems and scenes[0]["claim_ids"] == ["c1"]

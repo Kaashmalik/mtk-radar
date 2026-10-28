@@ -151,8 +151,8 @@ def validate(edits: list[dict], brief: dict,
         weight = min(MAX_WEIGHT, max(MIN_WEIGHT, weight))
         include = raw.get("include", True) is not False
         if kind == "claim":
-            claim_id = str((raw.get("claim_ids") or [raw.get("claim_id")])[0] or "")
-            claim = claims.get(claim_id)
+            claim_id = _single_id(raw.get("claim_ids"), raw.get("claim_id"))
+            claim = claims.get(claim_id) if claim_id else None
             if claim is None:
                 problems.append(f"scene {index}: claim is not in the current research brief")
                 continue
@@ -188,6 +188,23 @@ def validate(edits: list[dict], brief: dict,
     if not any(s["include"] for s in scenes):
         problems.append("at least one scene must be included")
     return scenes, problems
+
+
+def _single_id(ids: Any, fallback: Any = None) -> Optional[str]:
+    """Exactly one id from `claim_ids` (a one-item list) or `claim_id`.
+
+    Anything else — a scalar in claim_ids, an object, several ids — is not
+    guessed at (a string is NOT indexed into its first character).
+    """
+    if isinstance(ids, list):
+        if len(ids) != 1 or not isinstance(ids[0], (str, int)):
+            return None
+        return str(ids[0]) or None
+    if ids not in (None, "", []):
+        return None
+    if isinstance(fallback, (str, int)) and str(fallback):
+        return str(fallback)
+    return None
 
 
 def apply_timing(scenes: list[dict], total_s: Optional[float] = None) -> list[dict]:

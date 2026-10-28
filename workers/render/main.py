@@ -275,12 +275,21 @@ class RenderJob:
         return explainer_mod.eligible_brief(research)
 
     def _storyboard_inputs(self) -> dict:
-        """Saved storyboard + page captures from the API ({} on older APIs)."""
-        try:
-            board = self._get(f"/offers/{self.offer_id}/storyboard")
-        except Exception:  # noqa: BLE001 — no storyboard API: suggested scenes
+        """Saved storyboard + page captures from the API.
+
+        Only an API WITHOUT the storyboard route (404) may fall back to the
+        suggested scenes. Any other failure stops the render: drawing the
+        suggestion instead of the reviewer's saved storyboard would publish
+        scenes nobody approved. The job is retried and surfaces in attention.
+        """
+        resp = self.api.get(f"/offers/{self.offer_id}/storyboard")
+        if resp.status_code == 404:
             return {}
-        return board if isinstance(board, dict) else {}
+        resp.raise_for_status()
+        board = resp.json()
+        if not isinstance(board, dict):
+            raise RuntimeError("storyboard API returned an unexpected payload")
+        return board
 
     def _fetch_page_image(self, capture: dict) -> str | None:
         """Download a page screenshot via the API and verify its sha256."""
@@ -319,6 +328,15 @@ class RenderJob:
         current = board.get("current") or None
         dropped: list[str] = []
         if current:
+            saved_for = current.get("brief_id")
+            if saved_for and str(saved_for) != str(brief.get("id")):
+                # Claim ids belong to a brief version; re-validating an old
+                # storyboard against a new brief would drop every claim and
+                # render a near-empty explainer. A human must re-save.
+                raise RuntimeError(
+                    f"storyboard v{current.get('version')} was saved for an older "
+                    "research brief — open Studio → Storyboard, review and save it "
+                    "again before rendering")
             scenes, dropped = sb.validate(current.get("scenes") or [], brief, pages)
             version = current.get("version")
         else:
