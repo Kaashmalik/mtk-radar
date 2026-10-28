@@ -289,3 +289,35 @@ def test_run_once_collects_alerts_and_notifies(monkeypatch):
     assert {a["event"] for a in alerts} == {"offers.sweep", "metrics.missing"}
     assert len(delivered) == 1
     assert len(delivered[0]) == 2
+
+
+# ------------------------------------------------ durable outbox (EP-07)
+
+def test_failed_webhook_is_spooled_and_replayed_with_its_delivery_id():
+    notifications.reset_cooldown_state()
+    down = FakeHttpClient(status_code=503)
+    result = notifications.notify(ALERTS, config=_config(email_to=()),
+                                  webhook_client=down)
+    assert result["webhook"] == "failed"
+    original = down.calls[0][1]["json"]["delivery_id"]
+
+    # A second failing tick for the SAME alert set does not pile up copies.
+    notifications.notify(ALERTS, config=_config(email_to=()), webhook_client=down,
+                         force=True)
+    assert notifications._outbox().pending_count() == 1
+
+    up = FakeHttpClient()
+    stats = notifications.flush_outbox(config=_config(email_to=()), webhook_client=up)
+    assert stats["sent"] == 1
+    sent = up.calls[0][1]
+    assert sent["json"]["delivery_id"] == original
+    assert sent["headers"]["Idempotency-Key"] == original
+    assert notifications._outbox().pending_count() == 0
+
+
+def test_replay_to_a_removed_channel_is_dead_lettered_not_retried():
+    notifications.reset_cooldown_state()
+    notifications.notify(ALERTS, config=_config(email_to=()),
+                         webhook_client=FakeHttpClient(status_code=500))
+    stats = notifications.flush_outbox(config=_config(webhook_url="", email_to=()))
+    assert stats == {"sent": 0, "retry": 0, "dead": 1}

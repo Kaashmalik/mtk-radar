@@ -10,7 +10,10 @@ one process is free for every process:
     capture audio) and the block is recorded so Needs-You shows it.
   * `cache_lookup` / `cache_store` — the shared extract/tts entries.
     FAIL-OPEN: an unreachable API is a cache miss, never an error.
-  * `report(...)` — POST /costs/usage; fire-and-forget.
+  * `report(...)` — POST /costs/usage; never blocks the caller. Every event
+    carries an `event_id`; an undeliverable report is spooled to a durable
+    outbox (packages/outbox) and replayed later — the API deduplicates by id,
+    so a replay after a lost response is counted once (EP-07).
 
 httpx is the only dependency — every worker already ships it. Per-process
 memory sits in front of the API cache so repeated calls in one sweep don't
@@ -24,6 +27,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from typing import Any, Optional
 
 log = logging.getLogger("costing")
@@ -103,17 +107,47 @@ class CostClient:
         return headers
 
     def _post(self, path: str, body: dict) -> Optional[dict]:
+        _, payload = self._post_status(path, body)
+        return payload
+
+    def _post_status(self, path: str, body: dict) -> tuple[Optional[int], Optional[dict]]:
+        """(HTTP status or None on transport failure, JSON body or None)."""
         import httpx
         try:
             resp = httpx.post(f"{self.api_url}{path}", json=body,
                               headers=self._headers(), timeout=self.timeout)
             if resp.status_code >= 300:
                 log.debug("costs %s -> HTTP %s", path, resp.status_code)
-                return None
-            return resp.json()
+                return resp.status_code, None
+            return resp.status_code, resp.json()
         except Exception as exc:  # noqa: BLE001 — the ledger is never on the
             log.debug("costs %s unavailable: %s", path, exc)  # critical path
+            return None, None
+
+    # ---------------------------------------------------------------- outbox
+
+    def _outbox(self):
+        if getattr(self, "_box", None) is None:
+            from outbox import FileOutbox
+            self._box = FileOutbox("costs-usage")
+        return self._box
+
+    def _deliver_usage(self, body: dict) -> Optional[bool]:
+        """True delivered · False retry later · None refused for good (4xx)."""
+        status, _ = self._post_status("/costs/usage", body)
+        if status is not None and 200 <= status < 300:
+            return True
+        if status is not None and 400 <= status < 500 and status not in (408, 429):
             return None
+        return False
+
+    def flush_outbox(self, limit: int = 20) -> dict:
+        """Replay spooled usage reports (bounded per call)."""
+        try:
+            return self._outbox().flush(self._deliver_usage, limit=limit)
+        except OSError as exc:
+            log.warning("cost outbox unavailable: %s", exc)
+            return {"sent": 0, "retry": 0, "dead": 0}
 
     # ------------------------------------------------------------ budget gate
 
@@ -194,7 +228,8 @@ class CostClient:
         """
         event: dict[str, Any] = {"kind": kind, "units": int(units or 0),
                                  "provider": provider, "model": model,
-                                 "meta": meta or {}}
+                                 "meta": meta or {},
+                                 "event_id": uuid.uuid4().hex}
         if unit_type:
             event["unit_type"] = unit_type
         if ref_type:
@@ -204,7 +239,15 @@ class CostClient:
         body: dict[str, Any] = {"events": [event]}
         if settle_reservation:
             body["settle_reservation"] = settle_reservation
-        self._post("/costs/usage", body)
+        if self._deliver_usage(body) is False:
+            # Spend that happened must be metered eventually: spool it.
+            try:
+                self._outbox().put(event["event_id"], body)
+            except OSError as exc:
+                log.warning("usage report lost (outbox unavailable): %s", exc)
+            return
+        # The API is reachable: drain anything an earlier outage left behind.
+        self.flush_outbox()
 
 
 def extraction_cache_key(model: str, text: str) -> str:
