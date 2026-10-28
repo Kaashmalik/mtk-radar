@@ -279,6 +279,8 @@ browser step.
 > (EP-07) — is tracked in
 > [`docs/enhancement-plan-2026-10-28-gap-audit.md`](docs/enhancement-plan-2026-10-28-gap-audit.md)
 > and [`docs/ep-implementation-log.md`](docs/ep-implementation-log.md).
+> To prove the latest pass on a fully set-up machine, follow
+> [`docs/verify-at-home-2026-10-28.md`](docs/verify-at-home-2026-10-28.md).
 
 Remaining, with reasons: SSO/self-serve logins (single-operator token model is
 sufficient — see runbook §9), Postgres HA (single instance at this scale), and
