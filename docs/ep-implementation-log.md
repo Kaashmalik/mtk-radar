@@ -272,3 +272,22 @@ argv/plan only); live TikTok `creator_info` against an approved app; the
 redesigned calendar/offer pages with live API data in a browser (build and
 shell screenshots only); remote CI.
 
+## 2026-10-28 — second pass: the six remaining items
+
+| Work | Commit |
+|---|---|
+| Durable outbox (packages/outbox) for cost telemetry + monitor notifications; idempotent usage events (migration 041); compose volume | `5331ba2`, `e09d869` |
+| Shared content-addressed narration audio with sha256 verification; versioned context-complete TTS cache key | `fb5761e` |
+| YouTube quota reservation ledger (migration 042, Pacific day, package-level reservation, settle consumed/released, Settings card) | `998bfdf` |
+| TikTok creator_info snapshot (migration 043) + consent/disclosure UI + worker enforcement | `7307887` |
+| Caption QC measured with the real font (libass sizing rule), Pillow pinned | `e71aa76` |
+| Activity-following vertical reframing for captures (opt-in) | `b2be8a8` |
+
+**Checks executed** (office machine): unit suite **1059 passed, 4 skipped**;
+`ruff check .` clean; `pnpm typecheck` clean; `next build` clean.
+
+**Written, not executed here (no Postgres/FFmpeg):** integration tests for
+usage-event dedup, quota ledger lifecycle, TikTok options/consent hashing;
+migrations 041–043 on a real database; real FFmpeg sampling for reframing;
+live TikTok `creator_info`. See the home checklist.
+
