@@ -61,6 +61,14 @@ MATRIX: dict[str, tuple[str, ...]] = {
     "MTK_TOKEN_REFRESH_MARGIN_D": ("publishing",),
     "FACEBOOK_APP_ID": ("publishing",),
     "FACEBOOK_APP_SECRET": ("publishing",),
+    # 2026-10-28 plan: TikTok audit attestation + per-account breaker
+    # (workers/publishing/platforms/tiktok.py, workers/publishing/circuit.py)
+    "TIKTOK_APP_AUDITED": ("publishing",),
+    "MTK_PUBLISH_BREAKER_THRESHOLD": ("publishing",),
+    "MTK_PUBLISH_BREAKER_COOLDOWN_S": ("publishing",),
+    # workers/render/narration.py (verified-local TTS) + render.py (x264)
+    "TTS_LOCAL": ("render",),
+    "MTK_RENDER_X264_PRESET": ("render",),
 }
 
 #: Compose names that are intentionally compose-internal: interpolated from

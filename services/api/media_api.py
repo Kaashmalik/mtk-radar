@@ -116,12 +116,22 @@ def _local_path(ref: str) -> Optional[Path]:
     return path if path.is_file() else None
 
 
+#: Captures are WebM (Playwright) or Matroska (FFmpeg recorder, M2); renders
+#: are MP4. Declaring every file as MP4 mislabelled the review player's input.
+_MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+                ".mkv": "video/x-matroska", ".mov": "video/quicktime"}
+
+
+def media_type_for(ref: str) -> str:
+    return _MEDIA_TYPES.get(Path(str(ref).split("?", 1)[0]).suffix.lower(), "video/mp4")
+
+
 def _serve_local(path: Path) -> FileResponse:
     # Starlette's FileResponse implements Range/If-Range and ETag handling, so
     # the browser can seek without this route re-implementing HTTP semantics.
     return FileResponse(
         path,
-        media_type="video/mp4",
+        media_type=media_type_for(path.name),
         headers={"Cache-Control": "private, no-store"},
     )
 
@@ -176,7 +186,7 @@ def _serve_s3(ref: str, range_header: Optional[str]) -> StreamingResponse:
     return StreamingResponse(
         body(),
         status_code=206 if span else 200,
-        media_type="video/mp4",
+        media_type=media_type_for(ref),
         headers=headers,
     )
 
