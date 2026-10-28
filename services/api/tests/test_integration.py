@@ -6164,3 +6164,55 @@ def test_attention_lists_due_and_contradicted_research_claims_of_current_brief(a
     assert ours[due_id]["severity"] == "warning"
     assert future_id not in ours and old_id not in ours
     assert ours[due_id]["href"] == f"/offers/{offer_id}#research"
+
+
+def test_research_explainer_renders_without_capture_only_as_official_explainer(auth_client):
+    """M3: an explainer (current brief content_type 'explainer') is a render
+    candidate without a capture and may register a capture-less render; any
+    other script format still requires a redaction-reviewed capture."""
+    marker = uuid.uuid4().hex
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": f"Explainer {marker}", "category": "research_intro",
+        "offer_type": "trend_topic",
+    }).json()
+    offer_id = uuid.UUID(offer["id"])
+    markdown = f"# Explainer {marker}\n\nWhat the paper reports, with sources."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language, format) "
+         "VALUES ($1, 1, $2, 'en', 'official_explainer')", offer_id, markdown)
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
+
+    # Not yet an explainer brief → not a capture-less candidate.
+    before = auth_client.get("/render-candidates", headers=SVC).json()
+    assert not [c for c in before if c["offer_id"] == offer["id"]]
+
+    brief = auth_client.post(f"/offers/{offer['id']}/research", headers=AUTH, json={
+        "content_type": "explainer", "viewer_question": "Does it hold up?",
+        "claims": [{"claim_text": "Recall improved by 12 percent.",
+                    "claim_class": "author_reported", "status": "supported"}],
+    })
+    assert brief.status_code == 201, brief.text
+    after = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in after if c["offer_id"] == offer["id"]]
+    assert mine and mine[0]["capture_id"] is None
+
+    registered = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": f"projects/{marker}/explainer.mp4", "script_version": 1,
+        "script_version_hash": script_version_hash(markdown),
+        "status": "qc_failed", "qc_status": "failed",
+        "qc_report": {"version": 1, "status": "failed", "errors": ["fixture"]},
+    })
+    assert registered.status_code == 201, registered.text
+
+    tutorial_md = f"# Tutorial {marker}\n\nSteps."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language, format) "
+         "VALUES ($1, 2, $2, 'en', 'tested_tutorial')", offer_id, tutorial_md)
+    refused = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": f"projects/{marker}/tutorial.mp4", "script_version": 2,
+        "script_version_hash": script_version_hash(tutorial_md),
+        "status": "qc_failed", "qc_status": "failed",
+        "qc_report": {"version": 1, "status": "failed", "errors": ["fixture"]},
+    })
+    assert refused.status_code == 422, refused.text
+    assert "official_explainer" in refused.json()["detail"]
