@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Final, Optional
 
@@ -16,6 +17,23 @@ from presets import Preset
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
+# Encoder speed/quality trade-off. "slow" buys ~5-10% smaller files at the
+# same CRF; keep "medium" as the default for a single CPU render worker.
+X264_PRESET: Final[str] = os.environ.get("MTK_RENDER_X264_PRESET", "medium")
+AUDIO_SAMPLE_RATE: Final[int] = 48_000
+TRUE_PEAK_HEADROOM_DB: Final[float] = 0.5
+
+
+@dataclass(frozen=True)
+class Loudness:
+    """Delivery loudness target — mirrors qc.QCConfig so render and QC agree."""
+
+    target_lufs: float = -16.0
+    max_true_peak: float = -1.0
+    lra: float = 11.0
+
+
+DEFAULT_LOUDNESS: Final = Loudness()
 
 
 def resolve_timeline(
@@ -60,6 +78,7 @@ def build_ffmpeg_cmd(
     narration: Optional[str] = None,
     motion: Optional[str] = None,
     duration: Optional[float] = None,
+    loudness: Optional[Loudness] = DEFAULT_LOUDNESS,
 ) -> list[str]:
     """Build the full ffmpeg invocation for one preset.
 
@@ -68,6 +87,8 @@ def build_ffmpeg_cmd(
     - `motion` is a filter fragment from motion.py (push/crop/lower-third).
     - `duration` is the measured speech timeline. It is required with
       narration so no stream can be truncated implicitly by `-shortest`.
+    - `loudness` normalizes the delivered audio to the same target QC
+      measures. QC used to fail renders it never corrected; None opts out.
     """
     for asset in (video, output, captions, narration):
         if asset and (Path(asset).is_absolute() or PureWindowsPath(asset).is_absolute()):
@@ -94,19 +115,7 @@ def build_ffmpeg_cmd(
         cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", audio_map]
         if narration:
             cmd += ["-t", f"{duration:.3f}"]
-        cmd += [
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", str(preset.crf),
-            "-maxrate", preset.video_bitrate,
-            "-bufsize", preset.bufsize,
-            "-r", str(preset.fps),
-            "-c:a", "aac",
-            "-b:a", preset.audio_bitrate,
-            "-movflags", "+faststart",
-            output,
-        ]
-        return cmd
+        return cmd + delivery_args(preset, loudness) + [output]
 
     vf = preset.filter_chain
     if motion:
@@ -117,20 +126,60 @@ def build_ffmpeg_cmd(
     if narration:
         cmd += ["-t", f"{duration:.3f}"]
 
-    cmd += [
-        "-vf", vf,
+    cmd += ["-vf", vf]
+    return cmd + delivery_args(preset, loudness) + [output]
+
+
+def loudnorm_filter(loudness: Loudness) -> str:
+    """Single-pass EBU R128 normalization toward the QC target.
+
+    The true-peak ceiling sits a little below QC's limit so the encoder's
+    AAC overshoot cannot push a normalized track over it. loudnorm resamples
+    internally to 192 kHz, so the output is pinned back to 48 kHz.
+    """
+    return (
+        f"loudnorm=I={loudness.target_lufs:g}:"
+        f"TP={loudness.max_true_peak - TRUE_PEAK_HEADROOM_DB:g}:"
+        f"LRA={loudness.lra:g},aresample={AUDIO_SAMPLE_RATE}"
+    )
+
+
+def delivery_args(preset: Preset, loudness: Optional[Loudness]) -> list[str]:
+    """Platform-safe H.264/AAC delivery flags shared by every preset.
+
+    Everything a player or platform would otherwise guess is explicit:
+    8-bit 4:2:0 High profile (universal decode), BT.709 tags (no washed-out
+    colour on re-encode), a fixed 2-second GOP (clean seeking and the
+    keyframe cadence YouTube recommends), 48 kHz stereo AAC.
+    """
+    args = [
         "-c:v", "libx264",
-        "-preset", "medium",
+        "-preset", X264_PRESET,
         "-crf", str(preset.crf),
         "-maxrate", preset.video_bitrate,
         "-bufsize", preset.bufsize,
         "-r", str(preset.fps),
+        "-g", str(preset.fps * 2),
+        "-keyint_min", str(preset.fps),
+        "-bf", "2",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-level:v", "4.2",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
+        "-color_range", "tv",
+    ]
+    if loudness is not None:
+        args += ["-af", loudnorm_filter(loudness)]
+    args += [
         "-c:a", "aac",
         "-b:a", preset.audio_bitrate,
+        "-ar", str(AUDIO_SAMPLE_RATE),
+        "-ac", "2",
         "-movflags", "+faststart",
-        output,
     ]
-    return cmd
+    return args
 
 
 def probe_duration(path: str) -> Optional[float]:

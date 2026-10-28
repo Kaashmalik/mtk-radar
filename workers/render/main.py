@@ -459,6 +459,12 @@ class RenderJob:
                 narration=narration_file,  # mixed track maps 1:a
                 motion=motion_filter,
                 duration=expected_duration if narration_file else None,
+                # Normalize to exactly what QC will measure, so a correct
+                # render is not rejected for loudness it was never given.
+                loudness=render_mod.Loudness(
+                    target_lufs=qc_config.target_lufs,
+                    max_true_peak=qc_config.max_true_peak,
+                ),
             )
             log.info("rendering %s/%s :: %s", language, preset.key,
                      render_mod.describe(cmd))
