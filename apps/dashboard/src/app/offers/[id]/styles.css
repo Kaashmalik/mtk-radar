@@ -127,3 +127,27 @@
 .schedule-note { margin: 0; }
 .schedule-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 
+/* Research brief + claim ledger (EP-03 UI). */
+.research { display: grid; gap: 0.8rem; }
+.research-brief { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; font-size: 0.86rem; }
+.research-brief dt { color: var(--text-muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; padding-top: 0.15rem; }
+.research-brief dd { margin: 0; }
+.claim-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; }
+.claim {
+  --claim: var(--text-muted);
+  border: 1px solid var(--border-subtle); border-left: 3px solid var(--claim);
+  border-radius: var(--radius-sm); padding: 0.65rem 0.8rem; display: grid; gap: 0.4rem;
+  background: color-mix(in srgb, var(--claim) 5%, transparent);
+}
+.claim[data-status="supported"] { --claim: var(--ok); }
+.claim[data-status="contradicted"] { --claim: var(--danger); }
+.claim[data-status="unknown"] { --claim: var(--warn); }
+.claim-head { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.claim-status { color: var(--claim); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.claim-text { margin: 0; font-size: 0.9rem; }
+.claim-excerpt { margin: 0; padding-left: 0.7rem; border-left: 2px solid var(--border); color: var(--text-muted); font-size: 0.8rem; }
+.claim-foot { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; flex-wrap: wrap; font-size: 0.8rem; }
+.claim-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.claim-actions [aria-pressed="true"] { color: var(--claim); border-color: var(--claim); }
+@media (max-width: 640px) { .research-brief { grid-template-columns: 1fr; } }
+
