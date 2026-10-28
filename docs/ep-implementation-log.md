@@ -239,3 +239,36 @@ not installed on this machine — loudnorm/flags are asserted on argv only);
 full `pnpm verify` incl. API integration and Playwright e2e (no Postgres
 here); remote CI (owner billing lock).
 
+## 2026-10-28 audit follow-up — implementation pass (M2–M8)
+
+Plan: [`enhancement-plan-2026-10-28-gap-audit.md`](enhancement-plan-2026-10-28-gap-audit.md).
+
+| Work | Commit |
+|---|---|
+| Test hygiene: HN fixture wall-clock time bomb; `:` filename e2e skipped on NTFS | `9e432fc` |
+| G23 TikTok creator_info / offered privacy / creator settings / audit gate; G24 honest hashtag rule labels (YouTube >60 rule) | `1c111f0` |
+| G26 account-aware UTC + cross-page conflicts; Settings/Queue honest outage states; legacy palette → tokens | `3e20862` |
+| G19 per-platform account/render/privacy; G20 `POST /schedules/approve-and-queue` + calendar Review & queue; client conflict override fixed | `3711698` |
+| Job lease fencing with per-process holders (render/publishing/collector/batch) | `2174805` |
+| Per-account publishing circuit breaker | `47c4393` |
+| Research claim attention group; offer research ledger UI; queue content track | `2c5fcf2` |
+| Unique-video vs per-post unit economics; verified-local free TTS (`TTS_LOCAL`) | `a8bf53c` |
+| Opt-in near-lossless FFmpeg capture; media type per extension; env MATRIX extended | `625d62b` |
+| Research explainer renders without capture + scene manifest; format-bound capture-less registration | `d3fb9e6` |
+| Native 9:16 explainer cards | `346851a` |
+
+**Checks executed** (Windows 10, Python 3.13, Node 24): full Python unit
+suite **1013 passed, 4 skipped** (skips: 3 integration-gated + 1 NTFS-only);
+`ruff check .` clean; `pnpm typecheck` clean; dashboard `next build` clean.
+
+**Written but NOT executed here (no Postgres on this machine):** integration
+tests for approve-and-queue atomicity/stale preview, job result fencing,
+research attention, explainer candidates/registration, videos-vs-posts
+counting. They run on CI once the owner lifts the Actions billing lock.
+
+**Still unproven:** real FFmpeg encodes (no FFmpeg installed — loudnorm,
+delivery flags, explainer bases and the capture recorder are asserted on
+argv/plan only); live TikTok `creator_info` against an approved app; the
+redesigned calendar/offer pages with live API data in a browser (build and
+shell screenshots only); remote CI.
+
