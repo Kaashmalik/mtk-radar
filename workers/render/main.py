@@ -46,6 +46,7 @@ from api_paging import iter_pages  # noqa: E402
 import captions as captions_mod  # noqa: E402
 import covers as covers_mod  # noqa: E402
 import explainer as explainer_mod  # noqa: E402
+import reframe as reframe_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
 import narration as narration_mod  # noqa: E402
 import project as project_mod  # noqa: E402
@@ -305,6 +306,24 @@ class RenderJob:
                     f"explainer base render failed: {(proc.stderr or '')[-600:]}")
         return str(out_dir / "base.mp4"), scenes
 
+    def _reframed_vertical(self, preset, capture_video: str):
+        """The vertical preset with an activity-following crop, or unchanged."""
+        import dataclasses
+
+        crop = reframe_mod.crop_fraction()
+        keys = reframe_mod.analyse(capture_video, crop)
+        if not keys:
+            log.info("vertical reframe: activity signal too weak — full-frame composition")
+            return preset
+        (self.project / "assets").mkdir(parents=True, exist_ok=True)
+        (self.project / "assets" / "reframe-vertical.json").write_text(json.dumps({
+            "crop_fraction": crop,
+            "keyframes": [{"t": k.t, "center": k.center} for k in keys],
+        }, indent=2), encoding="utf-8")
+        log.info("vertical reframe: %d keyframes, crop %.0f%% of width", len(keys), crop * 100)
+        return dataclasses.replace(
+            preset, filter_chain=reframe_mod.vertical_focus_chain(keys, crop))
+
     def _video_for_preset(self, video_rel: str, preset_key: str) -> str:
         """The natively composed vertical explainer base when it exists."""
         if preset_key == "vertical" and video_rel.replace("\\", "/").endswith(
@@ -489,6 +508,10 @@ class RenderJob:
         results = []
         for key in preset_keys:
             preset = get_preset(key)
+            if key == "vertical" and explainer_brief is None and reframe_mod.enabled():
+                # V5: follow on-screen activity instead of shrinking the whole
+                # 16:9 capture (falls back to full frame on a weak signal).
+                preset = self._reframed_vertical(preset, capture_video)
             # Pair each delivery frame with the cover designed for it. A 16:9
             # thumbnail on a 9:16 Reel/TikTok is the wrong asset.
             selected_cover = covers_mod.cover_for_preset(cover_bundle, preset.key)
