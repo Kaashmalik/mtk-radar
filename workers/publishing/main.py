@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 from api_paging import fetch_all  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 from platforms import (  # noqa: E402
     FacebookAdapter,
@@ -484,7 +484,7 @@ class Publisher:
             try:
                 res = self.api.post(
                     "/jobs/claim",
-                    json={"worker": "publishing-worker", "lease_s": 900,
+                    json={"worker": lease_holder("publishing"), "lease_s": 900,
                           "kinds": ["publish_schedule"]},
                 )
             except httpx.HTTPError as exc:
@@ -521,6 +521,7 @@ class Publisher:
             payload["detail"] = detail[:1900]
         if retry_after_s is not None:
             payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+        payload["worker"] = lease_holder("publishing")  # lease fencing
         try:
             self.api.post(f"/jobs/{job_id}/result", json=payload)
         except httpx.HTTPError as exc:

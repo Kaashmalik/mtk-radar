@@ -361,3 +361,24 @@ def test_kill_knob_disables_the_render_queue(monkeypatch, tmp_path):
     assert render_main._drain_render_jobs(
         client, "http://fake", tmp_path, ["landscape"], True, "studio",
         [_candidate()]) == set()
+
+
+def test_lease_keeper_flags_a_lost_lease_and_stops(monkeypatch):
+    """A 409 on renewal means another holder owns the job now: the keeper
+    sets `lost` (so no outcome is reported) and stops touching."""
+    import threading
+
+    monkeypatch.setattr(render_main, "RENDER_LEASE_TOUCH_S", 0)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(409, json={"detail": "held by another worker"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    stop, lost = threading.Event(), threading.Event()
+    render_main._lease_keeper(client, "job-1", stop, "render-a-1", lost)
+    assert lost.is_set()
+    assert len(calls) == 1
+    assert b'"worker":"render-a-1"' in calls[0].content.replace(b" ", b"")
+
