@@ -130,8 +130,8 @@ export default function BatchApprove({ rows }: { rows: Row[] }) {
             <span
               className="badge"
               style={{
-                color: r.state === "approved" ? "#3fb950" : "#d29922",
-                borderColor: r.state === "approved" ? "#3fb950" : "#d29922",
+                color: r.state === "approved" ? "var(--ok)" : "var(--warn)",
+                borderColor: r.state === "approved" ? "var(--ok)" : "var(--warn)",
               }}
             >
               {r.state}
@@ -164,7 +164,7 @@ export default function BatchApprove({ rows }: { rows: Row[] }) {
       {results && (
         <ul className="small" style={{ margin: "0.6rem 0 0", paddingLeft: "1rem" }}>
           {results.map((r) => (
-            <li key={r.id} style={{ color: r.ok ? "#3fb950" : "#f85149" }}>
+            <li key={r.id} style={{ color: r.ok ? "var(--ok)" : "var(--danger)" }}>
               {r.ok ? `✓ ${r.state ?? "done"}` : `✗ ${r.detail ?? "refused"}`}
             </li>
           ))}

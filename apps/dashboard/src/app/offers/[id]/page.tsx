@@ -361,7 +361,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                 <div>
                   {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
                   {c.redaction_reviewed ? (
-                    <span style={{ color: "#3fb950" }}>redaction reviewed ✓</span>
+                    <span style={{ color: "var(--ok)" }}>redaction reviewed ✓</span>
                   ) : (
                     <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
                   )}
@@ -409,14 +409,14 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                   <span style={{ color: "#f0883e" }}> · TTS narration (label required)</span>
                 )}
                 {" · "}
-                <span style={{ color: r.qc_status === "passed" ? "#3fb950" : "#f85149" }}>
+                <span style={{ color: r.qc_status === "passed" ? "var(--ok)" : "var(--danger)" }}>
                   QC {r.qc_status}
                 </span>
                 {r.status !== "rendered" && (
-                  <span style={{ color: "#f85149" }}> · {r.status}</span>
+                  <span style={{ color: "var(--danger)" }}> · {r.status}</span>
                 )}
                 {renderQcErrors(r.qc_report).length > 0 && (
-                  <div className="small" style={{ color: "#f85149" }}>
+                  <div className="small" style={{ color: "var(--danger)" }}>
                     {renderQcErrors(r.qc_report).join(" · ")}
                   </div>
                 )}

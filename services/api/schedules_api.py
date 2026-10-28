@@ -727,7 +727,7 @@ async def list_schedules(
         after_id,
     )
     out = [dict(r) for r in rows]
-    _annotate_conflicts(out)
+    _annotate_conflicts(out, context=await _conflict_neighbors(pool, out))
     set_next_cursor(
         response, out, limit,
         lambda row: encode_cursor(row["local_time"], row["id"]),
@@ -746,45 +746,95 @@ PUBLISH_CONFLICT_WINDOW_MIN = 60
 _CONFLICT_STATES = ("needs_approval", "approved", "scheduled")
 
 
-def _local_slot(row: dict) -> tuple:
-    """(local day, local minute-of-day) of a schedule in ITS display tz."""
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-    when = row.get("local_time")
-    if not isinstance(when, _dt):
-        return ("?", 0)
-    tz = ZoneInfo(str(row.get("timezone") or "Asia/Karachi"))
-    local = when.astimezone(tz)
-    return (local.date().isoformat(), local.hour * 60 + local.minute)
+def _same_audience(a: dict, b: dict) -> bool:
+    """Same platform AND same account (G26).
 
-
-def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WINDOW_MIN) -> None:
-    """Mark same-platform-same-window schedules (WP-H).
-
-    Two (or more) posts on one platform inside `window_min` minutes of each
-    other on the same local day each carry `conflict: true` and
-    `conflict_with: [other ids]`. Pure function over the fetched page — the
-    calendar fetches up to 200 rows, falling inside one page by construction;
-    conflicts are advisory: a human decides, the release gate is unchanged.
+    Two different channels on one platform do not double-post to one
+    audience. An unpinned post (no account yet) is conservatively treated
+    as potentially any account on its platform.
     """
-    active = [r for r in rows if r.get("state") in _CONFLICT_STATES]
+    if a.get("platform") != b.get("platform"):
+        return False
+    acc_a, acc_b = a.get("platform_account_id"), b.get("platform_account_id")
+    return acc_a is None or acc_b is None or str(acc_a) == str(acc_b)
+
+
+async def _conflict_neighbors(pool, page: list[dict],
+                              window_min: int = PUBLISH_CONFLICT_WINDOW_MIN) -> list[dict]:
+    """Active schedules OUTSIDE this page that fall within the window of it.
+
+    Keyset pages split the timeline; without these, two posts 10 minutes
+    apart on adjacent pages were never compared (G26).
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    times = [r["local_time"] for r in page
+             if r.get("state") in _CONFLICT_STATES and isinstance(r.get("local_time"), _dt)]
+    if not times:
+        return []
+    window = _td(minutes=window_min)
+    rows = await pool.fetch(
+        """
+        SELECT s.id, s.platform, s.platform_account_id, s.state::text AS state,
+               s.local_time
+        FROM schedules s
+        WHERE s.state::text = ANY($1::text[])
+          AND s.local_time BETWEEN $2 AND $3
+          AND NOT (s.id = ANY($4::uuid[]))
+        ORDER BY s.local_time
+        LIMIT 500
+        """,
+        list(_CONFLICT_STATES), min(times) - window, max(times) + window,
+        [r["id"] for r in page],
+    )
+    return [dict(r) for r in rows]
+
+
+def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WINDOW_MIN,
+                        *, context: list[dict] | None = None) -> None:
+    """Mark same-audience schedules inside the publish window (WP-H, G26).
+
+    Two (or more) posts for the same platform ACCOUNT whose absolute (UTC)
+    times are within `window_min` minutes each carry `conflict: true` and
+    `conflict_with: [other ids]`. Comparing instants instead of local
+    (day, minute) buckets catches 23:50 vs 00:10 and posts displayed in
+    different timezones. `context` holds active neighbours from outside the
+    page so page boundaries cannot hide a conflict; only `rows` are
+    annotated. Conflicts are advisory: a human decides, the gate is unchanged.
+    """
+    from datetime import datetime as _dt
+
     for row in rows:
         row["conflict"] = False
         row["conflict_with"] = []
-    buckets: dict[tuple, list[dict]] = {}
-    for row in active:
-        day, minute = _local_slot(row)
-        buckets.setdefault((row.get("platform"), day), []).append(
-            (minute, row))
-    for entries in buckets.values():
-        entries.sort(key=lambda pair: pair[0])
-        for i, (minute, row) in enumerate(entries):
-            for j, (other_min, other) in enumerate(entries):
-                if i == j:
-                    continue
-                if abs(minute - other_min) <= window_min:
-                    row["conflict"] = True
-                    row["conflict_with"].append(str(other["id"]))
+    page_ids = {str(r.get("id")) for r in rows}
+    candidates = [r for r in rows if r.get("state") in _CONFLICT_STATES]
+    candidates += [r for r in (context or [])
+                   if r.get("state") in _CONFLICT_STATES and str(r.get("id")) not in page_ids]
+    candidates = [r for r in candidates if isinstance(r.get("local_time"), _dt)]
+    candidates.sort(key=lambda r: r["local_time"])
+    limit_s = window_min * 60
+
+    def _within(a: dict, b: dict) -> bool:
+        return abs((a["local_time"] - b["local_time"]).total_seconds()) <= limit_s
+
+    for i, row in enumerate(candidates):
+        if str(row.get("id")) not in page_ids:
+            continue
+        # Time-sorted: walk outward in each direction until the window ends.
+        neighbours = []
+        for j in range(i - 1, -1, -1):
+            if not _within(row, candidates[j]):
+                break
+            neighbours.append(candidates[j])
+        for j in range(i + 1, len(candidates)):
+            if not _within(row, candidates[j]):
+                break
+            neighbours.append(candidates[j])
+        for other in neighbours:
+            if _same_audience(row, other):
+                row["conflict"] = True
+                row["conflict_with"].append(str(other["id"]))
 
 
 @router.get("/schedules/best-times")

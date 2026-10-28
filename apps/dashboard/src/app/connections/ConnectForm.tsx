@@ -141,8 +141,8 @@ export default function ConnectForm() {
         <button type="submit" disabled={busy || handle.trim().length < 2}>
           {busy ? "Connecting…" : "Connect account"}
         </button>
-        {msg && <span className="small" style={{ color: "#3fb950" }}>{msg}</span>}
-        {error && <span className="small" style={{ color: "#f85149" }}>{error}</span>}
+        {msg && <span className="small" style={{ color: "var(--ok)" }}>{msg}</span>}
+        {error && <span className="small" style={{ color: "var(--danger)" }}>{error}</span>}
       </div>
     </form>
   );

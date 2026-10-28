@@ -186,8 +186,8 @@ export default function SourceForm() {
         <button type="submit" disabled={busy || provider.trim().length < 2}>
           {busy ? "Registering…" : "Register source"}
         </button>
-        {msg && <span className="small" style={{ color: "#3fb950" }}>{msg}</span>}
-        {error && <span className="small" style={{ color: "#f85149" }}>{error}</span>}
+        {msg && <span className="small" style={{ color: "var(--ok)" }}>{msg}</span>}
+        {error && <span className="small" style={{ color: "var(--danger)" }}>{error}</span>}
       </div>
     </form>
   );
