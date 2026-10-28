@@ -77,19 +77,24 @@ export default function StoryboardEditor({ offerId }: { offerId: string }) {
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string; list?: string[] } | null>(null);
   const dragFrom = useRef<number | null>(null);
 
-  const load = useCallback(async () => {
+  /** `keepScenes`: refresh the inputs (captures, claims, problems) without
+   * replacing the scene list — used after a capture request so unsaved
+   * storyboard edits are never wiped. */
+  const load = useCallback(async (keepScenes = false) => {
     try {
       const res = await clientFetch(`/offers/${offerId}/storyboard`);
       if (!res.ok) throw new Error(String(res.status));
       const data = (await res.json()) as Board;
       setBoard(data);
-      setScenes((data.current?.scenes ?? data.suggested).map((s) => ({
-        ...s, weight: Number(s.weight ?? 1), include: s.include !== false,
-      })));
-      setDirty(false);
+      if (!keepScenes) {
+        setScenes((data.current?.scenes ?? data.suggested).map((s) => ({
+          ...s, weight: Number(s.weight ?? 1), include: s.include !== false,
+        })));
+        setDirty(false);
+      }
       setState("ready");
     } catch {
-      setState("unavailable");
+      if (!keepScenes) setState("unavailable");
     }
   }, [offerId]);
 
@@ -329,7 +334,7 @@ export default function StoryboardEditor({ offerId }: { offerId: string }) {
         </div>
       )}
 
-      <PageCapturePanel offerId={offerId} board={board} onChanged={load} />
+      <PageCapturePanel offerId={offerId} board={board} onChanged={() => load(true)} />
     </div>
   );
 }
