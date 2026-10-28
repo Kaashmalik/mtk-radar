@@ -92,15 +92,35 @@ does not recompute thumbnail-text parity.
 |---|---|---|---|---|
 | M0 | Hygiene | H1 (owner), H2 (owner), H3 README status | 0.5 d | H3 done; H1/H2 owner |
 | M1 | Full HD encoding | V2, V3, V4 + tests on argv/filters | 1–2 d | **done** (`1d93070`); real-encode proof pending ffmpeg |
-| M2 | Capture v2 | V1 + public-page capture worker with URL recipes | 2–3 d | open |
-| M3 | Explainer track & scenes | V5–V9 | 4–6 d | open |
-| M4 | One-click scheduling | G19, G20, G23, G24, G26, Q1 | 3–4 d | open |
-| M5 | Robustness | §C | 3–4 d | open |
-| M6 | Research UI | §D | 2 d | open |
-| M7 | Cost | §F | 1–2 d | open |
-| M8 | Dashboard design system | §G | 2–3 d | slice 1 done (shell, tokens, themes, motion); per-page polish open |
+| M2 | Capture v2 | V1 + public-page capture worker with URL recipes | 2–3 d | V1 **done** (`625d62b`, opt-in FFmpeg recorder, correct media types); public-page recipe worker open |
+| M3 | Explainer track & scenes | V5–V9 | 4–6 d | V6 + scene manifest **done** (`d3fb9e6`), V5 for explainers (`346851a`); keyframed reframing of real captures, beat editor, V8 shared TTS assets, V9 font metrics open |
+| M4 | One-click scheduling | G19, G20, G23, G24, G26, Q1 | 3–4 d | G19/G20 (`3711698`), G23/G24 (`1c111f0`), G26 (`3e20862`) **done**; Q1 quota ledger + TikTok consent UI open |
+| M5 | Robustness | §C | 3–4 d | lease fencing (`2174805`), circuit breaker (`47c4393`), outage states (`3e20862`) **done**; durable notification/cost outbox + failure-injection suite open |
+| M6 | Research UI | §D | 2 d | **done** (`2c5fcf2`); real-browser extension smoke open (owner) |
+| M7 | Cost | §F | 1–2 d | **done** (`a8bf53c`): unique-video economics, verified-local free TTS |
+| M8 | Dashboard design system | §G | 2–3 d | shell/tokens/themes/motion (`e6df684`), legacy palette → tokens, schedule/review/research UIs **done**; remaining per-page inline-style cleanup open |
 | M9 | Proof | integration+e2e on real Postgres, one real private YouTube post, real-browser extension smoke; update the EP log | 1–2 d | open |
 
 Total ≈ 20–29 developer-days. Progress is recorded in
 [`ep-implementation-log.md`](ep-implementation-log.md) with executed vs
 unproven checks, following the existing convention.
+
+## Still open after the 2026-10-28 implementation pass
+
+Ordered by value; each needs either live infrastructure or a decision:
+
+1. **Owner:** H1 (personal-data export in a public repo), H2 (Actions billing).
+2. **M9 proof:** run `pnpm verify` with Postgres (the new integration tests —
+   approve-and-queue, job fencing, research attention, explainer renders,
+   videos-vs-posts — have only been written, not executed); one real FFmpeg
+   render of a capture AND an explainer through QC; one private YouTube post.
+3. **Q1:** bucketed YouTube quota reservation ledger (needs a migration).
+4. **TikTok consent UI:** surface `creator_info` (handle, offered privacy,
+   disabled interactions) in the schedule form before a Direct Post.
+5. **V8/G25:** content-addressed shared TTS audio in object storage (the cache
+   still stores a worker-local path).
+6. **EP-07 rest:** durable notification/cost-telemetry outbox; failure-
+   injection suite (timeout, duplicate delivery, Redis/API outage, worker death).
+7. **V5/V9 for captures:** keyframed vertical reframing from capture callouts;
+   font-metric caption widths (Urdu Nastaliq).
+

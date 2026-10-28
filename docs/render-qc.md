@@ -101,3 +101,21 @@ human redaction review, OCR/transcript leak checks, factual claim checks, mobile
 device previews or golden-clip regression tests. Those remain separate
 release-blocking work in WP09. QC failures are evidence for a human fix, never
 permission to bypass a gate.
+
+## Delivery encoding and the explainer track (2026-10-28)
+
+- **Normalization before measurement.** The render applies `loudnorm` at the
+  QC target (`MTK_RENDER_QC_TARGET_LUFS`, default −16 LUFS; true peak 0.5 dB
+  under `MTK_RENDER_QC_MAX_TRUE_PEAK`) and resamples to 48 kHz, so loudness QC
+  verifies a corrected track instead of rejecting an uncorrected one.
+- **Explicit delivery flags.** H.264 High@4.2, `yuv420p`, BT.709 tags, a
+  2-second GOP, CRF 18 with a 12 Mbps cap for both 1080p presets
+  (`MTK_RENDER_X264_PRESET` trades encode time for size).
+- **Research explainers** (current brief `content_type = explainer`, script
+  format `official_explainer`) render without a capture: claim cards over a
+  mid-tone, lightly grained background with fades, one natively composed base
+  per orientation, and `assets/explainer/scene_manifest.json` (sha256 logged).
+  The background is deliberately not black and never static, so black-frame
+  and freeze checks pass on their merits — no exemption ranges are used.
+  Contradicted claims are never shown; unknown claims are labelled.
+
