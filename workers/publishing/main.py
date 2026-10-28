@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from api_paging import fetch_all  # noqa: E402
+from circuit import AccountBreaker  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
 from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
@@ -95,6 +96,9 @@ class Publisher:
     def __init__(self, api_url: str = API_URL_DEFAULT):
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"), headers=_api_auth_headers())
         self.policy: dict | None = None
+        # EP-07: a failing account is skipped (left scheduled) for a cooldown
+        # instead of being hit by every queued post on every sweep.
+        self.breaker = AccountBreaker.from_env()
 
     # -------------------------------------------------------------- policy
 
@@ -800,6 +804,17 @@ class Publisher:
                 "capability list); reschedule with a supported mode, never retry")
             return False
 
+        breaker_key = AccountBreaker.key(
+            platform, getattr(adapter, "account_id", None) or post.get("platform_account_id"))
+        allowed, wait_s = self.breaker.allow(breaker_key)
+        if not allowed:
+            # Not a failure of THIS post: it stays scheduled and is retried
+            # once the account's cooldown ends. Nothing is uploaded.
+            log.warning("schedule %s: %s account %s is cooling down after repeated "
+                        "failures (%.0fs left) — skipped this sweep",
+                        post["id"], platform, breaker_key[1], wait_s)
+            return False
+
         # v0.23: an upload attempt that never reported its outcome is
         # UNKNOWN — the post may already be live on the platform. Publishing
         # again would create a duplicate public post, so the post is held for
@@ -1154,6 +1169,7 @@ class Publisher:
                 remote_metadata=remote_metadata,
             )
             log.info("published %s → %s (%s)", post["id"], platform, remote_id)
+            self.breaker.success(breaker_key)
             return True
         except (TokenExpiredError, TransportUnauthorized) as exc:
             # A 401 late in the package finalize (thumbnail/captions/playlist)
@@ -1182,6 +1198,7 @@ class Publisher:
             log.warning("schedule %s: %s rate limited (retry after %ss) — failed, "
                         "auto-retry honors the server delay", post["id"], platform,
                         exc.retry_after_s or "its own backoff")
+            self.breaker.failure(breaker_key, min_open_s=float(exc.retry_after_s or 0))
             self._report(post["id"], ok=False, attempt_token=attempt_token,
                          remote_post_id=remote_id,
                          detail=f"platform rate limit: {exc}",
@@ -1194,6 +1211,10 @@ class Publisher:
                          attempt_token=attempt_token,
                          detail=f"upload/confirmation failed: {exc}")
             log.exception("schedule %s: upload/confirmation failed", post["id"])
+            if self.breaker.failure(breaker_key):
+                log.error("ALERT %s account %s opened its circuit breaker after "
+                          "repeated failures — its posts wait %ss before one probe",
+                          platform, breaker_key[1], int(self.breaker.cooldown_s))
             return False
 
     def _render_for_post(self, post: dict) -> dict | None:
