@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
@@ -50,6 +52,11 @@ def test_repo_itself_is_clean():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot create the bad name: NTFS turns 'a: b' into an "
+    "alternate data stream, so git never sees the file (the lint's whole point)",
+)
 def test_detects_bad_name_in_a_temp_tree(tmp_path: Path):
     bad = tmp_path / "TikTok Guide: 2026.md"
     bad.write_text("x")
