@@ -81,6 +81,25 @@ _PREFERRED_RENDER_PRESET = {
 # ---------------------------------------------------------------- schemas
 
 
+class TikTokOptionsIn(BaseModel):
+    """Per-post TikTok Direct Post choices (G23 UX, TikTok Content Sharing
+    Guidelines). Shown to the operator next to the creator's live
+    creator_info; nothing here is inferred or defaulted to "on"."""
+
+    disable_comment: bool = False
+    disable_duet: bool = False
+    disable_stitch: bool = False
+    # Commercial content disclosure: promoting yourself (brand_organic) or a
+    # third party (brand_content, "paid partnership"). Never inferred.
+    brand_organic: bool = False
+    brand_content: bool = False
+    # The operator explicitly agreed to TikTok's Music Usage Confirmation
+    # (and Branded Content Policy when brand_content) for this post.
+    consent: bool = False
+    # The creator account the operator saw when consenting.
+    creator_username: Optional[str] = Field(default=None, max_length=100)
+
+
 class ScheduleIn(BaseModel):
     platform: str
     local_time: datetime
@@ -103,6 +122,9 @@ class ScheduleIn(BaseModel):
     # for YouTube/Facebook, 9:16 for Instagram/TikTok). YouTube Shorts can pin
     # a vertical render explicitly.
     render_id: Optional[uuid.UUID] = None
+    # TikTok only: the reviewed Direct Post choices + consent (ignored for
+    # other platforms). Part of the metadata hash the reviewer approves.
+    tiktok: Optional[TikTokOptionsIn] = None
 
 
 class ScheduleTransitionIn(BaseModel):
@@ -405,6 +427,21 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
     # Pin the language of the actual SRT so YouTube labels the track correctly.
     metadata.setdefault("captions_language", language_policy["captions_language"])
 
+    if body.platform == "tiktok" and body.tiktok is not None:
+        options = body.tiktok
+        if options.brand_content and body.privacy != "public":
+            # TikTok: branded content cannot be posted as "only me".
+            raise HTTPException(
+                status_code=422,
+                detail="TikTok branded content (paid partnership) must be public — "
+                       "change privacy or untick branded content",
+            )
+        metadata["tiktok"] = {
+            **options.model_dump(),
+            # Who consented, and when — part of the approved package.
+            "consent_by": actor if options.consent else None,
+        }
+
     cover_path = body.cover_path or render["cover_path"]
     pinned_comment = body.pinned_comment or metadata.get("pinned_comment")
 
@@ -550,6 +587,7 @@ class PlatformOverrideIn(BaseModel):
     platform_account_id: Optional[uuid.UUID] = None
     youtube_playlist_id: Optional[str] = None
     render_id: Optional[uuid.UUID] = None
+    tiktok: Optional[TikTokOptionsIn] = None
 
 
 class BatchScheduleIn(BaseModel):
@@ -623,6 +661,7 @@ async def create_schedules_batch(offer_id: uuid.UUID, body: BatchScheduleIn,
             youtube_playlist_id=(override.youtube_playlist_id if override
                                  and override.youtube_playlist_id is not None
                                  else body.youtube_playlist_id),
+            tiktok=override.tiktok if override and override.tiktok is not None else None,
         )
         try:
             row = await _create_one_schedule(pool, offer_id, single, actor)

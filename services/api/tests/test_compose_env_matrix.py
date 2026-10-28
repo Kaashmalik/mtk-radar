@@ -64,6 +64,7 @@ MATRIX: dict[str, tuple[str, ...]] = {
     # 2026-10-28 plan: TikTok audit attestation + per-account breaker
     # (workers/publishing/platforms/tiktok.py, workers/publishing/circuit.py)
     "TIKTOK_APP_AUDITED": ("publishing",),
+    "MTK_TIKTOK_CAPABILITY_TTL_S": ("publishing",),
     "MTK_PUBLISH_BREAKER_THRESHOLD": ("publishing",),
     "MTK_PUBLISH_BREAKER_COOLDOWN_S": ("publishing",),
     # workers/render/narration.py (verified-local TTS) + render.py (x264)

@@ -328,6 +328,7 @@ class Publisher:
         try:
             drained = self._drain_publish_jobs(now)
             self.token_maintenance(now)
+            self.refresh_capabilities()
             return drained + self._sweep(now)
         finally:
             self._release_sweep_lock("publishing")
@@ -341,6 +342,50 @@ class Publisher:
     #: At most one maintenance attempt per account per day (a refusal must
     #: not become a per-sweep hammering loop against the OAuth endpoint).
     TOKEN_RETRY_AFTER_FAIL_S = 86400
+
+    #: How long a TikTok creator_info snapshot is shown before a refresh.
+    CAPABILITY_TTL_S = int(os.environ.get("MTK_TIKTOK_CAPABILITY_TTL_S", "1800"))
+
+    def refresh_capabilities(self) -> int:
+        """Publish each active TikTok account's live creator_info so the
+        dashboard can show it before the operator consents (G23 UX).
+
+        Read-only on TikTok's side; failures are logged and retried next
+        sweep. Only allowlisted fields are stored by the API.
+        """
+        try:
+            accounts = self.api.get("/platform-accounts", params={"platform": "tiktok"}).json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("capability refresh skipped: %s", exc)
+            return 0
+        if not isinstance(accounts, list):
+            return 0
+        refreshed = 0
+        now = datetime.now(timezone.utc)
+        for account in accounts:
+            if account.get("platform") != "tiktok" or account.get("status") not in (None, "active"):
+                continue
+            checked = account.get("capabilities_checked_at")
+            try:
+                fresh = checked and (now - datetime.fromisoformat(
+                    str(checked).replace("Z", "+00:00"))).total_seconds() < self.CAPABILITY_TTL_S
+            except ValueError:
+                fresh = False
+            if fresh:
+                continue
+            adapter = self._adapter_for_account(account)
+            if adapter is None or not hasattr(adapter, "creator_info"):
+                continue
+            try:
+                adapter.ensure_ready()
+                info = adapter.creator_info()
+                self.api.put(f"/platform-accounts/{account['id']}/capabilities",
+                             json={"capabilities": info})
+                refreshed += 1
+            except Exception as exc:  # noqa: BLE001 — never blocks publishing
+                log.warning("tiktok creator_info refresh failed for %s: %s",
+                            account.get("account_handle"), type(exc).__name__)
+        return refreshed
 
     def token_maintenance(self, now: datetime) -> int:
         """Renew Facebook/Instagram long-lived tokens on a ~45-day cadence.
@@ -941,6 +986,16 @@ class Publisher:
                 post["id"],
                 "publish package hash does not match its pinned fields — "
                 "re-schedule to restore a reviewable package")
+            return False
+        if platform == "tiktok" and not (meta.get("tiktok") or {}).get("consent"):
+            # TikTok Content Sharing Guidelines: every Direct Post needs the
+            # operator's explicit consent against the creator's live
+            # creator_info. The consent is part of the hashed package.
+            self._block(
+                post["id"],
+                "TikTok Direct Post needs explicit consent — re-schedule from the "
+                "dashboard after reviewing the creator info and post settings "
+                "(or export and post natively in the TikTok app)")
             return False
         # Never fill in missing copy after the hash check: the upload must be
         # exactly the package a reviewer approved. An empty caption/title is a

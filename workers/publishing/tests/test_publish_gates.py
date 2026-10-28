@@ -557,3 +557,91 @@ def test_package_units_follow_configured_costs(monkeypatch):
     assert full["units"] == 100 + 60 + 50 + 400 + 50 + 50
     monkeypatch.setenv("YOUTUBE_QUOTA_COST_UPLOAD", "junk")
     assert quota.cost("upload") == 1600
+
+
+# ------------------------------------------- TikTok consent + creator info
+
+def _tiktok_post(render, tiktok_options=None):
+    metadata = {"title": "Approved title",
+                "caption": "Approved caption with the reviewed CTA.",
+                "captions_language": "en"}
+    if tiktok_options is not None:
+        metadata["tiktok"] = tiktok_options
+    post = _post(render, metadata=metadata)
+    post["platform"] = "tiktok"
+    post["package_hash"] = pub._canonical_hash({
+        "offer_id": "off-1", "platform": "tiktok", "account_id": None,
+        "render_id": "r1", "render_sha256": post["render_sha256"],
+        "metadata_hash": post["metadata_hash"], "cover_sha256": None,
+        "captions_sha256": None, "script_version_hash": "APPROVED", "language": "en",
+        "privacy": "private", "caption_variant": "default", "metadata_variant": "default",
+        "pinned_comment": None, "youtube_playlist_id": None,
+    })
+    return post
+
+
+def test_tiktok_post_without_recorded_consent_is_blocked_before_any_request():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    assert p._publish(_tiktok_post(render), {"tiktok": adapter}) is False
+    assert adapter.uploads == []
+    result = _result_calls(p.api)[0][2]
+    assert result["hold"] is True and "consent" in result["detail"]
+    assert not _posts_to(p.api, "/attempt")
+
+
+def test_tiktok_post_with_consent_uploads_with_the_reviewed_options():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    adapter = FakeAdapter()
+    options = {"consent": True, "consent_by": "kashif", "disable_duet": True,
+               "brand_organic": True, "creator_username": "mtk"}
+    assert p._publish(_tiktok_post(render, options), {"tiktok": adapter}) is True
+    assert adapter.uploads[0][3]["tiktok"] == options
+    assert not _posts_to(p.api, "/quota/reserve"), "YouTube quota is YouTube-only"
+
+
+def test_capability_refresh_publishes_stale_creator_info_only(monkeypatch):
+    from datetime import datetime, timezone
+
+    p = pub.Publisher(api_url="http://fake-api")
+    fresh_at = datetime.now(timezone.utc).isoformat()
+    puts = []
+
+    class Api:
+        def get(self, path, params=None):
+            return FakeResponse([
+                {"id": "a1", "platform": "tiktok", "status": "active",
+                 "account_handle": "stale", "capabilities_checked_at": None},
+                {"id": "a2", "platform": "tiktok", "status": "active",
+                 "account_handle": "fresh", "capabilities_checked_at": fresh_at},
+                {"id": "a3", "platform": "tiktok", "status": "token_expired",
+                 "account_handle": "dead"},
+                {"id": "a4", "platform": "tiktok", "status": "active",
+                 "account_handle": "broken", "capabilities_checked_at": None},
+            ])
+
+        def put(self, path, json=None):
+            puts.append((path, json))
+            return FakeResponse({})
+
+    class Creator:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def ensure_ready(self):
+            pass
+
+        def creator_info(self):
+            if self.fail:
+                raise RuntimeError("tiktok down")
+            return {"creator_username": "mtk", "privacy_level_options": ["SELF_ONLY"]}
+
+    p.api = Api()
+    monkeypatch.setattr(p, "_adapter_for_account",
+                        lambda account: Creator(fail=account["id"] == "a4"))
+    assert p.refresh_capabilities() == 1
+    assert puts == [("/platform-accounts/a1/capabilities",
+                     {"capabilities": {"creator_username": "mtk",
+                                       "privacy_level_options": ["SELF_ONLY"]}})]

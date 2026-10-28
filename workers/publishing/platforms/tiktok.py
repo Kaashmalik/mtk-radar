@@ -190,6 +190,12 @@ class TikTokAdapter(PublishAdapter):
                 f"video is {float(duration):.0f}s but this creator may post at most "
                 f"{int(max_duration)}s — export a shorter edit")
 
+        # The reviewed per-post choices live under meta["tiktok"] (hashed with
+        # the package); top-level keys remain for older schedules.
+        options = {**{k: meta.get(k) for k in ("disable_comment", "disable_duet",
+                                               "disable_stitch", "brand_content",
+                                               "brand_organic")},
+                   **(meta.get("tiktok") or {})}
         body = {
             "post_info": {
                 "title": (meta.get("title") or "MTK RADAR AI")[:88],
@@ -197,15 +203,15 @@ class TikTokAdapter(PublishAdapter):
                 "privacy_level": level,
                 # The creator's own disabled interactions always win.
                 "disable_comment": bool(creator.get("comment_disabled")
-                                        or meta.get("disable_comment")),
+                                        or options.get("disable_comment")),
                 "disable_duet": bool(creator.get("duet_disabled")
-                                     or meta.get("disable_duet")),
+                                     or options.get("disable_duet")),
                 "disable_stitch": bool(creator.get("stitch_disabled")
-                                       or meta.get("disable_stitch")),
+                                       or options.get("disable_stitch")),
                 # Commercial-content disclosure is the operator's explicit
                 # choice per post; never inferred.
-                "brand_content_toggle": bool(meta.get("brand_content")),
-                "brand_organic_toggle": bool(meta.get("brand_organic")),
+                "brand_content_toggle": bool(options.get("brand_content")),
+                "brand_organic_toggle": bool(options.get("brand_organic")),
                 "self_declared": {"is_aigc": bool(meta.get("synthetic_narration"))},
             },
             "source_info": {
