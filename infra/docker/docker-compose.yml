@@ -394,6 +394,9 @@ services:
       TTS_LOCAL: ${TTS_LOCAL:-0}
       # M1: x264 speed/size trade-off for the delivery encode.
       MTK_RENDER_X264_PRESET: ${MTK_RENDER_X264_PRESET:-medium}
+      # V5: activity-following 9:16 crop for screen captures (opt-in).
+      MTK_VERTICAL_REFRAME: ${MTK_VERTICAL_REFRAME:-full}
+      MTK_VERTICAL_REFRAME_WIDTH: ${MTK_VERTICAL_REFRAME_WIDTH:-0.5}
       # v0.29 measured QC — see docs/render-qc.md. Blank inherits the code default.
       MTK_RENDER_QC_TARGET_LUFS: ${MTK_RENDER_QC_TARGET_LUFS:-}
       MTK_RENDER_QC_LUFS_TOLERANCE: ${MTK_RENDER_QC_LUFS_TOLERANCE:-}

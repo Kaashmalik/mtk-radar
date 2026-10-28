@@ -431,3 +431,20 @@ def test_explainer_base_failure_is_loud(tmp_path, monkeypatch):
              "claims": []}
     with pytest.raises(RuntimeError, match="explainer base render failed"):
         job._build_explainer_base({"title": "T"}, brief, narration_s=None)
+
+
+def test_vertical_reframe_replaces_only_the_foreground_and_records_the_path(tmp_path, monkeypatch):
+    from presets import get_preset
+
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    keys = [render_main.reframe_mod.Keyframe(0, 0.3), render_main.reframe_mod.Keyframe(4, 0.6)]
+    monkeypatch.setattr(render_main.reframe_mod, "analyse", lambda video, crop: keys)
+    vertical = get_preset("vertical")
+    reframed = job._reframed_vertical(vertical, "cap.mkv")
+    assert reframed.complex_filter and (reframed.width, reframed.height) == (1080, 1920)
+    assert "crop=w=960:h=1080:x='if(lt(t,4)" in reframed.filter_chain
+    assert (tmp_path / "assets/reframe-vertical.json").exists()
+
+    monkeypatch.setattr(render_main.reframe_mod, "analyse", lambda video, crop: None)
+    assert job._reframed_vertical(vertical, "cap.mkv") is vertical, "weak signal → full frame"

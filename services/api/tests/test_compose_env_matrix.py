@@ -70,6 +70,8 @@ MATRIX: dict[str, tuple[str, ...]] = {
     # workers/render/narration.py (verified-local TTS) + render.py (x264)
     "TTS_LOCAL": ("render",),
     "MTK_RENDER_X264_PRESET": ("render",),
+    "MTK_VERTICAL_REFRAME": ("render",),
+    "MTK_VERTICAL_REFRAME_WIDTH": ("render",),
     # Q1 quota ledger: limits (services/api/quota_api.py), operation costs
     # (workers/publishing/quota.py)
     "YOUTUBE_QUOTA_UNITS_PER_DAY": ("api",),
