@@ -27,22 +27,25 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Final, Optional
-from urllib.parse import urlparse
+
+_PACKAGES = Path(__file__).resolve().parents[2] / "packages"
+if str(_PACKAGES) not in sys.path:  # shared with the API (storyboard rules)
+    sys.path.insert(0, str(_PACKAGES))
+
+import storyboard  # noqa: E402
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 BACKGROUND: Final[str] = "0x1e2638"   # mid-tone slate: luma ≈ 0.14 (> black threshold)
-MIN_SCENE_S, DEFAULT_SCENE_S = 3.0, 6.0
+MIN_SCENE_S, DEFAULT_SCENE_S = storyboard.MIN_SCENE_S, storyboard.DEFAULT_SCENE_S
 FONT = os.environ.get("MTK_CAPTION_FONT", "DejaVu Sans")
 
-ATTRIBUTION: Final[dict[str, str]] = {
-    "author_reported": "The authors report",
-    "independently_reproduced": "Independently reproduced",
-    "tested_by_mtk": "Tested by MTK",
-    "editorial_analysis": "Our analysis",
-}
+# Scene planning, honesty rules and timing live in packages/storyboard so the
+# Studio storyboard editor (API) and this renderer apply the SAME rules.
+ATTRIBUTION: Final[dict[str, str]] = storyboard.ATTRIBUTION
 
 
 def eligible_brief(research: Any) -> Optional[dict]:
@@ -56,73 +59,28 @@ def eligible_brief(research: Any) -> Optional[dict]:
     return current if shown or current.get("viewer_question") else None
 
 
-def _source_label(claim: dict) -> str:
-    owner = (claim.get("source_owner") or "").strip()
-    url = (claim.get("source_url") or "").strip()
-    host = urlparse(url).hostname if url else None
-    label = owner or host or ""
-    date = claim.get("source_date")
-    if label and date:
-        label = f"{label} · {date}"
-    return f"Source: {label}" if label else "Source: not cited"
-
-
 def plan_scenes(offer: dict, brief: dict,
-                total_s: Optional[float] = None) -> list[dict]:
-    """Title → one card per shown claim → limitations/close, with timing.
+                total_s: Optional[float] = None,
+                page_captures: tuple = ()) -> list[dict]:
+    """The suggested storyboard (title → pages → claims → close), timed.
 
-    With a measured narration length the scenes share it in proportion to
-    their text (min MIN_SCENE_S each); otherwise each lasts DEFAULT_SCENE_S.
+    With a measured narration length the scenes share it by weight (≥3 s
+    each); otherwise each lasts DEFAULT_SCENE_S × weight.
     """
-    scenes: list[dict] = [{
-        "id": "title",
-        "kind": "title",
-        "heading": (brief.get("viewer_question") or offer.get("title") or "").strip()
-        or "Research explained",
-        "body": (brief.get("angle") or "").strip(),
-        "claim_ids": [],
-    }]
-    for claim in brief.get("claims") or []:
-        if claim.get("status") == "contradicted":
-            continue
-        text = (claim.get("permitted_wording") or claim.get("claim_text") or "").strip()
-        if not text:
-            continue
-        attribution = ATTRIBUTION.get(claim.get("claim_class"), "Reported")
-        if claim.get("status") == "unknown":
-            attribution += " — not yet independently confirmed"
-        scenes.append({
-            "id": f"claim-{claim.get('id')}",
-            "kind": "claim",
-            "heading": attribution,
-            "body": text,
-            "source": _source_label(claim),
-            "scope": (claim.get("scope") or "").strip(),
-            "claim_ids": [str(claim.get("id"))],
-        })
-    closing = (brief.get("limitations") or "").strip()
-    scenes.append({
-        "id": "close",
-        "kind": "close",
-        "heading": "Limitations" if closing else "Sources",
-        "body": closing or "Every source is linked in the description.",
-        "claim_ids": [],
-    })
+    return storyboard.apply_timing(
+        storyboard.suggest(offer, brief, page_captures), total_s)
 
-    weights = [max(1, len(s["heading"]) + len(s.get("body", ""))) for s in scenes]
-    if total_s and total_s > 0:
-        raw = [total_s * w / sum(weights) for w in weights]
-        durations = [max(MIN_SCENE_S, d) for d in raw]
-        scale = total_s / sum(durations)
-        durations = [d * scale for d in durations]
-    else:
-        durations = [DEFAULT_SCENE_S] * len(scenes)
-    cursor = 0.0
-    for scene, duration in zip(scenes, durations):
-        scene["start"] = round(cursor, 3)
-        cursor += duration
-        scene["end"] = round(cursor, 3)
-    return scenes
+
+def scenes_from_storyboard(saved: list[dict], brief: dict, page_captures: list[dict],
+                           total_s: Optional[float] = None) -> tuple[list[dict], list[str]]:
+    """A reviewer-saved storyboard, re-validated against TODAY's ledger.
+
+    A claim contradicted since the storyboard was saved (or a page capture
+    that disappeared) is dropped, never drawn; the problems are returned so
+    the render log and manifest say what changed.
+    """
+    scenes, problems = storyboard.validate(saved, brief, page_captures)
+    return storyboard.apply_timing(scenes, total_s), problems
 
 
 def _ass_text(value: str) -> str:
@@ -156,6 +114,7 @@ def cards_ass(scenes: list[dict], orientation: str = "landscape") -> str:
     title, kicker, body, source = (84, 44, 66, 36) if vertical else (76, 40, 58, 34)
     side = 90 if vertical else 180
     kicker_v, source_v = (560, 520) if vertical else (250, 230)
+    page_top, page_bottom = (520, 500) if vertical else (24, 20)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -169,6 +128,8 @@ Style: Title,{FONT},{title},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0
 Style: Kicker,{FONT},{kicker},&H00FFB37B,&H00FFB37B,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,8,{side},{side},{kicker_v},1
 Style: Body,{FONT},{body},&H00F0EAE8,&H00F0EAE8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,2,5,{side + 20},{side + 20},0,1
 Style: Source,{FONT},{source},&H00C3B4A8,&H00C3B4A8,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,{side},{side},{source_v},1
+Style: PageTitle,{FONT},{kicker},&H00FFFFFF,&H00FFFFFF,&H00101825,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,{side},{side},{page_top},1
+Style: PageSource,{FONT},{source},&H00F0EAE8,&H00F0EAE8,&H00101825,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,{side},{side},{page_bottom},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -177,6 +138,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for scene in scenes:
         start, end = _ts(scene["start"]), _ts(scene["end"])
         fade = "{\\fad(350,350)}"
+        if scene["kind"] == "page":
+            # The screenshot itself is overlaid by base_video_cmd; the card
+            # adds only its title and the derived source line.
+            lines.append(f"Dialogue: 0,{start},{end},PageTitle,,0,0,0,,{fade}{_ass_text(scene['heading'])}")
+            footer = " · ".join(x for x in (scene.get("body"), scene.get("source")) if x)
+            lines.append(f"Dialogue: 0,{start},{end},PageSource,,0,0,0,,{fade}{_ass_text(footer)}")
+            continue
         if scene["kind"] == "title":
             lines.append(f"Dialogue: 0,{start},{end},Title,,0,0,0,,{fade}{_ass_text(scene['heading'])}")
             if scene.get("body"):
@@ -191,33 +159,60 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def base_video_cmd(cards_rel: str, out_rel: str, duration_s: float,
-                   orientation: str = "landscape") -> list[str]:
-    """Mid-tone background + light temporal grain + cards → silent base MP4.
+                   orientation: str = "landscape",
+                   pages: list[tuple[str, float, float]] | None = None) -> list[str]:
+    """Mid-tone background + light temporal grain (+ page screenshots) + cards.
 
-    Paths are RELATIVE (run with cwd = project dir) like render.py, so the
-    subtitles filter never needs OS-specific escaping.
+    `pages` = [(image_rel, start_s, end_s)]: each captured page is overlaid
+    for its scene with a slow 5 % push-in and alpha fades, so the frame keeps
+    moving (freeze QC passes on merit). Paths are RELATIVE (cwd = project
+    dir) like render.py, so the subtitles filter never needs OS escaping.
     """
-    if Path(cards_rel).is_absolute() or Path(out_rel).is_absolute():
+    pages = pages or []
+    rels = [cards_rel, out_rel, *(p[0] for p in pages)]
+    if any(Path(r).is_absolute() for r in rels):
         raise ValueError("use relative paths; run with cwd=project folder")
     width, height = FRAMES[orientation]
-    return [
-        FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"color=c={BACKGROUND}:s={width}x{height}:r={FPS}:d={duration_s:.3f}",
-        "-vf", f"noise=alls=4:allf=t,vignette=PI/5,subtitles={cards_rel}",
+    target_w = int(width * (0.9 if orientation == "vertical" else 0.84)) // 2 * 2
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi",
+           "-i", f"color=c={BACKGROUND}:s={width}x{height}:r={FPS}:d={duration_s:.3f}"]
+    for image, _start, end in pages:
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{end:.3f}", "-i", image]
+    graph = ["[0:v]noise=alls=4:allf=t,vignette=PI/5[bg0]"]
+    for index, (_image, start, end) in enumerate(pages):
+        span = max(0.5, end - start)
+        fade = min(0.35, span / 4)
+        graph.append(
+            f"[{index + 1}:v]scale=w='{target_w}*(1+0.05*max(0,t-{start:.3f})/{span:.3f})'"
+            f":h=-2:eval=frame:flags=lanczos,format=yuva420p,"
+            f"fade=t=in:st={start:.3f}:d={fade:.3f}:alpha=1,"
+            f"fade=t=out:st={end - fade:.3f}:d={fade:.3f}:alpha=1[p{index}]")
+        graph.append(
+            f"[bg{index}][p{index}]overlay=x=(W-w)/2:y=(H-h)/2:eval=frame:"
+            f"enable='between(t,{start:.3f},{end:.3f})'[bg{index + 1}]")
+    graph.append(f"[bg{len(pages)}]subtitles={cards_rel}[vout]")
+    return cmd + [
+        "-filter_complex", ";".join(graph), "-map", "[vout]",
+        "-t", f"{duration_s:.3f}",
         "-c:v", "libx264", "-preset", "medium", "-crf", "16",
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-an",
         out_rel,
     ]
 
 
-def scene_manifest(offer_id: str, brief: dict, scenes: list[dict]) -> dict:
+def scene_manifest(offer_id: str, brief: dict, scenes: list[dict],
+                   storyboard_version: Optional[int] = None,
+                   dropped: Optional[list[str]] = None) -> dict:
     body = {
         "version": 1,
         "track": "explainer",
         "offer_id": str(offer_id),
         "brief_id": str(brief.get("id")),
         "brief_version": brief.get("version"),
+        # None = the suggested storyboard; N = the reviewer-saved version N.
+        "storyboard_version": storyboard_version,
+        "dropped": dropped or [],
         "scenes": scenes,
     }
     digest = hashlib.sha256(

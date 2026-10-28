@@ -448,3 +448,56 @@ def test_vertical_reframe_replaces_only_the_foreground_and_records_the_path(tmp_
 
     monkeypatch.setattr(render_main.reframe_mod, "analyse", lambda video, crop: None)
     assert job._reframed_vertical(vertical, "cap.mkv") is vertical, "weak signal → full frame"
+
+
+def test_saved_storyboard_drives_the_explainer_and_verifies_page_images(tmp_path, monkeypatch):
+    """V7: the reviewer's saved order/selection is drawn; a claim contradicted
+    since saving and a tampered screenshot are dropped and recorded."""
+    import hashlib
+    import json as _json
+    import subprocess
+
+    import httpx
+
+    png = b"PNG-real-bytes"
+    brief = {"id": "b1", "version": 2, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": [{"id": "c1", "claim_text": "Supported claim.",
+                         "claim_class": "author_reported", "status": "supported"},
+                        {"id": "c2", "claim_text": "Now contradicted.",
+                         "claim_class": "author_reported", "status": "contradicted"}]}
+    pages = [{"id": "p1", "status": "ok", "url": "https://a.org", "title": "Paper",
+              "image_sha256": hashlib.sha256(png).hexdigest()},
+             {"id": "p2", "status": "ok", "url": "https://b.org", "title": "Other",
+              "image_sha256": "0" * 64}]
+    saved = [{"kind": "page", "page_capture_id": "p1"},
+             {"kind": "claim", "claim_ids": ["c1"]},
+             {"kind": "claim", "claim_ids": ["c2"]},
+             {"kind": "page", "page_capture_id": "p2"},
+             {"kind": "title", "heading": "Q?", "include": False}]
+
+    def handler(request):
+        if request.url.path.endswith("/storyboard"):
+            return httpx.Response(200, json={"current": {"version": 4, "scenes": saved},
+                                             "page_captures": pages})
+        return httpx.Response(200, content=png)
+
+    commands = []
+
+    def fake_run(cmd, cwd):
+        commands.append(cmd)
+        (Path(cwd) / cmd[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(render_main.render_mod, "run", fake_run)
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    _, scenes = job._build_explainer_base({"title": "T"}, brief, narration_s=20.0)
+
+    assert [s["id"] for s in scenes] == ["page-p1", "claim-c1"], "saved order + drops applied"
+    manifest = _json.loads((tmp_path / "assets/explainer/scene_manifest.json").read_text())
+    assert manifest["storyboard_version"] == 4
+    assert any("contradicted" in d for d in manifest["dropped"])
+    assert any("p2" in d for d in manifest["dropped"]), "tampered screenshot never drawn"
+    assert (tmp_path / "assets/explainer/pages/p1.png").read_bytes() == png
+    assert "assets/explainer/pages/p1.png" in commands[0]

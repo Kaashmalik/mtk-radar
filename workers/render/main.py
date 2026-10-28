@@ -274,21 +274,80 @@ class RenderJob:
             return None
         return explainer_mod.eligible_brief(research)
 
+    def _storyboard_inputs(self) -> dict:
+        """Saved storyboard + page captures from the API ({} on older APIs)."""
+        try:
+            board = self._get(f"/offers/{self.offer_id}/storyboard")
+        except Exception:  # noqa: BLE001 — no storyboard API: suggested scenes
+            return {}
+        return board if isinstance(board, dict) else {}
+
+    def _fetch_page_image(self, capture: dict) -> str | None:
+        """Download a page screenshot via the API and verify its sha256."""
+        import hashlib
+
+        rel = f"assets/explainer/pages/{capture['id']}.png"
+        try:
+            resp = self.api.get(f"/page-captures/{capture['id']}/image")
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("page capture %s unavailable: %s", capture["id"], exc)
+            return None
+        if hashlib.sha256(resp.content).hexdigest() != capture.get("image_sha256"):
+            log.warning("page capture %s failed its sha256 check — scene dropped", capture["id"])
+            return None
+        path = self.project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(resp.content)
+        return rel
+
     def _build_explainer_base(self, offer: dict, brief: dict,
                               narration_s: float | None) -> tuple[str, list[dict]]:
         """Render the card base video + scene manifest into the project.
 
-        The base runs slightly past the speech so the timeline preflight
+        Scenes come from the reviewer-saved storyboard when one exists
+        (re-validated against TODAY's claim ledger), else the suggestion.
+        Page scenes use verified screenshots; anything that cannot be drawn
+        honestly is dropped before timing and listed in the manifest. The
+        base runs slightly past the speech so the timeline preflight
         (capture must cover narration) holds without truncating anything.
         """
+        sb = explainer_mod.storyboard
         total = (narration_s + 0.6) if narration_s else None
-        scenes = explainer_mod.plan_scenes(offer, brief, total_s=total)
+        board = self._storyboard_inputs()
+        pages = [p for p in board.get("page_captures") or [] if p.get("status") == "ok"]
+        current = board.get("current") or None
+        dropped: list[str] = []
+        if current:
+            scenes, dropped = sb.validate(current.get("scenes") or [], brief, pages)
+            version = current.get("version")
+        else:
+            scenes, version = sb.suggest(offer, brief, pages), None
+        images: dict[str, str] = {}
+        kept = []
+        for scene in scenes:
+            if scene["kind"] == "page" and scene.get("include", True):
+                capture = next((p for p in pages if str(p["id"]) == scene["page_capture_id"]), None)
+                rel = self._fetch_page_image(capture) if capture else None
+                if rel is None:
+                    dropped.append(f"page scene {scene['id']}: screenshot unavailable")
+                    continue
+                images[scene["id"]] = rel
+            kept.append(scene)
+        if dropped:
+            log.warning("storyboard: %d scene(s) dropped: %s", len(dropped), "; ".join(dropped))
+        scenes = sb.apply_timing(kept, total)
+        if not scenes:
+            raise RuntimeError("explainer has no drawable scenes — fix the storyboard")
         out_dir = self.project / "assets" / "explainer"
         out_dir.mkdir(parents=True, exist_ok=True)
-        manifest = explainer_mod.scene_manifest(self.offer_id, brief, scenes)
+        manifest = explainer_mod.scene_manifest(self.offer_id, brief, scenes,
+                                                storyboard_version=version, dropped=dropped)
         (out_dir / "scene_manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
         duration = scenes[-1]["end"]
+        page_layers = [(images[s["id"]], s["start"], s["end"])
+                       for s in scenes if s["id"] in images]
         # One base per orientation: the vertical export gets natively
         # composed 9:16 cards (see _video_for_preset), not a shrunken strip.
         for orientation, suffix in (("landscape", ""), ("vertical", "-vertical")):
@@ -296,10 +355,11 @@ class RenderJob:
             (self.project / cards).write_text(
                 explainer_mod.cards_ass(scenes, orientation), encoding="utf-8")
             cmd = explainer_mod.base_video_cmd(
-                cards, f"assets/explainer/base{suffix}.mp4", duration, orientation)
-            log.info("explainer %s base (%d scenes, %.1fs, manifest %s) :: %s",
-                     orientation, len(scenes), duration, manifest["sha256"][:12],
-                     render_mod.describe(cmd))
+                cards, f"assets/explainer/base{suffix}.mp4", duration, orientation,
+                pages=page_layers)
+            log.info("explainer %s base (%d scenes, storyboard %s, %.1fs, manifest %s) :: %s",
+                     orientation, len(scenes), f"v{version}" if version else "suggested",
+                     duration, manifest["sha256"][:12], render_mod.describe(cmd))
             proc = render_mod.run(cmd, self.project)
             if proc.returncode != 0:
                 raise RuntimeError(
