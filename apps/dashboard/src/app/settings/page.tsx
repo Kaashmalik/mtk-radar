@@ -20,6 +20,56 @@ import SettingsForm from "./SettingsForm";
 import { loadJson, unavailableSections } from "@/lib/load";
 
 
+type QuotaUsage = {
+  quota_day: string;
+  resets_at: string;
+  limits: Record<string, number | null>;
+  accounts: { account: string; bucket: string; consumed: number; reserved: number }[];
+};
+
+/** Q1: today's YouTube quota (Pacific day) per account, from the ledger. */
+function QuotaCard({ usage }: { usage: QuotaUsage | null }) {
+  const unitsLimit = usage?.limits?.units ?? 0;
+  const rows = (usage?.accounts ?? []).filter((r) => r.bucket === "units");
+  return (
+    <section className="card">
+      <h2>YouTube quota today</h2>
+      {!usage ? (
+        <p className="muted small">Quota ledger unavailable.</p>
+      ) : (
+        <>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Pacific day {usage.quota_day} · resets{" "}
+            {new Date(usage.resets_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} PKT ·
+            limit {unitsLimit ? unitsLimit.toLocaleString() : "unmetered"} units. Uploads reserve
+            their whole package first; failed calls still count.
+          </p>
+          {rows.length === 0 ? (
+            <p className="muted small">No YouTube calls reserved today.</p>
+          ) : (
+            rows.map((r) => {
+              const used = Number(r.consumed) + Number(r.reserved);
+              const pct = unitsLimit ? Math.min(100, Math.round((used / unitsLimit) * 100)) : 0;
+              return (
+                <div key={r.account} className="metric-row">
+                  <span>{r.account}</span>
+                  <span className="score-bar" style={{ flex: 1, margin: "0 0.8rem" }}>
+                    <span style={{ width: `${pct}%` }} />
+                  </span>
+                  <strong>
+                    {used.toLocaleString()}
+                    {unitsLimit ? ` / ${unitsLimit.toLocaleString()}` : ""}
+                  </strong>
+                </div>
+              );
+            })
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 type StageRow = { stage: string; label: string; mode: string; active: boolean };
 
 type PolicyResponse = {
@@ -182,6 +232,7 @@ export default async function SettingsPage() {
       tts: { configured: false, reachable: false, models: [] },
       cached: false,
     }),
+    loadJson<QuotaUsage | null>("/quota?provider=youtube", null),
   ]);
   const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts, costsRes, costBudgetRes, providersRes] =
     [loaded[0].data, loaded[1].data, loaded[2].data, loaded[3].data, loaded[4].data,
@@ -198,6 +249,7 @@ export default async function SettingsPage() {
     "costs": loaded[7],
     "budget": loaded[8],
     "providers": loaded[9],
+    "YouTube quota": loaded[10],
   });
 
   const windows = setting.value?.windows ?? ["18:00"];
@@ -269,6 +321,8 @@ export default async function SettingsPage() {
       </section>
 
       <CostsCard summary={costsRes} budget={costBudgetRes} providers={providersRes} />
+
+      <QuotaCard usage={loaded[10].ok ? loaded[10].data : null} />
 
       <section className="card">
         <h2>Live automation status</h2>

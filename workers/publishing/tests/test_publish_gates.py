@@ -59,6 +59,8 @@ class FakeAPI:
 
     def post(self, path, json=None):
         self.calls.append(("POST", path, json))
+        if path == "/quota/reserve":  # Q1 ledger: reservation granted
+            return FakeResponse({"allowed": True, "reservation_id": "q-1"})
         if path.endswith("/attempt"):
             return FakeResponse({"acquired": True, "attempt_token": "token-1"})
         return FakeResponse({"ok": True})
@@ -459,3 +461,99 @@ def test_pinned_account_never_falls_back_to_another_account():
         "a pinned account must never silently upload to the default channel"
     assert worker._adapter_for({"platform": "youtube"}, adapters) is account_b, \
         "legacy schedules without a pin may use the platform default"
+
+
+# ------------------------------------------------------ YouTube quota (Q1)
+
+def _posts_to(api, suffix):
+    return [c for c in api.calls if c[0] == "POST" and c[1].endswith(suffix)]
+
+
+def test_youtube_quota_is_reserved_for_the_package_and_consumed_after_upload():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    assert p._publish(_post(render), {"youtube": FakeAdapter()}) is True
+    (reserve,) = _posts_to(p.api, "/quota/reserve")
+    body = reserve[2]
+    assert body["provider"] == "youtube" and body["buckets"]["uploads"] == 1
+    assert body["buckets"]["units"] >= 1600 + 60, "upload + status polls at least"
+    assert body["ref_id"] == _post(render)["id"]
+    (settle,) = _posts_to(p.api, "/quota/q-1/settle")
+    assert settle[2] == {"status": "consumed"}
+    reserve_at = p.api.calls.index(reserve)
+    attempt_at = next(i for i, c in enumerate(p.api.calls) if c[1].endswith("/attempt"))
+    assert reserve_at < attempt_at, "quota is reserved before any request is made"
+
+
+def test_exhausted_quota_fails_the_post_until_reset_without_uploading():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    original_post = p.api.post
+
+    def post(path, json=None):
+        if path == "/quota/reserve":
+            p.api.calls.append(("POST", path, json))
+            return FakeResponse({"allowed": False, "retry_after_s": 7200,
+                                 "resets_at": "2026-10-29T07:00:00+00:00",
+                                 "buckets": {"units": {"allowed": False, "remaining": 300,
+                                                       "limit": 10000}}})
+        return original_post(path, json)
+
+    p.api.post = post
+    adapter = FakeAdapter()
+    assert p._publish(_post(render), {"youtube": adapter}) is False
+    assert adapter.uploads == []
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False and not result.get("hold")
+    assert result["retry_after_s"] == 7200
+    assert "quota" in result["detail"] and "300 left" in result["detail"]
+    assert not _posts_to(p.api, "/attempt"), "no upload attempt is claimed"
+
+
+def test_unreachable_quota_ledger_fails_closed_without_a_report():
+    import httpx
+
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    original_post = p.api.post
+
+    def post(path, json=None):
+        if path == "/quota/reserve":
+            raise httpx.ConnectError("api down")
+        return original_post(path, json)
+
+    p.api.post = post
+    adapter = FakeAdapter()
+    assert p._publish(_post(render), {"youtube": adapter}) is False
+    assert adapter.uploads == [] and _result_calls(p.api) == []
+
+
+def test_quota_is_released_when_no_attempt_could_be_claimed():
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    original_post = p.api.post
+
+    def post(path, json=None):
+        if path.endswith("/attempt"):
+            p.api.calls.append(("POST", path, json))
+            return FakeResponse({"acquired": False}, status_code=409)
+        return original_post(path, json)
+
+    p.api.post = post
+    assert p._publish(_post(render), {"youtube": FakeAdapter()}) is False
+    (settle,) = _posts_to(p.api, "/quota/q-1/settle")
+    assert settle[2] == {"status": "released"}, "nothing was sent → nothing spent"
+
+
+def test_package_units_follow_configured_costs(monkeypatch):
+    import quota
+
+    monkeypatch.setenv("YOUTUBE_QUOTA_COST_UPLOAD", "100")
+    full = quota.youtube_package_units(thumbnail=True, captions=True,
+                                       playlist=True, comment=True)
+    bare = quota.youtube_package_units(thumbnail=False, captions=False,
+                                       playlist=False, comment=False)
+    assert bare == {"units": 100 + 60, "uploads": 1}
+    assert full["units"] == 100 + 60 + 50 + 400 + 50 + 50
+    monkeypatch.setenv("YOUTUBE_QUOTA_COST_UPLOAD", "junk")
+    assert quota.cost("upload") == 1600

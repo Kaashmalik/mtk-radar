@@ -24,6 +24,7 @@ Integration happens through pinned packages, pinned images, or APIs.
 | PostgreSQL | `16-alpine` (infra/docker) | PostgreSQL License | Service (container) | Notice retention required |
 | Redis | `7-alpine` (infra/docker) | RSALv2/SSPLv1 (server), MIT (clients) | Service (container) | Self-hosted use is fine; no redistribution of modified forks. Used as the API cache layer (v0.22). |
 | redis-py | `5.2.1` (services/api/requirements.txt) | MIT | Library (optional) | The API imports it lazily; without it the cache layer is disabled and the system runs unchanged. |
+| tzdata | `2026.4` (services/api/requirements.txt) | Apache-2.0 (package), public-domain IANA data | Library | Supplies `zoneinfo` data where the OS has none (Windows); used for the YouTube Pacific quota day and schedule time zones. |
 | MinIO (S3-compatible storage) | `RELEASE.2024-06-13T22-53-53Z` (pinned by release tag) | AGPL-3.0 | Service (container, optional profile) | Used unmodified as the local S3 endpoint in dev; production deployments can point `MTK_S3_*` at any S3-compatible store. |
 | Next.js / React | apps/dashboard/package.json | MIT | Library | — |
 | TypeScript | `^5.7.2` (root package.json) | Apache-2.0 | Library | — |
