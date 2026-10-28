@@ -11,9 +11,11 @@ Safety posture (each step fails closed):
 - robots.txt is honoured for our user agent (5xx/unreachable robots = no);
 - a fresh, cookie-less, storage-less headless browser context per page —
   never a logged-in profile — with downloads and service workers blocked;
-- EVERY request the page makes is checked: requests to hosts that resolve
-  to loopback/private/link-local addresses are aborted (no SSRF via
-  embedded resources or redirects), and the final URL is re-validated;
+- ALL browser traffic goes through a loopback CONNECT proxy
+  (egress_proxy.py) that resolves every host itself, requires public
+  addresses and connects to exactly the validated address — redirect hops,
+  iframes, sub-resources and DNS rebinding cannot reach private networks;
+  the route check and the final-URL check remain as defence in depth;
 - bounded timeouts; a viewport-sized 1920x1080 PNG (no full-page scroll
   dumps); results are reported per URL as ok / failed / refused.
 
@@ -49,7 +51,9 @@ from source_adapters.egress import (  # noqa: E402
     safe_fetch,
     validate_url,
 )
-from worker_heartbeat import lease_holder  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
+
+from egress_proxy import EgressProxy  # noqa: E402
 
 log = logging.getLogger("page_capture")
 
@@ -146,11 +150,15 @@ class Shot:
     png: bytes
 
 
-def capture(url: str, guard: HostGuard, *, playwright_factory=None) -> Shot:
+def capture(url: str, guard: HostGuard, *, playwright_factory=None,
+            proxy_factory=None) -> Shot:
     """Load one public page in a fresh sandboxed context and screenshot it."""
     if playwright_factory is None:
         from playwright.sync_api import sync_playwright
         playwright_factory = sync_playwright
+    if proxy_factory is None:
+        proxy_factory = lambda: EgressProxy(guard.resolver,  # noqa: E731
+                                            allow_private=guard.allow_private)
     blocked: list[str] = []
 
     def route(route_obj):
@@ -161,8 +169,13 @@ def capture(url: str, guard: HostGuard, *, playwright_factory=None) -> Shot:
             blocked.append(urlsplit(request_url).hostname or "?")
             route_obj.abort()
 
-    with playwright_factory() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-gpu"])
+    with proxy_factory() as proxy, playwright_factory() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            proxy={"server": proxy.url},
+            # Without this Chromium bypasses the proxy for localhost.
+            args=["--disable-gpu", "--proxy-bypass-list=<-loopback>"],
+        )
         try:
             context = browser.new_context(
                 viewport=VIEWPORT, device_scale_factor=1, user_agent=USER_AGENT,
@@ -185,9 +198,11 @@ def capture(url: str, guard: HostGuard, *, playwright_factory=None) -> Shot:
             context.close()
         finally:
             browser.close()
-    if blocked:
+        refused = getattr(proxy, "refused", [])
+    if blocked or refused:
         log.warning("blocked %d request(s) to non-public hosts: %s",
-                    len(blocked), ", ".join(sorted(set(blocked))[:5]))
+                    len(blocked) + len(refused),
+                    ", ".join(sorted(set(blocked) | set(refused))[:5]))
     return Shot(final_url, title, status, png)
 
 
@@ -206,50 +221,91 @@ class Worker:
         self.fetch = fetch
         self.holder = lease_holder("page-capture")
 
-    def _report(self, capture_id: str, **body) -> None:
+    def _report(self, capture_id: str, **body) -> bool:
+        """True only when the API recorded the outcome (2xx, or 409 =
+        already recorded by an earlier attempt)."""
         try:
-            self.api.post(f"/page-captures/{capture_id}/result", json=body)
+            resp = self.api.post(f"/page-captures/{capture_id}/result", json=body)
         except httpx.HTTPError as exc:
             log.error("could not report page capture %s: %s", capture_id, exc)
+            return False
+        if 200 <= resp.status_code < 300 or resp.status_code == 409:
+            return True
+        log.error("page capture %s result refused: HTTP %s", capture_id, resp.status_code)
+        return False
 
-    def process(self, offer_id: str, capture_id: str, url: str) -> str:
+    def process(self, offer_id: str, capture_id: str, url: str) -> tuple[str, bool]:
+        """(outcome, recorded). Never raises: one page never stops the batch."""
         try:
             preflight(url, self.policy, self.guard, self.fetch)
             shot = self.capture_fn(url, self.guard)
         except Refused as exc:
-            self._report(capture_id, status="refused", detail=str(exc)[:900])
-            return "refused"
-        except Exception as exc:  # noqa: BLE001 — one page never stops the batch
-            self._report(capture_id, status="failed",
-                         detail=f"{type(exc).__name__}: {exc}"[:900])
-            return "failed"
-        local = self.out_dir / offer_id / f"{capture_id}.png"
-        local.parent.mkdir(parents=True, exist_ok=True)
-        local.write_bytes(shot.png)
-        digest = hashlib.sha256(shot.png).hexdigest()
-        storage = make_from_env()
-        ref = storage.put(local, page_capture_key(offer_id, capture_id)) if storage else str(local)
-        self._report(capture_id, status="ok", final_url=shot.final_url[:2000],
-                     title=shot.title or None, image_ref=ref, image_sha256=digest,
-                     http_status=shot.http_status)
-        return "ok"
+            return "refused", self._report(capture_id, status="refused",
+                                           detail=str(exc)[:900])
+        except Exception as exc:  # noqa: BLE001
+            return "failed", self._report(capture_id, status="failed",
+                                          detail=f"{type(exc).__name__}: {exc}"[:900])
+        try:
+            storage = make_from_env()
+            if storage is None:
+                # The API serves screenshots only from managed storage, and the
+                # render worker may run on another host: a local path is useless.
+                raise RuntimeError("object storage is not configured — set "
+                                   "MTK_STORAGE_BACKEND on the page-capture worker")
+            local = self.out_dir / offer_id / f"{capture_id}.png"
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(shot.png)
+            digest = hashlib.sha256(shot.png).hexdigest()
+            ref = storage.put(local, page_capture_key(offer_id, capture_id))
+        except Exception as exc:  # noqa: BLE001 — storage outage: report, retry later
+            return "failed", self._report(capture_id, status="failed",
+                                          detail=f"storing the screenshot failed: {exc}"[:900])
+        return "ok", self._report(capture_id, status="ok", final_url=shot.final_url[:2000],
+                                  title=(shot.title or "")[:300] or None, image_ref=ref,
+                                  image_sha256=digest, http_status=shot.http_status)
+
+    def _job_result(self, job_id: str, *, ok: bool, detail: str) -> None:
+        body = {"ok": ok, "worker": self.holder, "detail": detail[:1900]}
+        if not ok:
+            body["retry_after_s"] = 120
+        try:
+            self.api.post(f"/jobs/{job_id}/result", json=body)
+        except httpx.HTTPError as exc:
+            log.error("could not settle page-capture job %s: %s", job_id, exc)
 
     def drain(self, limit: int = 20) -> int:
+        """Claim and run page_capture jobs. Never raises on API/storage
+        trouble: an unsettled job would keep its lease and stall captures."""
         done = 0
         for _ in range(limit):
-            resp = self.api.post("/jobs/claim", json={
-                "worker": self.holder, "lease_s": 900, "kinds": ["page_capture"]})
-            if resp.status_code != 200 or not resp.json().get("claimed"):
+            try:
+                resp = self.api.post("/jobs/claim", json={
+                    "worker": self.holder, "lease_s": 900, "kinds": ["page_capture"]})
+                job = resp.json() if resp.status_code == 200 else {}
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("page-capture queue unavailable: %s", exc)
                 return done
-            job = resp.json()
-            offer_id = str(job.get("entity_id"))
-            wanted = set((job.get("payload") or {}).get("capture_ids") or [])
-            rows = self.api.get(f"/offers/{offer_id}/page-captures").json()
-            outcomes = [self.process(offer_id, r["id"], r["url"])
-                        for r in rows if r["id"] in wanted and r["status"] == "requested"]
-            self.api.post(f"/jobs/{job['id']}/result", json={
-                "ok": True, "worker": self.holder,
-                "detail": f"page captures: {', '.join(outcomes) or 'nothing pending'}"[:1900]})
+            if not job.get("claimed"):
+                return done
+            try:
+                offer_id = str(job.get("entity_id"))
+                wanted = set((job.get("payload") or {}).get("capture_ids") or [])
+                rows = self.api.get(f"/offers/{offer_id}/page-captures").json()
+                results = [self.process(offer_id, r["id"], r["url"])
+                           for r in rows if r["id"] in wanted and r["status"] == "requested"]
+            except Exception as exc:  # noqa: BLE001
+                log.exception("page-capture job %s failed", job.get("id"))
+                self._job_result(job["id"], ok=False, detail=f"job failed: {exc}")
+                continue
+            unrecorded = [outcome for outcome, recorded in results if not recorded]
+            summary = ", ".join(outcome for outcome, _ in results) or "nothing pending"
+            if unrecorded:
+                # The capture rows are still "requested": retry so the result
+                # is delivered instead of the job pretending to succeed.
+                self._job_result(job["id"], ok=False,
+                                 detail=f"{len(unrecorded)} result(s) not recorded: {summary}")
+            else:
+                self._job_result(job["id"], ok=True, detail=f"page captures: {summary}")
             done += 1
         return done
 
@@ -273,11 +329,21 @@ def main() -> None:
         return
     token = (os.environ.get("MTK_WORKER_TOKEN") or os.environ.get("MTK_API_TOKEN") or "").strip()
     worker = Worker(args.api, Path(args.out), token=token)
-    while True:
-        worker.drain()
-        if not args.watch:
-            return
-        time.sleep(max(10, args.interval))
+    heartbeat = WorkerHeartbeat(args.api, "page-capture", interval_s=60) if args.watch else None
+    if heartbeat:
+        heartbeat.start()
+    try:
+        while True:
+            try:
+                worker.drain()
+            except Exception:  # noqa: BLE001 — the watch loop must survive anything
+                log.exception("page-capture sweep crashed; retrying next interval")
+            if not args.watch:
+                return
+            time.sleep(max(10, args.interval))
+    finally:
+        if heartbeat:
+            heartbeat.stop()
 
 
 if __name__ == "__main__":
