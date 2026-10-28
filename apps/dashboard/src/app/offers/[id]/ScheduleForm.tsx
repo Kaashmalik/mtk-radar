@@ -307,15 +307,15 @@ export default function ScheduleForm({
             ? `🗓 Schedule ${platforms.length} platforms`
             : "🗓 Schedule test post"}
       </button>
-      {msg && <span style={{ color: "#3fb950", fontSize: "0.75rem" }}>{msg}</span>}
-      {error && <span style={{ color: "#f85149", fontSize: "0.75rem" }}>{error}</span>}
+      {msg && <span style={{ color: "var(--ok)", fontSize: "0.75rem" }}>{msg}</span>}
+      {error && <span style={{ color: "var(--danger)", fontSize: "0.75rem" }}>{error}</span>}
       {perPlatform && (
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", width: "100%" }}>
           {Object.entries(perPlatform).map(([p, outcome]) => (
             <span
               key={p}
               className="small"
-              style={{ color: outcome.startsWith("✓") ? "#3fb950" : "#f85149" }}
+              style={{ color: outcome.startsWith("✓") ? "var(--ok)" : "var(--danger)" }}
             >
               {p}: {outcome}
             </span>
@@ -336,7 +336,7 @@ export default function ScheduleForm({
                 borderRadius: 999,
                 border: "1px solid #30363d",
                 background: "transparent",
-                color: "#8b949e",
+                color: "var(--text-muted)",
                 cursor: "pointer",
               }}
             >

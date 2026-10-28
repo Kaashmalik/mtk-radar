@@ -59,8 +59,8 @@ export default function SettingsForm({ initialWindows }: { initialWindows: strin
         <button type="submit" disabled={busy}>
           {busy ? "Saving…" : "Save settings"}
         </button>
-        {msg && <span className="small" style={{ color: "#3fb950" }}>{msg}</span>}
-        {error && <span className="small" style={{ color: "#f85149" }}>{error}</span>}
+        {msg && <span className="small" style={{ color: "var(--ok)" }}>{msg}</span>}
+        {error && <span className="small" style={{ color: "var(--danger)" }}>{error}</span>}
       </div>
     </form>
   );

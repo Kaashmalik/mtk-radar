@@ -135,12 +135,12 @@ async function getAccounts(): Promise<AccountRow[]> {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  draft: "#8b949e",
-  needs_approval: "#d29922",
-  approved: "#3fb950",
-  scheduled: "#58a6ff",
+  draft: "var(--text-muted)",
+  needs_approval: "var(--warn)",
+  approved: "var(--ok)",
+  scheduled: "var(--accent)",
   published: "#bc8cff",
-  failed: "#f85149",
+  failed: "var(--danger)",
   paused: "#f0883e",
 };
 
@@ -252,9 +252,9 @@ export default async function CalendarPage() {
           <div style={{ display: "grid", gap: "0.5rem" }}>
             {accounts.map((a) => {
               const color =
-                a.status === "active" ? "#3fb950"
-                : a.status === "token_expired" ? "#f85149"
-                : "#8b949e";
+                a.status === "active" ? "var(--ok)"
+                : a.status === "token_expired" ? "var(--danger)"
+                : "var(--text-muted)";
               return (
                 <article key={a.id} className="entry">
                   <div className="entry-head">
@@ -345,7 +345,7 @@ export default async function CalendarPage() {
                           <div
                             key={s.id}
                             style={{
-                              border: s.conflict ? "2px solid #f85149" : "1px solid transparent",
+                              border: s.conflict ? "2px solid var(--danger)" : "1px solid transparent",
                               borderRadius: 6,
                               padding: "0.35rem 0.4rem",
                             }}
@@ -358,7 +358,7 @@ export default async function CalendarPage() {
                               {s.offer_title}
                             </a>
                             {s.conflict && (
-                              <div className="small" style={{ color: "#f85149" }}>
+                              <div className="small" style={{ color: "var(--danger)" }}>
                                 ⚠ {s.platform} posts again within an hour — move one BEFORE
                                 approving (double-posting reads as spam to the audience and
                                 the platform).
@@ -371,8 +371,8 @@ export default async function CalendarPage() {
                               <span
                                 className="badge"
                                 style={{
-                                  color: STATE_COLORS[s.state] ?? "#8b949e",
-                                  borderColor: STATE_COLORS[s.state] ?? "#8b949e",
+                                  color: STATE_COLORS[s.state] ?? "var(--text-muted)",
+                                  borderColor: STATE_COLORS[s.state] ?? "var(--text-muted)",
                                 }}
                               >
                                 {s.state}
@@ -413,7 +413,7 @@ export default async function CalendarPage() {
                           {outcome && <> · {outcome}</>}
                         </div>
                         {s.conflict && (
-                          <div className="small" style={{ color: "#f85149" }}>
+                          <div className="small" style={{ color: "var(--danger)" }}>
                             ⚠ {s.platform} posts again within an hour — move one BEFORE
                             approving (double-posting reads as spam to the audience and
                             the platform).
@@ -429,7 +429,7 @@ export default async function CalendarPage() {
                       </div>
                       <span
                         className="badge"
-                        style={{ color: STATE_COLORS[s.state] ?? "#8b949e", borderColor: STATE_COLORS[s.state] ?? "#8b949e" }}
+                        style={{ color: STATE_COLORS[s.state] ?? "var(--text-muted)", borderColor: STATE_COLORS[s.state] ?? "var(--text-muted)" }}
                       >
                         {s.state}
                       </span>

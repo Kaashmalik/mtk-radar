@@ -17,17 +17,8 @@ import LanguagePolicyForm, { type LanguagePolicy } from "./LanguagePolicyForm";
 import NotificationsCard from "./NotificationsCard";
 import ReleasePolicyForm, { type ReleasePolicy } from "./ReleasePolicyForm";
 import SettingsForm from "./SettingsForm";
-import { apiFetch } from "@/lib/api";
+import { loadJson, unavailableSections } from "@/lib/load";
 
-async function getJson<T>(path: string, fallback: T): Promise<T> {
-  try {
-    const res = await apiFetch(path, { cache: "no-store" });
-    if (!res.ok) return fallback;
-    return (await res.json()) as T;
-  } catch {
-    return fallback;
-  }
-}
 
 type StageRow = { stage: string; label: string; mode: string; active: boolean };
 
@@ -120,25 +111,25 @@ function timeLabel(iso: string): string {
 }
 
 export default async function SettingsPage() {
-  const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts, costsRes, costBudgetRes, providersRes] =
+  const loaded =
     await Promise.all([
-    getJson<{ key: string; value: { windows?: string[] } | null }>(
+    loadJson<{ key: string; value: { windows?: string[] } | null }>(
       "/settings/publish_windows",
       { key: "publish_windows", value: null },
     ),
-    getJson<{ key: string; value: LanguagePolicy | null }>(
+    loadJson<{ key: string; value: LanguagePolicy | null }>(
       "/settings/language_policy",
       { key: "language_policy", value: null },
     ),
-    getJson<{ key: string; value: ReleasePolicy | null }>(
+    loadJson<{ key: string; value: ReleasePolicy | null }>(
       "/settings/release_policy",
       { key: "release_policy", value: null },
     ),
-    getJson<{ key: string; value: MediaBackup | null }>(
+    loadJson<{ key: string; value: MediaBackup | null }>(
       "/settings/media_backup",
       { key: "media_backup", value: null },
     ),
-    getJson<PolicyResponse>("/automation/policy", {
+    loadJson<PolicyResponse>("/automation/policy", {
       policy: FALLBACK_POLICY,
       summary: {
         state: "running",
@@ -152,7 +143,7 @@ export default async function SettingsPage() {
       updated_at: null,
       updated_by: null,
     }),
-    getJson<StatusResponse>("/automation/status", {
+    loadJson<StatusResponse>("/automation/status", {
       summary: {
         state: "running",
         mode: "assisted",
@@ -165,11 +156,11 @@ export default async function SettingsPage() {
       queue: {},
       recent_automation_actions: [],
     }),
-    getJson<{ platform: string; account_handle: string; status: string }[]>(
+    loadJson<{ platform: string; account_handle: string; status: string }[]>(
       "/platform-accounts",
       [],
     ),
-    getJson<CostsSummary>("/costs/summary", {
+    loadJson<CostsSummary>("/costs/summary", {
       usd_today: 0,
       usd_7d: 0,
       usd_30d: 0,
@@ -182,16 +173,32 @@ export default async function SettingsPage() {
         tts_usd_per_mchar: 15,
       },
     }),
-    getJson<CostsBudget>("/costs/budget", {
+    loadJson<CostsBudget>("/costs/budget", {
       llm: { used_usd_today: 0, limit_usd_per_day: 0, exhausted: false, blocked_today: 0 },
       tts: { chars_today: 0, limit_chars_per_day: 0, exhausted: false, blocked_today: 0 },
     }),
-    getJson<ProvidersInfo>("/costs/providers", {
+    loadJson<ProvidersInfo>("/costs/providers", {
       extraction: { configured: false, reachable: false, models: [] },
       tts: { configured: false, reachable: false, models: [] },
       cached: false,
     }),
   ]);
+  const [setting, languageRes, releaseRes, backupRes, policyRes, statusRes, accounts, costsRes, costBudgetRes, providersRes] =
+    [loaded[0].data, loaded[1].data, loaded[2].data, loaded[3].data, loaded[4].data,
+     loaded[5].data, loaded[6].data, loaded[7].data, loaded[8].data, loaded[9].data] as const;
+  const policyLive = loaded[4].ok;
+  const offline = unavailableSections({
+    "publishing windows": loaded[0],
+    "language policy": loaded[1],
+    "release policy": loaded[2],
+    "media backup": loaded[3],
+    "automation policy": loaded[4],
+    "automation status": loaded[5],
+    "connected accounts": loaded[6],
+    "costs": loaded[7],
+    "budget": loaded[8],
+    "providers": loaded[9],
+  });
 
   const windows = setting.value?.windows ?? ["18:00"];
   const backup = backupRes.value;
@@ -222,12 +229,24 @@ export default async function SettingsPage() {
         publishing windows (§17) · live status.
       </p>
 
+      {offline.length > 0 && (
+        <div className="notice notice-danger" role="alert">
+          <strong>Live data unavailable</strong> for {offline.join(", ")}. The API did
+          not answer, so those sections show placeholders, not your live
+          configuration. Editing the automation policy is disabled until it loads.
+        </div>
+      )}
+
       <section className="card">
         <div className="settings-head">
           <h2>Automation control</h2>
-          <span className="pill" style={{ color: stateColor, borderColor: stateColor }}>
-            {summary?.state ?? "unknown"}
-          </span>
+          {policyLive ? (
+            <span className="pill" style={{ color: stateColor, borderColor: stateColor }}>
+              {summary?.state ?? "unknown"}
+            </span>
+          ) : (
+            <span className="pill pill-muted">unavailable</span>
+          )}
         </div>
         <p className="muted small" style={{ marginTop: 0 }}>
           Changes are validated and audited by the API. The workers re-check this
@@ -238,7 +257,15 @@ export default async function SettingsPage() {
               {policyRes.updated_by && <> by {policyRes.updated_by}</>}.</>
           )}
         </p>
-        <AutomationForm initialPolicy={policy} controls={controls} />
+        {policyLive ? (
+          <AutomationForm initialPolicy={policy} controls={controls} />
+        ) : (
+          <div className="empty-state">
+            The automation policy could not be loaded. Nothing is shown here
+            rather than a default that could be mistaken for the live policy —
+            reload once the API is reachable.
+          </div>
+        )}
       </section>
 
       <CostsCard summary={costsRes} budget={costBudgetRes} providers={providersRes} />

@@ -90,7 +90,7 @@ export default function OfferActions({ offerId, state }: Props) {
           </button>
         ))}
       </div>
-      {error && <span style={{ color: "#f85149", fontSize: "0.72rem" }}>{error}</span>}
+      {error && <span style={{ color: "var(--danger)", fontSize: "0.72rem" }}>{error}</span>}
     </div>
   );
 }
