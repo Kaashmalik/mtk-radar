@@ -20,7 +20,7 @@ import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Final, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -682,6 +682,97 @@ async def batch_transition(body: BatchTransitionIn, request: Request) -> dict:
         "to": body.to,
         "ok": all(r["ok"] for r in results),
         "approved": sum(1 for r in results if r["ok"]),
+        "results": results,
+    }
+
+
+#: The only path to the queue: each step is the ordinary single transition.
+_TO_QUEUE: Final[dict[str, tuple[str, ...]]] = {
+    "draft": ("needs_approval", "approved", "scheduled"),
+    "needs_approval": ("approved", "scheduled"),
+    "approved": ("scheduled",),
+    "scheduled": (),  # already queued: idempotent no-op
+}
+
+
+class ReviewedTargetIn(BaseModel):
+    id: uuid.UUID
+    # The package hash the reviewer SAW in the preview. A package that
+    # changed since (new render/metadata/cover pin) is refused as stale.
+    expected_package_hash: Optional[str] = None
+
+
+class ApproveAndQueueIn(BaseModel):
+    """G20: one final human action after reviewing the exact packages."""
+
+    targets: list[ReviewedTargetIn] = Field(min_length=1, max_length=50)
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.post("/schedules/approve-and-queue")
+async def approve_and_queue(body: ApproveAndQueueIn, request: Request) -> dict:
+    """Approve AND queue reviewed posts in one click (G20).
+
+    For every target, inside ONE transaction: lock the row, refuse a stale
+    preview (package hash changed since review), then walk the existing
+    draft → needs_approval → approved → scheduled transitions via
+    `_transition` — same gates, same audit, same reviewer binding. Any
+    refused step rolls the whole target back to the state it started in, so
+    a partial result is safe to retry: already-queued targets are a no-op
+    and only unresolved targets move. Never expands to other posts.
+    """
+    if credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(
+            status_code=403,
+            detail="approve-and-queue is a human action — use a reviewer credential",
+        )
+    pool = db.get()
+    results: list[dict] = []
+    seen: set[uuid.UUID] = set()
+    for target in body.targets:
+        if target.id in seen:
+            continue
+        seen.add(target.id)
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    current = await conn.fetchrow(
+                        "SELECT state::text AS state, package_hash FROM schedules "
+                        "WHERE id = $1 FOR UPDATE",
+                        target.id,
+                    )
+                    if current is None:
+                        raise HTTPException(status_code=404, detail="schedule not found")
+                    if target.expected_package_hash is not None                             and current["package_hash"] != target.expected_package_hash:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="package changed since review — reload the preview "
+                                   "and review the current package",
+                        )
+                    path = _TO_QUEUE.get(current["state"])
+                    if path is None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"a '{current['state']}' post cannot be approved and "
+                                   "queued from here",
+                        )
+                    row: dict = {"state": current["state"]}
+                    for step in path:
+                        row = await _transition(
+                            conn, target.id,
+                            ScheduleTransitionIn(to=step, reviewer=body.reviewer,
+                                                 note=body.note),
+                            request,
+                        )
+            results.append({"id": str(target.id), "ok": True,
+                            "from": current["state"], "already_queued": not path, **row})
+        except HTTPException as exc:
+            results.append({"id": str(target.id), "ok": False,
+                            "detail": exc.detail, "status": exc.status_code})
+    return {
+        "ok": all(r["ok"] for r in results),
+        "queued": sum(1 for r in results if r["ok"]),
         "results": results,
     }
 
