@@ -268,10 +268,14 @@ services:
     restart: unless-stopped
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
+    # EP-07: undeliverable cost telemetry survives restarts in the outbox.
+    volumes:
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       # Shared with the API: unsigned machine evidence is refused.
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
       MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
@@ -351,9 +355,11 @@ services:
       - storage-data:/data
       - storage-cache:/repo/.storage-cache
       - render-projects:/repo/projects
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
       MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
       MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-/repo/.storage-cache}
@@ -414,10 +420,14 @@ services:
     restart: unless-stopped
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
+    # EP-07: notifications that failed to send are replayed from the outbox.
+    volumes:
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
       # Optional alert delivery. Blank values disable that channel; the
       # monitor still logs every alert. See docs/notifications.md.
@@ -476,3 +486,4 @@ volumes:
   storage-data:
   storage-cache:
   render-projects:
+  outbox-data:

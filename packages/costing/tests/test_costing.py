@@ -85,3 +85,49 @@ def test_explicit_arguments_beat_environment(monkeypatch):
     client = CostClient("http://explicit.test", token="explicit-tok")
     assert client.token == "explicit-tok"
     assert client.api_url == "http://explicit.test"
+
+
+# ------------------------------------------------ durable usage outbox (EP-07)
+
+def _client_with_box(tmp_path, monkeypatch, statuses):
+    """CostClient whose /costs/usage answers come from `statuses` in order."""
+    from outbox import FileOutbox
+
+    sent = []
+
+    def fake_status(self, path, body):
+        sent.append(body)
+        status = statuses.pop(0) if statuses else 200
+        return status, ({} if status and status < 300 else None)
+
+    monkeypatch.setattr(CostClient, "_post_status", fake_status)
+    client = CostClient("http://api")
+    client._box = FileOutbox("costs-usage", tmp_path, base_backoff_s=0)
+    return client, sent
+
+
+def test_usage_during_api_outage_is_spooled_then_replayed_once(tmp_path, monkeypatch):
+    client, sent = _client_with_box(tmp_path, monkeypatch, [None, 503])
+    client.report("tts", units=100)          # transport failure → spooled
+    client.report("tts", units=200)          # 503 → spooled
+    assert client._box.pending_count() == 2
+    event_ids = {b["events"][0]["event_id"] for b in sent}
+    assert len(event_ids) == 2
+
+    client.report("tts", units=300)          # API back → delivered + drains spool
+    assert client._box.pending_count() == 0
+    replayed = [b["events"][0]["event_id"] for b in sent[3:]]
+    assert set(replayed) == event_ids, "replays carry the ORIGINAL event ids"
+
+
+def test_usage_refused_with_4xx_is_not_retried_forever(tmp_path, monkeypatch):
+    client, sent = _client_with_box(tmp_path, monkeypatch, [422])
+    client.report("tts", units=1)
+    assert client._box.pending_count() == 0, "a refusal is not an outage"
+
+
+def test_settlement_rides_in_the_spooled_body(tmp_path, monkeypatch):
+    client, sent = _client_with_box(tmp_path, monkeypatch, [None])
+    client.report("llm_extract", units=10, settle_reservation="res-1")
+    spooled = client._box.due()[0].payload
+    assert spooled["settle_reservation"] == "res-1"

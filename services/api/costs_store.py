@@ -112,7 +112,17 @@ def _coerce_event(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
         "ref_type": str(raw.get("ref_type") or "")[:60] or None,
         "ref_id": raw.get("ref_id") or None,
         "meta": meta,
+        # Client idempotency key (outbox replays): bounded, charset-checked.
+        "event_id": _event_id(raw.get("event_id")),
     }
+
+
+_EVENT_ID = __import__("re").compile(r"^[A-Za-z0-9._:-]{8,64}$")
+
+
+def _event_id(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text if _EVENT_ID.match(text) else None
 
 
 async def record_events(pool, events: list[dict[str, Any]]) -> dict[str, int]:
@@ -130,12 +140,13 @@ async def record_events(pool, events: list[dict[str, Any]]) -> dict[str, int]:
             """
             INSERT INTO usage_events
                 (kind, provider, model, units, unit_type, cost_usd_est,
-                 ref_type, ref_id, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                 ref_type, ref_id, meta, event_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+            ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
             """,
             [(e["kind"], e["provider"], e["model"], e["units"], e["unit_type"],
               e["cost_usd_est"], e["ref_type"], e["ref_id"],
-              __import__("json").dumps(e["meta"])) for e in prepared],
+              __import__("json").dumps(e["meta"]), e["event_id"]) for e in prepared],
         )
     return {"recorded": len(prepared), "dropped": dropped}
 
@@ -373,19 +384,24 @@ async def settle_reservation(pool, reservation_id: str,
     event = _coerce_event(event)
     if event is None or not reservation_id:
         return {"settled": False, "reason": "invalid reservation settlement"}
+    if event["event_id"] and await pool.fetchval(
+            "SELECT 1 FROM usage_events WHERE event_id = $1", event["event_id"]):
+        # Outbox replay of a settlement that already landed: count it once.
+        return {"settled": True, "duplicate": True}
     result = await pool.execute(
         """
         UPDATE usage_events
         SET units = $2, unit_type = $3,
             cost_usd_est = $4,
-            meta = meta || $5::jsonb
+            meta = meta || $5::jsonb,
+            event_id = COALESCE($6, event_id)
         WHERE id = $1::uuid
           AND meta->>'reservation' = 'true'
           AND meta->>'settled' IS NULL
         """,
         __import__("uuid").UUID(reservation_id),
         event["units"], event["unit_type"], event["cost_usd_est"],
-        __import__("json").dumps({"settled": True}),
+        __import__("json").dumps({"settled": True}), event["event_id"],
     )
     if result.endswith("UPDATE 1"):
         return {"settled": True}
