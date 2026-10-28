@@ -124,5 +124,6 @@ unproven checks, following the existing convention.
    integration tests, real FFmpeg renders, one private YouTube post.
 3. **Validate then decide defaults:** run `MTK_VERTICAL_REFRAME=auto` on a
    few real captures before making it the default.
-4. **Beat/storyboard editor** for scenes (V7 UI) and the public-page capture
-   recipe worker (M2 second half) — product work, not gaps in safety.
+4. ~~Storyboard editor (V7 UI) and public-page capture worker (M2 second
+   half)~~ — **done** in the third pass (`b0a8ca1` + UI commit): versioned,
+   ledger-locked storyboard in Studio; sandboxed page screenshots as scenes.

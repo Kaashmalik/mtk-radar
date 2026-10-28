@@ -1074,3 +1074,76 @@ main.page th:last-child { border-top-right-radius: var(--radius-sm); }
 @media (max-width: 900px) {
   main.page { min-height: auto; }
 }
+
+.chip-btn {
+  padding: 0.15rem 0.6rem; font: inherit; font-size: 0.74rem; border-radius: 999px;
+  border: 1px solid var(--border-subtle); background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: color var(--speed) ease, border-color var(--speed) ease;
+}
+.chip-btn:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---------- storyboard editor (Studio) ---------- */
+
+.storyboard { display: grid; gap: 0.8rem; }
+.storyboard-head { display: flex; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; align-items: center; }
+.storyboard-actions { display: flex; gap: 0.4rem; }
+.storyboard .notice ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+
+.timeline {
+  display: flex; gap: 3px; height: 10px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-inset);
+}
+.timeline-seg { min-width: 6px; transition: flex-grow var(--speed-slow) var(--ease-out); }
+.timeline-seg[data-kind="title"] { background: var(--accent); }
+.timeline-seg[data-kind="claim"] { background: var(--ok); }
+.timeline-seg[data-kind="page"] { background: var(--accent-2); }
+.timeline-seg[data-kind="close"] { background: var(--warn); }
+
+.scene-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.scene {
+  --scene: var(--text-muted);
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.7rem;
+  padding: 0.65rem 0.75rem; border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--scene); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-inset) 55%, transparent);
+  transition: opacity var(--speed) ease, border-color var(--speed) ease, transform var(--speed) var(--ease-out);
+  cursor: grab;
+}
+.scene:active { cursor: grabbing; transform: scale(0.995); }
+.scene[data-kind="title"] { --scene: var(--accent); }
+.scene[data-kind="claim"] { --scene: var(--ok); }
+.scene[data-kind="page"] { --scene: var(--accent-2); }
+.scene[data-kind="close"] { --scene: var(--warn); }
+.scene[data-excluded] { opacity: 0.5; }
+.scene-rail { display: grid; gap: 0.25rem; justify-items: center; align-content: start; }
+.scene-rail .icon-btn { width: 26px; height: 24px; font-size: 0.8rem; }
+.scene-index { font-weight: 700; font-size: 0.8rem; color: var(--scene); font-variant-numeric: tabular-nums; }
+.scene-main { display: grid; gap: 0.35rem; min-width: 0; }
+.scene-top { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.scene-kind { color: var(--scene); font-weight: 700; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.scene-include { margin-left: auto; display: inline-flex; gap: 0.3rem; align-items: center; }
+.scene-heading { margin: 0; font-weight: 650; font-size: 0.88rem; }
+.scene-body { margin: 0; font-size: 0.86rem; }
+.scene-heading-input { font-weight: 650; }
+.scene-main textarea { resize: vertical; }
+.scene-source { margin: 0; }
+.scene-weight { display: inline-flex; gap: 0.5rem; align-items: center; color: var(--text-muted); }
+.scene-weight input { width: 140px; }
+.scene-shot {
+  width: 100%; max-width: 420px; aspect-ratio: 16 / 9; object-fit: cover;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); background: var(--bg-inset);
+}
+.scene-remove { align-self: start; }
+.scene-add { display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center; }
+
+.page-capture { border-top: 1px solid var(--border-subtle); padding-top: 0.7rem; display: grid; gap: 0.5rem; }
+.page-capture summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+.page-capture[open] { gap: 0.6rem; }
+.page-capture textarea { width: 100%; }
+.capture-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+.capture-list li { display: flex; gap: 0.4rem; align-items: center; min-width: 0; }
+
+@media (max-width: 640px) {
+  .scene { grid-template-columns: minmax(0, 1fr) auto; }
+  .scene-rail { grid-auto-flow: column; grid-column: 1 / -1; justify-content: start; }
+}

@@ -114,6 +114,25 @@ Keep notifications off — the recorder sees everything in that region.
   compare the 9:16 export with the default. Keep it opt-in until it looks
   right on several captures.
 
+## 5c. Storyboard editor + public-page capture
+
+1. Integration tests to look for: `test_storyboard_is_versioned_derived_from_the_ledger_and_human_only`,
+   `test_page_capture_requests_filter_unsafe_urls_and_record_results` (migration 044).
+2. Install the browser once: `pip install -r workers/capture/requirements.txt`
+   then `python -m playwright install chromium`, and run the page worker:
+   `MTK_API_URL=http://localhost:8000 MTK_WORKER_TOKEN=… python workers/capture/page_capture.py --watch`
+   (set `MTK_STORAGE_BACKEND` so screenshots are shared with the render worker).
+3. Studio → an explainer offer → **Storyboard** → *Capture public source pages*:
+   add the paper URL → after one worker pass it shows `ok` and a **Source page**
+   scene with the screenshot. Try `http://…` or an intranet URL: refused with a reason.
+4. Reorder scenes, untick one, change durations, edit the opening/closing text,
+   **Save storyboard** → v1. Try editing a claim's text: it is locked.
+5. Render the explainer: `assets/explainer/scene_manifest.json` shows
+   `storyboard_version: 1` and the saved order; the page scene shows the
+   screenshot with a slow push-in in both 16:9 and 9:16; QC passes.
+6. Mark a used claim *Contradicted* on the offer page → Studio shows the red
+   "renderer will drop" notice; the next render omits it and lists it in `dropped`.
+
 ## 6. One private YouTube post
 
 Follow [`go-live-checklist.md`](go-live-checklist.md) with privacy **Private**

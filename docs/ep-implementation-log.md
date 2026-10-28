@@ -291,3 +291,19 @@ usage-event dedup, quota ledger lifecycle, TikTok options/consent hashing;
 migrations 041–043 on a real database; real FFmpeg sampling for reframing;
 live TikTok `creator_info`. See the home checklist.
 
+## 2026-10-28 — third pass: storyboard editor + public-page capture
+
+| Work | Commit |
+|---|---|
+| packages/storyboard (shared rules), storyboard + page-capture API (migration 044), sandboxed page_capture worker, renderer draws the saved storyboard with verified screenshots | `b0a8ca1` |
+| Studio storyboard editor (reorder/drag, include, duration, locked claim scenes, add claims/pages, conflict-safe save) + capture panel | this commit |
+
+**Checks executed:** unit suite green (storyboard rules, page-capture policy
+incl. fake-Playwright sandbox tests, overlay graph, saved-storyboard render);
+`ruff`, `pnpm typecheck`, `next build`; the editor was exercised in Edge
+against a mock API (reorder, exclude, unsaved state, capture panel) in both
+themes with no page errors.
+
+**Not executed here:** Postgres integration tests for migration 044, a real
+Chromium page capture, and an FFmpeg render with page overlays.
+

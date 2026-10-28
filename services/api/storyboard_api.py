@@ -110,7 +110,8 @@ async def get_storyboard(offer_id: uuid.UUID) -> dict:
     if not offer:
         raise HTTPException(status_code=404, detail="offer not found")
     brief = await latest_brief_with_claims(pool, offer_id)
-    pages = [p for p in await _page_captures(pool, offer_id) if p["status"] == "ok"]
+    all_pages = await _page_captures(pool, offer_id)
+    pages = [p for p in all_pages if p["status"] == "ok"]
     current = await _current_storyboard(pool, offer_id)
     problems: list[str] = []
     if current and brief:
@@ -123,10 +124,13 @@ async def get_storyboard(offer_id: uuid.UUID) -> dict:
         "suggested": storyboard.suggest(dict(offer), brief, pages) if brief else [],
         "claims": [
             {"id": c["id"], "status": c["status"], "claim_class": c["claim_class"],
-             "text": c.get("permitted_wording") or c["claim_text"]}
+             "text": c.get("permitted_wording") or c["claim_text"],
+             "source_url": c.get("source_url")}
             for c in (brief or {}).get("claims", [])
         ],
-        "page_captures": pages,
+        # Every capture (requested/failed/refused too) so the editor can show
+        # progress; only status "ok" ones are usable as scenes.
+        "page_captures": all_pages,
         "problems": problems,
         "limits": {"max_scenes": storyboard.MAX_SCENES,
                    "weight": [storyboard.MIN_WEIGHT, storyboard.MAX_WEIGHT],
