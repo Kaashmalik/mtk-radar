@@ -96,3 +96,34 @@
           font-size: 0.85rem;
           margin: 0.6rem 0;
         }
+
+/* Schedule form (G19): one row per target platform with its own pins. */
+.schedule-form { display: grid; gap: 0.75rem; margin-top: 0.6rem; }
+.schedule-shared { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.schedule-windows { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.chip-btn {
+  padding: 0.15rem 0.6rem; font: inherit; font-size: 0.74rem; border-radius: 999px;
+  border: 1px solid var(--border-subtle); background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: color var(--speed) ease, border-color var(--speed) ease;
+}
+.chip-btn:hover { color: var(--text); border-color: var(--accent); }
+.schedule-targets { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.schedule-target {
+  border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 0.65rem 0.8rem;
+  background: color-mix(in srgb, var(--bg-inset) 55%, transparent);
+  transition: border-color var(--speed) ease, background-color var(--speed) ease;
+}
+.schedule-target[data-selected] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.schedule-target[data-blocked]:not([data-selected]) { opacity: 0.65; }
+.schedule-target-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; cursor: pointer; }
+.schedule-target[data-blocked]:not([data-selected]) .schedule-target-head { cursor: not-allowed; }
+.schedule-target-body {
+  display: grid; gap: 0.4rem; margin-top: 0.55rem;
+  animation: rise-in var(--speed-slow) var(--ease-out) both;
+}
+.schedule-note { margin: 0; }
+.schedule-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+

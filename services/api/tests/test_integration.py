@@ -6075,3 +6075,52 @@ def test_extension_intake_contract_idempotent_with_context(client):
     assert obs and obs[0]["excerpt"].startswith("Participants recalled 12%")
     provenance = _json.loads(obs[0]["provenance"])
     assert provenance["intake"] == "extension"
+
+
+def test_approve_and_queue_is_atomic_per_target_and_rejects_stale_previews(auth_client):
+    """G20: one human click approves AND queues reviewed packages. Each target
+    is all-or-nothing, a changed package is refused as stale, repeats are
+    idempotent, and service credentials are refused."""
+    marker, stamp = uuid.uuid4().hex, "2027-05-09T13:00:00+00:00"
+    offer_id = _wpd_ready_offer(auth_client, marker)
+    batched = auth_client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "facebook"], "local_time": stamp, "privacy": "private",
+    }).json()
+    ids = [r["id"] for r in batched["results"] if r["ok"]]
+    assert len(ids) == 2, batched
+    hashes = {r["id"]: r["package_hash"] for r in _run(
+        "SELECT id::text, package_hash FROM schedules WHERE id = ANY($1::uuid[])", ids)}
+    yt, fb = ids
+
+    refused = auth_client.post("/schedules/approve-and-queue", headers=SVC, json={
+        "targets": [{"id": yt}]})
+    assert refused.status_code == 403, refused.text
+
+    # The facebook preview is stale: the reviewer saw a different package.
+    first = auth_client.post("/schedules/approve-and-queue", headers=AUTH, json={
+        "targets": [{"id": yt, "expected_package_hash": hashes[yt]},
+                    {"id": fb, "expected_package_hash": "not-what-is-stored"}]})
+    assert first.status_code == 200, first.text
+    results = {r["id"]: r for r in first.json()["results"]}
+    assert results[fb]["ok"] is False and results[fb]["status"] == 409
+    assert "changed since review" in results[fb]["detail"]
+
+    states = {r["id"]: r["state"] for r in _run(
+        "SELECT id::text, state::text FROM schedules WHERE id = ANY($1::uuid[])", ids)}
+    assert states[fb] == "draft", "a refused target keeps the state it started in"
+    if results[yt]["ok"]:
+        assert states[yt] == "scheduled"
+    else:
+        # A release gate may refuse queueing in this fixture; the walk must
+        # then roll back completely instead of stranding the post half-way.
+        assert states[yt] == "draft", results[yt]
+
+    # Repeat submit: no duplicate work, no state churn.
+    again = auth_client.post("/schedules/approve-and-queue", headers=AUTH, json={
+        "targets": [{"id": yt, "expected_package_hash": hashes[yt]}]})
+    assert again.status_code == 200
+    entry = again.json()["results"][0]
+    if results[yt]["ok"]:
+        assert entry["ok"] is True and entry["already_queued"] is True
+    rows = _run("SELECT count(*) AS n FROM schedules WHERE offer_id = $1", offer_id)
+    assert rows[0]["n"] == 2, "approve-and-queue never creates posts"

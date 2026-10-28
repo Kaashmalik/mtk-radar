@@ -28,6 +28,10 @@ type ScheduleRow = {
   local_time: string;
   timezone: string;
   privacy: string;
+  platform_account_id?: string | null;
+  render_id?: string | null;
+  package_hash?: string | null;
+  language?: string | null;
   approved_by: string | null;
   version_hash: string | null;
   remote_post_id: string | null;
@@ -80,6 +84,9 @@ async function getBestTimes(): Promise<BestTimes | null> {
 /** Client-side mirror of the API rule (schedules_api._annotate_conflicts):
  *  same platform, same local day, within 60 minutes → conflict. */
 function annotateConflicts(rows: ScheduleRow[]): ScheduleRow[] {
+  // The API annotates account-aware, cross-page, UTC conflicts (G26). Only
+  // an older API without the field falls back to this page-local estimate.
+  if (rows.some((r) => typeof r.conflict === "boolean")) return rows;
   const WINDOW_MIN = 60;
   const active = rows.filter((r) =>
     ["needs_approval", "approved", "scheduled"].includes(r.state),
@@ -94,7 +101,10 @@ function annotateConflicts(rows: ScheduleRow[]): ScheduleRow[] {
     return { day, minute: h * 60 + m };
   };
   const buckets = new Map<string, { row: ScheduleRow; minute: number }[]>();
-  for (const row of rows) row.conflict = false;
+  for (const row of rows) {
+    row.conflict = false;
+    row.conflict_with = [];
+  }
   for (const row of active) {
     const { day, minute } = slot(row);
     const key = `${row.platform}|${day}`;
@@ -293,6 +303,12 @@ export default async function CalendarPage() {
             offer_title: s.offer_title,
             local_time: s.local_time,
             state: s.state,
+            privacy: s.privacy,
+            language: s.language ?? null,
+            render_id: s.render_id ?? null,
+            platform_account_id: s.platform_account_id ?? null,
+            package_hash: s.package_hash ?? null,
+            conflict: Boolean(s.conflict),
           }))}
         />
       )}
