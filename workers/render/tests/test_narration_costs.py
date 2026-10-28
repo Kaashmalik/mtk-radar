@@ -62,7 +62,8 @@ def test_rerender_of_unchanged_narration_costs_zero_chars(monkeypatch, tmp_path)
         return costing.tts_cache_key(text, voice=kw["voice"], model=kw["model"])
 
     import costing
-    k = costing.tts_cache_key("Hello walkthrough", voice="onyx", model="tts-1")
+    k = costing.tts_cache_key("Hello walkthrough", voice="onyx", model="tts-1",
+                              provider="tts.invalid/v1")
     cost.store[f"tts:{k}"] = {"path": str(existing)}
 
     def no_network(*a, **kw):
@@ -81,7 +82,8 @@ def test_missing_cache_file_falls_through_to_synthesis(monkeypatch, tmp_path):
     _tts_env(monkeypatch, tmp_path)
     cost = FakeCost()
     import costing
-    k = costing.tts_cache_key("Hello again", voice="onyx", model="tts-1")
+    k = costing.tts_cache_key("Hello again", voice="onyx", model="tts-1",
+                              provider="tts.invalid/v1")
     cost.store[f"tts:{k}"] = {"path": str(tmp_path / "gone.mp3")}  # deleted
 
     def fake_post(url, **kw):
@@ -206,3 +208,63 @@ def test_tts_local_on_a_public_endpoint_keeps_the_budget_gate(monkeypatch, tmp_p
                                base_url="https://api.openai.com/v1", api_key="sk-test",
                                cost=Deny())
     assert out is None, "public endpoint → paid path → budget refusal stands"
+
+
+# ------------------------------------------- shared narration audio (G25)
+
+def test_cache_key_is_context_complete():
+    import costing
+
+    base = dict(voice="onyx", model="tts-1", provider="api.example/v1")
+    k = costing.tts_cache_key("Same words", **base)
+    assert k == costing.tts_cache_key("Same words", **base)
+    assert k != costing.tts_cache_key("Same words", **{**base, "provider": "localhost:8880/v1"})
+    assert k != costing.tts_cache_key("Same words", **base, speed="1.25")
+    assert k != costing.tts_cache_key("Same words", **base, response_format="wav")
+
+
+def _fresh_synth(monkeypatch, audio=b"ID3-shared-audio"):
+    def fake_post(url, **kw):
+        return httpx.Response(200, content=audio, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+
+def test_fresh_audio_is_shared_content_addressed_and_reused_on_another_host(
+        monkeypatch, tmp_path):
+    import hashlib
+
+    _tts_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MTK_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("MTK_STORAGE_LOCAL_ROOT", str(tmp_path / "bucket"))
+    cost = FakeCost()
+    _fresh_synth(monkeypatch)
+    host_a = narration.synthesize("Shared line", tmp_path / "a" / "n-000.mp3", cost=cost)
+    assert host_a is not None
+    (entry,) = cost.store.values()
+    digest = hashlib.sha256(b"ID3-shared-audio").hexdigest()
+    assert entry["sha256"] == digest
+    assert entry["ref"] == f"local://tts/{digest[:2]}/{digest}.mp3"
+
+    # Host B: host A's file path does not exist there; the shared ref does.
+    entry["path"] = str(tmp_path / "elsewhere" / "missing.mp3")
+
+    def no_network(*a, **kw):
+        raise AssertionError("shared audio must not be re-synthesized")
+
+    monkeypatch.setattr(httpx, "post", no_network)
+    host_b = narration.synthesize("Shared line", tmp_path / "b" / "n-000.mp3", cost=cost)
+    assert host_b is not None and host_b.read_bytes() == b"ID3-shared-audio"
+    assert cost.events[-1]["meta"]["cache_hit"] is True
+
+
+def test_tampered_or_truncated_cached_audio_is_a_miss(monkeypatch, tmp_path):
+    _tts_env(monkeypatch, tmp_path)
+    cost = FakeCost()
+    _fresh_synth(monkeypatch, audio=b"original-audio")
+    first = narration.synthesize("Line", tmp_path / "n-000.mp3", cost=cost)
+    first.write_bytes(b"trunc")  # same path, different bytes
+    _fresh_synth(monkeypatch, audio=b"original-audio")
+    again = narration.synthesize("Line", tmp_path / "n-001.mp3", cost=cost)
+    assert again is not None and again.read_bytes() == b"original-audio"
+    assert again != first, "the corrupted file was not reused"
+
