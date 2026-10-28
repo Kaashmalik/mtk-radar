@@ -130,3 +130,79 @@ def test_synthesize_all_passes_cost_through(monkeypatch, tmp_path):
     monkeypatch.setattr(narration, "synthesize", fake_synth)
     result = narration.synthesize_all(["a", "b"], tmp_path, cost="cost-client")
     assert result["used"] is True and all(c == "cost-client" for c in seen)
+
+
+# ------------------------------------------------- verified-local TTS (M7)
+
+def test_tts_local_flag_is_honoured_only_for_local_endpoints(monkeypatch):
+    from narration import tts_local
+
+    monkeypatch.setenv("TTS_LOCAL", "1")
+    for local in ("http://localhost:8880/v1", "http://127.0.0.1:5000/v1",
+                  "http://192.168.1.20:8880/v1", "http://kokoro:8880/v1", "http://[::1]:9000/v1"):
+        assert tts_local(local), local
+    for public in ("https://api.openai.com/v1", "https://tts.example.com/v1",
+                   "http://8.8.8.8/v1", ""):
+        assert not tts_local(public), public
+    monkeypatch.setenv("TTS_LOCAL", "0")
+    assert not tts_local("http://localhost:8880/v1")
+
+
+def test_local_tts_needs_no_key_skips_paid_budget_and_reports_free(monkeypatch, tmp_path):
+    import httpx
+
+    import narration
+
+    monkeypatch.setenv("TTS_LOCAL", "1")
+    monkeypatch.delenv("TTS_API_KEY", raising=False)
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["url"], seen["headers"] = url, headers
+        return httpx.Response(200, content=b"ID3audio", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    class Cost:
+        def __init__(self):
+            self.reports, self.checked = [], False
+
+        def cache_lookup(self, kind, key):
+            return None
+
+        def budget_check(self, *a, **k):
+            self.checked = True
+            return {"allowed": False}
+
+        def cache_store(self, *a, **k):
+            pass
+
+        def report(self, kind, **kw):
+            self.reports.append(kw)
+
+    cost = Cost()
+    out = narration.synthesize("Hello there.", tmp_path / "n.mp3",
+                               base_url="http://localhost:8880/v1", cost=cost)
+    assert out is not None and out.read_bytes() == b"ID3audio"
+    assert "Authorization" not in seen["headers"], "keyless local server"
+    assert cost.checked is False, "a free local server needs no paid reservation"
+    assert cost.reports[-1]["provider"] == "local"
+    assert cost.reports[-1]["meta"] == {"local": True}
+
+
+def test_tts_local_on_a_public_endpoint_keeps_the_budget_gate(monkeypatch, tmp_path):
+    import narration
+
+    monkeypatch.setenv("TTS_LOCAL", "1")
+
+    class Deny:
+        def cache_lookup(self, kind, key):
+            return None
+
+        def budget_check(self, *a, **k):
+            return {"allowed": False}
+
+    out = narration.synthesize("Hello.", tmp_path / "n.mp3",
+                               base_url="https://api.openai.com/v1", api_key="sk-test",
+                               cost=Deny())
+    assert out is None, "public endpoint → paid path → budget refusal stands"
