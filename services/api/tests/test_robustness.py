@@ -119,6 +119,29 @@ def test_job_touch_extends_lease_for_the_current_holder_only(client):
     assert hijack.status_code == 409, "only the current holder may extend"
 
 
+def test_job_result_is_fenced_to_the_current_holder(client):
+    """A worker that lost its lease cannot overwrite the new holder's outcome;
+    an unfenced (older) worker report is still accepted."""
+    claim = client.post("/jobs/claim", json={
+        "worker": "render-host-1", "lease_s": 60, "kinds": ["collect"]})
+    assert claim.status_code == 200, claim.text
+    body = claim.json()
+    if not body.get("claimed"):
+        pytest.skip("no due collect job available to claim")
+    job_id = body["id"]
+
+    stale = client.post(f"/jobs/{job_id}/result",
+                        json={"ok": True, "worker": "render-host-2"})
+    assert stale.status_code == 409, stale.text
+    assert _run("SELECT status::text AS s FROM jobs WHERE id = $1",
+                uuidlib.UUID(job_id))[0]["s"] == "leased", "nothing recorded"
+
+    owner = client.post(f"/jobs/{job_id}/result",
+                        json={"ok": True, "worker": "render-host-1"})
+    assert owner.status_code == 200, owner.text
+    assert owner.json()["status"] == "done"
+
+
 # ---------------------------------------------------------------- media GC
 
 def _rendered_offer(client, marker: str) -> str:

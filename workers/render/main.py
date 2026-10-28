@@ -58,7 +58,7 @@ from object_storage import (  # noqa: E402
     render_key,
 )
 from presets import get_preset  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 API_URL_DEFAULT = "http://localhost:8000"
 VIDEO_STATES = ("verified", "approved_for_video", "published")
@@ -759,7 +759,9 @@ RENDER_LEASE_S = int(os.environ.get("MTK_RENDER_LEASE_S", "3600"))
 RENDER_LEASE_TOUCH_S = int(os.environ.get("MTK_RENDER_LEASE_TOUCH_S", "600"))
 
 
-def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event) -> None:
+def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event,
+                  holder: str = "render-worker",
+                  lost: threading.Event | None = None) -> None:
     """Renew the render job's lease while the encode runs (WP-G §5.6.6).
 
     A 4K encode can outlive the one-hour claim lease; without renewal the
@@ -767,12 +769,22 @@ def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event) -> N
     fight an in-flight render. The keeper extends the SAME holder's lease
     every RENDER_LEASE_TOUCH_S until the render finishes or the process dies
     (a dead process stops touching → the lease genuinely expires, as before).
+
+    A 409 means this process no longer holds the lease (expired and taken
+    over, or reset by an operator): `lost` is set so the caller does not
+    report an outcome for work it no longer owns.
     """
     while not stop.wait(RENDER_LEASE_TOUCH_S):
         try:
             resp = client.post(f"/jobs/{job_id}/touch",
-                               json={"worker": "render-worker",
+                               json={"worker": holder,
                                      "lease_s": RENDER_LEASE_S})
+            if resp.status_code == 409:
+                log.error("render job %s: lease lost (%s) — this render will not "
+                          "report an outcome", job_id, resp.text[:200])
+                if lost is not None:
+                    lost.set()
+                return
             if resp.status_code != 200:
                 log.warning("lease renewal for render job %s refused (%s)",
                             job_id, resp.status_code)
@@ -792,10 +804,11 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
         return set()
     by_key = {(c["offer_id"], c.get("language") or "en"): c for c in candidates}
     rendered_keys: set = set()
+    holder = lease_holder("render")
     for _ in range(50):  # bounded per sweep; results remove claimed jobs
         try:
             resp = client.post("/jobs/claim", json={
-                "worker": "render-worker", "lease_s": 3600,
+                "worker": holder, "lease_s": RENDER_LEASE_S,
                 "kinds": ["render_package"]})
         except httpx.HTTPError:
             return rendered_keys
@@ -820,32 +833,41 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
             # rendered meanwhile / offer state moved on / script superseded:
             # the derived list no longer owes this render.
             _job_result(client, job_id, ok=True,
-                        detail="no longer a render candidate — nothing owed")
+                        detail="no longer a render candidate — nothing owed",
+                        worker=holder)
             continue
-        keeper_stop = threading.Event()
+        keeper_stop, lease_lost = threading.Event(), threading.Event()
         keeper = threading.Thread(
-            target=_lease_keeper, args=(client, str(job_id), keeper_stop),
+            target=_lease_keeper,
+            args=(client, str(job_id), keeper_stop, holder, lease_lost),
             name=f"lease-keeper-{str(job_id)[:8]}", daemon=True)
         keeper.start()
         try:
             _render_candidate(api_url, out_root, skip_narration, motion_template,
                               candidate, preset_keys)
-            _job_result(client, job_id, ok=True, detail="rendered")
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=True, detail="rendered", worker=holder)
             rendered_keys.add((offer_id, language))
         except SystemExit as exc:
-            _job_result(client, job_id, ok=True, detail=f"skipped: {exc}")
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=True, detail=f"skipped: {exc}",
+                            worker=holder)
         except Exception as exc:  # noqa: BLE001 — one candidate never stops the drain
             log.exception("render job %s failed for offer %s", job_id, offer_id)
-            _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
-                        retry_after_s=300)
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
+                            retry_after_s=300, worker=holder)
         finally:
             keeper_stop.set()
     return rendered_keys
 
 
 def _job_result(client: httpx.Client, job_id: str, *, ok: bool,
-                detail: str | None = None, retry_after_s: int | None = None) -> None:
+                detail: str | None = None, retry_after_s: int | None = None,
+                worker: str | None = None) -> None:
     payload: dict = {"ok": ok}
+    if worker:
+        payload["worker"] = worker  # lease fencing: only the holder settles
     if detail:
         payload["detail"] = detail[:1900]
     if retry_after_s is not None:

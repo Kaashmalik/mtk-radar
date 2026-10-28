@@ -45,7 +45,7 @@ from source_adapters import (  # noqa: E402
 from source_adapters.registry import ADAPTERS as REGISTRY  # noqa: E402
 from source_adapters.registry import approval_denial  # noqa: E402
 from source_adapters.registry import get as spec_for  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")  # optional; raises rate limits
@@ -218,6 +218,7 @@ class Collector:
             payload["detail"] = detail[:1900]
         if retry_after_s is not None:
             payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+        payload["worker"] = lease_holder("collector")  # lease fencing
         try:
             self.client.post(f"{self.api_url}/jobs/{job_id}/result", json=payload)
         except httpx.HTTPError as exc:
@@ -237,7 +238,7 @@ class Collector:
             try:
                 resp = self.client.post(
                     f"{self.api_url}/jobs/claim",
-                    json={"worker": "collector", "lease_s": 900,
+                    json={"worker": lease_holder("collector"), "lease_s": 900,
                           "kinds": ["collect"]},
                 )
             except httpx.HTTPError as exc:
