@@ -45,6 +45,7 @@ from api_paging import iter_pages  # noqa: E402
 
 import captions as captions_mod  # noqa: E402
 import covers as covers_mod  # noqa: E402
+import explainer as explainer_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
 import narration as narration_mod  # noqa: E402
 import project as project_mod  # noqa: E402
@@ -264,6 +265,40 @@ class RenderJob:
             pass
         return str(offer.get("redemption_url") or "")
 
+    def _explainer_brief(self) -> dict | None:
+        """The current research brief when this offer is an explainer (M3)."""
+        try:
+            research = self._get(f"/offers/{self.offer_id}/research")
+        except Exception:  # noqa: BLE001 — older API / unreachable: no explainer
+            return None
+        return explainer_mod.eligible_brief(research)
+
+    def _build_explainer_base(self, offer: dict, brief: dict,
+                              narration_s: float | None) -> tuple[str, list[dict]]:
+        """Render the card base video + scene manifest into the project.
+
+        The base runs slightly past the speech so the timeline preflight
+        (capture must cover narration) holds without truncating anything.
+        """
+        total = (narration_s + 0.6) if narration_s else None
+        scenes = explainer_mod.plan_scenes(offer, brief, total_s=total)
+        out_dir = self.project / "assets" / "explainer"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "cards.ass").write_text(explainer_mod.cards_ass(scenes), encoding="utf-8")
+        manifest = explainer_mod.scene_manifest(self.offer_id, brief, scenes)
+        (out_dir / "scene_manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        duration = scenes[-1]["end"]
+        cmd = explainer_mod.base_video_cmd(
+            "assets/explainer/cards.ass", "assets/explainer/base.mp4", duration)
+        log.info("explainer base (%d scenes, %.1fs, manifest %s) :: %s",
+                 len(scenes), duration, manifest["sha256"][:12], render_mod.describe(cmd))
+        proc = render_mod.run(cmd, self.project)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"explainer base render failed: {(proc.stderr or '')[-600:]}")
+        return str(out_dir / "base.mp4"), scenes
+
     def run(self, capture_video: str | None, preset_keys: list[str],
             skip_narration: bool, capture_id: str | None = None,
             languages: tuple[str, ...] | None = None) -> None:
@@ -303,25 +338,32 @@ class RenderJob:
 
         if capture_video is None and capture:
             capture_video = capture.get("video_path")
+        explainer_brief = None
         if not capture_video:
-            raise SystemExit(
-                "no capture video — pass --video or record one first "
-                "(workers/capture/main.py)"
+            # M3: a research EXPLAINER needs no hands-on capture — its base
+            # video is built from the current brief after narration is known.
+            # Every other track still requires a real recording.
+            explainer_brief = self._explainer_brief()
+            if explainer_brief is None:
+                raise SystemExit(
+                    "no capture video — pass --video or record one first "
+                    "(workers/capture/main.py)"
+                )
+        if capture_video:
+            # v0.15: a managed ref (s3://, local://) is materialized into the
+            # project first; plain paths keep working on the host that has them.
+            if not isinstance(capture_video, str):  # defensive: asyncpg row value
+                capture_video = str(capture_video)
+            local_capture = materialize(
+                capture_video, self.project / "assets" / "captures"
             )
-        # v0.15: a managed ref (s3://, local://) is materialized into the
-        # project first; plain paths keep working on the host that has them.
-        if not isinstance(capture_video, str):  # defensive: asyncpg row value
-            capture_video = str(capture_video)
-        local_capture = materialize(
-            capture_video, self.project / "assets" / "captures"
-        )
-        if local_capture is not None:
-            capture_video = str(local_capture)
-        elif not Path(capture_video).exists():
-            raise SystemExit(
-                f"capture video unavailable on this host: {capture_video} — "
-                "configure MTK_STORAGE_* or pass --video with a local file"
-            )
+            if local_capture is not None:
+                capture_video = str(local_capture)
+            elif not Path(capture_video).exists():
+                raise SystemExit(
+                    f"capture video unavailable on this host: {capture_video} — "
+                    "configure MTK_STORAGE_* or pass --video with a local file"
+                )
 
         # optional TTS narration — synthetic narration must be disclosed (§5).
         # Synthesize BEFORE captions so we can align cues to the actual spoken
@@ -361,11 +403,23 @@ class RenderJob:
                         cursor += duration
                     aligned_captions = aligned or None
 
+        explainer_scenes: list[dict] = []
+        if explainer_brief is not None:
+            narration_s = (render_mod.probe_duration(str(self.project / narration_file))
+                           if narration_file else None)
+            capture_video, explainer_scenes = self._build_explainer_base(
+                offer, explainer_brief, narration_s)
+
         # Captions from narration timing when available; otherwise from the
         # step log (source-derived, deterministic) with the real step
         # timestamps, not a synthetic words-per-minute timeline.
         if aligned_captions:
             segments = aligned_captions
+        elif explainer_scenes:
+            # No speech timing: caption each card for its on-screen time.
+            segments = [{"text": f"{s['heading']}: {s.get('body', '')}".strip(": "),
+                         "start": s["start"], "duration": s["end"] - s["start"]}
+                        for s in explainer_scenes]
         else:
             step_log = json.loads(capture["step_log"]) if capture and isinstance(capture.get("step_log"), str) \
                 else (capture or {}).get("step_log") or []

@@ -382,3 +382,46 @@ def test_lease_keeper_flags_a_lost_lease_and_stops(monkeypatch):
     assert len(calls) == 1
     assert b'"worker":"render-a-1"' in calls[0].content.replace(b" ", b"")
 
+
+
+def test_explainer_base_writes_cards_manifest_and_covers_the_speech(tmp_path, monkeypatch):
+    """M3: without a capture, an explainer job builds its base video from the
+    brief; the base runs past the narration so the timeline preflight holds."""
+    import json as _json
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, cwd):
+        calls.append((cmd, cwd))
+        (Path(cwd) / cmd[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(render_main.render_mod, "run", fake_run)
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    brief = {"id": "b1", "version": 1, "content_type": "explainer",
+             "viewer_question": "Does it work?",
+             "claims": [{"id": "c1", "claim_text": "It improved recall by 12%.",
+                         "claim_class": "author_reported", "status": "supported"}]}
+
+    base, scenes = job._build_explainer_base({"title": "T"}, brief, narration_s=20.0)
+    assert base.endswith("base.mp4") and Path(base).exists()
+    assert scenes[-1]["end"] == pytest.approx(20.6, abs=0.01)
+    manifest = _json.loads((tmp_path / "assets/explainer/scene_manifest.json").read_text())
+    assert manifest["scenes"][1]["claim_ids"] == ["c1"] and len(manifest["sha256"]) == 64
+    assert (tmp_path / "assets/explainer/cards.ass").read_text().startswith("[Script Info]")
+    assert calls and calls[0][1] == tmp_path
+
+
+def test_explainer_base_failure_is_loud(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(render_main.render_mod, "run",
+                        lambda cmd, cwd: subprocess.CompletedProcess(cmd, 1, "", "boom"))
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    brief = {"id": "b", "version": 1, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": []}
+    with pytest.raises(RuntimeError, match="explainer base render failed"):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=None)
