@@ -1,2 +1,5 @@
 httpx==0.28.1
 feedparser==6.0.14
+# Render QC measures caption widths with the real font (fontmetrics.py);
+# also enables the PNG cover path in covers.py.
+pillow==12.3.0
