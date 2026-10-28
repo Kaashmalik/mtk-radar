@@ -38,9 +38,11 @@ from __future__ import annotations
 import re
 from typing import Any, Final
 
-#: Per-platform capability table — the single source of truth for limits and
-#: placement. The release gate reads the same table, so "documented 2026
-#: limits" are enforced, not just suggested.
+#: Per-platform capability table — the single source of truth for counts and
+#: placement. `hashtag_min`/`hashtag_max` are this channel's EDITORIAL
+#: preferences (small, relevant sets), not platform law; the release gate
+#: enforces them and labels them as such. Hard provider rules live in
+#: PLATFORM_RULES below and are cited separately.
 CAPABILITIES: Final[dict[str, dict[str, Any]]] = {
     "youtube": {
         "hashtag_min": 3,
@@ -64,6 +66,11 @@ CAPABILITIES: Final[dict[str, dict[str, Any]]] = {
         "placement": "caption_tail",
     },
 }
+
+#: Documented provider rules (distinct from editorial preferences). YouTube
+#: Help: "If you add more than 60 hashtags, YouTube will ignore all hashtags
+#: on that video" — re-verify at implementation time.
+YOUTUBE_IGNORE_ALL_ABOVE: Final[int] = 60
 
 #: Category → one niche tag. Deterministic mapping, no LLM in the loop.
 _CATEGORY_TAG: Final[dict[str, str]] = {
@@ -276,8 +283,9 @@ def hashtag_gate_problems(platform: str, metadata: dict[str, Any]) -> list[dict[
         if len(in_caption) > above:
             problems.append({
                 "code": "hashtag_count",
-                "detail": (f"YouTube description allows at most {above} hashtags "
-                           f"(found {len(in_caption)}) — the first 3 render "
+                "detail": (f"Channel preference is at most {above} description "
+                           f"hashtags (found {len(in_caption)}) — an editorial "
+                           "limit, not a YouTube rule; the first 3 render "
                            "above the title"),
                 "blocking": True,
             })
@@ -286,16 +294,18 @@ def hashtag_gate_problems(platform: str, metadata: dict[str, Any]) -> list[dict[
             # trace to evidence — it must never invent filler to hit a quota.
             problems.append({
                 "code": "hashtag_count",
-                "detail": (f"YouTube best practice is {below}–{above} description "
+                "detail": (f"Channel preference is {below}–{above} description "
                            f"hashtags (found {len(in_caption)}) — the engine only "
                            "ships evidence-traceable tags"),
                 "blocking": False,
             })
-        if len(proposed) > 15:
+        total = len({*map(str.lower, map(str, proposed)), *map(str.lower, in_caption)})
+        if total > YOUTUBE_IGNORE_ALL_ABOVE:
             problems.append({
                 "code": "hashtag_count",
-                "detail": (f"YouTube renders at most 3 hashtags above the title "
-                           f"and ignores the rest past 15 — found {len(proposed)}"),
+                "detail": (f"YouTube ignores ALL hashtags on a video with more "
+                           f"than {YOUTUBE_IGNORE_ALL_ABOVE} (found {total}) — "
+                           "platform rule"),
                 "blocking": True,
             })
         backend = metadata.get("tags")
