@@ -9,6 +9,7 @@ same fetch_policy contract as the production egress-bound path.
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -117,6 +118,10 @@ class TestHfPapers:
 
 # ------------------------------------------------------------- Hacker News
 
+# Relative to "now": the adapter enforces max_age_hours against the wall
+# clock, so a fixed date made this fixture expire 72 h after it was written.
+_RECENT = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 HN_RESPONSE = {
     "hits": [
         {
@@ -125,7 +130,7 @@ HN_RESPONSE = {
             "url": "https://example.com/ai-credits",
             "points": 320,
             "num_comments": 210,
-            "created_at": "2026-10-23T10:00:00Z",
+            "created_at": _RECENT,
         },
         {
             "objectID": "424243",
@@ -141,7 +146,7 @@ HN_RESPONSE = {
             "url": "https://example.com/thin",
             "points": 3,  # below min_points → dropped
             "num_comments": 1,
-            "created_at": "2026-10-23T10:00:00Z",
+            "created_at": _RECENT,
         },
         {"no_object_id": True},  # junk → skipped
     ]
