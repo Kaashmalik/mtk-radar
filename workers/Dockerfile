@@ -31,7 +31,7 @@ COPY . .
 # Writable locations are explicit. Mount named volumes over these paths so a
 # restart/redeploy cannot lose media or the materialization cache.
 RUN useradd --create-home --uid 10001 mtk \
-    && mkdir -p /repo/projects /data /repo/.storage-cache \
-    && chown -R mtk:mtk /repo /data
+    && mkdir -p /repo/projects /data /repo/.storage-cache /var/lib/mtk-outbox \
+    && chown -R mtk:mtk /repo /data /var/lib/mtk-outbox
 
 USER mtk
