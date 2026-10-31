@@ -33,7 +33,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from api_paging import fetch_all  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 API_URL_DEFAULT = os.environ.get("MTK_API_URL", "http://localhost:8000")
 
@@ -121,7 +121,8 @@ class Batch:
         try:
             resp = self.api.post(
                 "/jobs/claim",
-                json={"worker": "batch", "lease_s": 900, "kinds": ["trend_scan"]},
+                json={"worker": lease_holder("batch"), "lease_s": 900,
+                      "kinds": ["trend_scan"]},
             )
         except httpx.HTTPError:
             return "unavailable"
@@ -147,7 +148,7 @@ class Batch:
             try:
                 resp = self.api.post(
                     "/jobs/claim",
-                    json={"worker": "batch", "lease_s": 900,
+                    json={"worker": lease_holder("batch"), "lease_s": 900,
                           "kinds": ["script"]},
                 )
             except httpx.HTTPError:
@@ -178,7 +179,8 @@ class Batch:
             try:
                 self.api.post(f"/jobs/{job_id}/result",
                               json={"ok": ok, "detail": detail,
-                                    "retry_after_s": None if ok else 300})
+                                    "retry_after_s": None if ok else 300,
+                                    "worker": lease_holder("batch")})
             except httpx.HTTPError:
                 log.warning("could not report script job %s result", job_id)
         return created

@@ -39,6 +39,43 @@ class RefreshedIn(BaseModel):
     expires_at: datetime
 
 
+#: Fields the worker may publish from TikTok creator_info. An allowlist, so a
+#: provider payload can never smuggle tokens or unrelated data into the DB.
+_TIKTOK_CAPABILITY_FIELDS = (
+    "creator_username", "creator_nickname", "creator_avatar_url",
+    "privacy_level_options", "comment_disabled", "duet_disabled",
+    "stitch_disabled", "max_video_post_duration_sec",
+)
+
+
+class CapabilitiesIn(BaseModel):
+    capabilities: dict = Field(default_factory=dict)
+
+
+def sanitize_capabilities(platform: str, raw: dict) -> dict:
+    """Keep only known, size-bounded capability fields."""
+    if platform != "tiktok":
+        return {}
+    out: dict = {}
+    for key in _TIKTOK_CAPABILITY_FIELDS:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if key == "privacy_level_options":
+            if isinstance(value, list):
+                out[key] = [str(v)[:40] for v in value[:10]]
+        elif key.endswith("_disabled"):
+            out[key] = bool(value)
+        elif key == "max_video_post_duration_sec":
+            try:
+                out[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        else:
+            out[key] = str(value)[:300]
+    return out
+
+
 @router.post("/platform-accounts", status_code=201)
 async def register_account(account: PlatformAccountIn) -> dict:
     """Register/refresh credential REFERENCES. Idempotent per platform+handle."""
@@ -91,6 +128,7 @@ async def list_accounts(
     rows = await pool.fetch(
         """
         SELECT id, platform, account_handle, credential_source, scopes, status,
+               capabilities::text AS capabilities, capabilities_checked_at,
                expires_at, last_refreshed_at, last_error, created_at, updated_at
         FROM platform_accounts
         WHERE ($1::text IS NULL OR platform = $1)
@@ -102,6 +140,11 @@ async def list_accounts(
         platform, limit, before_platform, before_handle, before_id,
     )
     out = [dict(r) for r in rows]
+    for row in out:
+        try:
+            row["capabilities"] = json.loads(row.get("capabilities") or "{}")
+        except ValueError:
+            row["capabilities"] = {}
     set_next_cursor(
         response, out, limit,
         lambda row: encode_cursor(row["platform"], row["account_handle"], row["id"]),
@@ -199,6 +242,24 @@ async def mark_refreshed(account_id: uuid.UUID, body: RefreshedIn) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="account not found")
     return {"id": row["id"], "status": row["status"]}
+
+
+@router.put("/platform-accounts/{account_id}/capabilities")
+async def set_capabilities(account_id: uuid.UUID, body: CapabilitiesIn) -> dict:
+    """Publishing worker publishes the account's live capability snapshot
+    (TikTok creator_info). Allowlisted fields only; never credentials."""
+    pool = db.get()
+    platform = await pool.fetchval(
+        "SELECT platform FROM platform_accounts WHERE id = $1", account_id)
+    if platform is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    clean = sanitize_capabilities(platform, body.capabilities)
+    await pool.execute(
+        "UPDATE platform_accounts SET capabilities = $2::jsonb, "
+        "capabilities_checked_at = now(), updated_at = now() WHERE id = $1",
+        account_id, json.dumps(clean),
+    )
+    return {"id": str(account_id), "capabilities": clean}
 
 
 @router.post("/platform-accounts/{account_id}/revoke")

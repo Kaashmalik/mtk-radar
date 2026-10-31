@@ -49,9 +49,11 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "workers", "publishing"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from api_paging import fetch_all  # noqa: E402
+from circuit import AccountBreaker  # noqa: E402
+import quota as quota_mod  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 from platforms import (  # noqa: E402
     FacebookAdapter,
@@ -95,6 +97,9 @@ class Publisher:
     def __init__(self, api_url: str = API_URL_DEFAULT):
         self.api = httpx.Client(timeout=60, base_url=api_url.rstrip("/"), headers=_api_auth_headers())
         self.policy: dict | None = None
+        # EP-07: a failing account is skipped (left scheduled) for a cooldown
+        # instead of being hit by every queued post on every sweep.
+        self.breaker = AccountBreaker.from_env()
 
     # -------------------------------------------------------------- policy
 
@@ -323,6 +328,7 @@ class Publisher:
         try:
             drained = self._drain_publish_jobs(now)
             self.token_maintenance(now)
+            self.refresh_capabilities()
             return drained + self._sweep(now)
         finally:
             self._release_sweep_lock("publishing")
@@ -336,6 +342,50 @@ class Publisher:
     #: At most one maintenance attempt per account per day (a refusal must
     #: not become a per-sweep hammering loop against the OAuth endpoint).
     TOKEN_RETRY_AFTER_FAIL_S = 86400
+
+    #: How long a TikTok creator_info snapshot is shown before a refresh.
+    CAPABILITY_TTL_S = int(os.environ.get("MTK_TIKTOK_CAPABILITY_TTL_S", "1800"))
+
+    def refresh_capabilities(self) -> int:
+        """Publish each active TikTok account's live creator_info so the
+        dashboard can show it before the operator consents (G23 UX).
+
+        Read-only on TikTok's side; failures are logged and retried next
+        sweep. Only allowlisted fields are stored by the API.
+        """
+        try:
+            accounts = self.api.get("/platform-accounts", params={"platform": "tiktok"}).json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("capability refresh skipped: %s", exc)
+            return 0
+        if not isinstance(accounts, list):
+            return 0
+        refreshed = 0
+        now = datetime.now(timezone.utc)
+        for account in accounts:
+            if account.get("platform") != "tiktok" or account.get("status") not in (None, "active"):
+                continue
+            checked = account.get("capabilities_checked_at")
+            try:
+                fresh = checked and (now - datetime.fromisoformat(
+                    str(checked).replace("Z", "+00:00"))).total_seconds() < self.CAPABILITY_TTL_S
+            except ValueError:
+                fresh = False
+            if fresh:
+                continue
+            adapter = self._adapter_for_account(account)
+            if adapter is None or not hasattr(adapter, "creator_info"):
+                continue
+            try:
+                adapter.ensure_ready()
+                info = adapter.creator_info()
+                self.api.put(f"/platform-accounts/{account['id']}/capabilities",
+                             json={"capabilities": info})
+                refreshed += 1
+            except Exception as exc:  # noqa: BLE001 — never blocks publishing
+                log.warning("tiktok creator_info refresh failed for %s: %s",
+                            account.get("account_handle"), type(exc).__name__)
+        return refreshed
 
     def token_maintenance(self, now: datetime) -> int:
         """Renew Facebook/Instagram long-lived tokens on a ~45-day cadence.
@@ -484,7 +534,7 @@ class Publisher:
             try:
                 res = self.api.post(
                     "/jobs/claim",
-                    json={"worker": "publishing-worker", "lease_s": 900,
+                    json={"worker": lease_holder("publishing"), "lease_s": 900,
                           "kinds": ["publish_schedule"]},
                 )
             except httpx.HTTPError as exc:
@@ -521,6 +571,7 @@ class Publisher:
             payload["detail"] = detail[:1900]
         if retry_after_s is not None:
             payload["retry_after_s"] = max(1, min(int(retry_after_s), 86400))
+        payload["worker"] = lease_holder("publishing")  # lease fencing
         try:
             self.api.post(f"/jobs/{job_id}/result", json=payload)
         except httpx.HTTPError as exc:
@@ -799,6 +850,17 @@ class Publisher:
                 "capability list); reschedule with a supported mode, never retry")
             return False
 
+        breaker_key = AccountBreaker.key(
+            platform, getattr(adapter, "account_id", None) or post.get("platform_account_id"))
+        allowed, wait_s = self.breaker.allow(breaker_key)
+        if not allowed:
+            # Not a failure of THIS post: it stays scheduled and is retried
+            # once the account's cooldown ends. Nothing is uploaded.
+            log.warning("schedule %s: %s account %s is cooling down after repeated "
+                        "failures (%.0fs left) — skipped this sweep",
+                        post["id"], platform, breaker_key[1], wait_s)
+            return False
+
         # v0.23: an upload attempt that never reported its outcome is
         # UNKNOWN — the post may already be live on the platform. Publishing
         # again would create a duplicate public post, so the post is held for
@@ -925,6 +987,16 @@ class Publisher:
                 "publish package hash does not match its pinned fields — "
                 "re-schedule to restore a reviewable package")
             return False
+        if platform == "tiktok" and not (meta.get("tiktok") or {}).get("consent"):
+            # TikTok Content Sharing Guidelines: every Direct Post needs the
+            # operator's explicit consent against the creator's live
+            # creator_info. The consent is part of the hashed package.
+            self._block(
+                post["id"],
+                "TikTok Direct Post needs explicit consent — re-schedule from the "
+                "dashboard after reviewing the creator info and post settings "
+                "(or export and post natively in the TikTok app)")
+            return False
         # Never fill in missing copy after the hash check: the upload must be
         # exactly the package a reviewer approved. An empty caption/title is a
         # broken package, not an invitation to invent one.
@@ -1044,12 +1116,37 @@ class Publisher:
             if public_url:
                 meta["public_url"] = public_url
 
+        # Q1: reserve the WHOLE YouTube package's quota before the first
+        # request, so a day never ends with a video uploaded but its
+        # thumbnail/captions refused. Fail-closed when the ledger says no.
+        quota_reservation = None
+        if platform == "youtube":
+            reservation = quota_mod.reserve(
+                self.api, account=breaker_key[1], schedule_id=post["id"],
+                buckets=quota_mod.youtube_package_units(
+                    thumbnail=bool(cover_file), captions=bool(captions_file),
+                    playlist=bool(post.get("youtube_playlist_id")),
+                    comment=bool(post.get("pinned_comment"))))
+            if not reservation.allowed:
+                if reservation.retry_after_s:
+                    # Not this post's fault: fail it with the reset as the
+                    # earliest retry; nothing was sent, so no duplicate risk.
+                    log.warning("schedule %s: %s", post["id"], reservation.reason)
+                    self._report(post["id"], ok=False, detail=reservation.reason,
+                                 retry_after_s=int(reservation.retry_after_s))
+                else:
+                    log.error("schedule %s: %s — not uploading this sweep",
+                              post["id"], reservation.reason)
+                return False
+            quota_reservation = reservation.reservation_id
+
         attempt_token = self._announce_attempt(post["id"])
         if not attempt_token:
             # No claim = no upload. A lost response may have created a marker;
             # the next sweep will see it and hold rather than duplicate.
             log.error("schedule %s: could not claim an upload attempt — not uploading",
                       post["id"])
+            quota_mod.settle(self.api, quota_reservation, sent=False)
             return False
 
         if hasattr(adapter, "set_upload_session_store"):
@@ -1153,6 +1250,7 @@ class Publisher:
                 remote_metadata=remote_metadata,
             )
             log.info("published %s → %s (%s)", post["id"], platform, remote_id)
+            self.breaker.success(breaker_key)
             return True
         except (TokenExpiredError, TransportUnauthorized) as exc:
             # A 401 late in the package finalize (thumbnail/captions/playlist)
@@ -1181,6 +1279,7 @@ class Publisher:
             log.warning("schedule %s: %s rate limited (retry after %ss) — failed, "
                         "auto-retry honors the server delay", post["id"], platform,
                         exc.retry_after_s or "its own backoff")
+            self.breaker.failure(breaker_key, min_open_s=float(exc.retry_after_s or 0))
             self._report(post["id"], ok=False, attempt_token=attempt_token,
                          remote_post_id=remote_id,
                          detail=f"platform rate limit: {exc}",
@@ -1193,7 +1292,15 @@ class Publisher:
                          attempt_token=attempt_token,
                          detail=f"upload/confirmation failed: {exc}")
             log.exception("schedule %s: upload/confirmation failed", post["id"])
+            if self.breaker.failure(breaker_key):
+                log.error("ALERT %s account %s opened its circuit breaker after "
+                          "repeated failures — its posts wait %ss before one probe",
+                          platform, breaker_key[1], int(self.breaker.cooldown_s))
             return False
+        finally:
+            # Requests may have reached YouTube on every path through the
+            # upload block (failed and retried calls still cost quota).
+            quota_mod.settle(self.api, quota_reservation, sent=True)
 
     def _render_for_post(self, post: dict) -> dict | None:
         render_id = post.get("render_id")

@@ -138,7 +138,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
               fontSize: "0.75rem",
               borderRadius: 6,
               border: "1px solid #30363d",
-              background: "#0d1117",
+              background: "var(--bg-inset)",
               color: "#e8eaf0",
               colorScheme: "dark",
             }}
@@ -161,7 +161,7 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
           </button>
         </div>
       )}
-      {error && <p style={{ color: "#f85149", fontSize: "0.72rem", margin: "0.3rem 0 0" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)", fontSize: "0.72rem", margin: "0.3rem 0 0" }}>{error}</p>}
     </div>
   );
 }

@@ -116,12 +116,24 @@ def _local_path(ref: str) -> Optional[Path]:
     return path if path.is_file() else None
 
 
+#: Captures are WebM (Playwright) or Matroska (FFmpeg recorder, M2); renders
+#: are MP4. Declaring every file as MP4 mislabelled the review player's input.
+_MEDIA_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+                ".mkv": "video/x-matroska", ".mov": "video/quicktime",
+                # Public-page screenshots (storyboard page scenes).
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def media_type_for(ref: str) -> str:
+    return _MEDIA_TYPES.get(Path(str(ref).split("?", 1)[0]).suffix.lower(), "video/mp4")
+
+
 def _serve_local(path: Path) -> FileResponse:
     # Starlette's FileResponse implements Range/If-Range and ETag handling, so
     # the browser can seek without this route re-implementing HTTP semantics.
     return FileResponse(
         path,
-        media_type="video/mp4",
+        media_type=media_type_for(path.name),
         headers={"Cache-Control": "private, no-store"},
     )
 
@@ -176,7 +188,7 @@ def _serve_s3(ref: str, range_header: Optional[str]) -> StreamingResponse:
     return StreamingResponse(
         body(),
         status_code=206 if span else 200,
-        media_type="video/mp4",
+        media_type=media_type_for(ref),
         headers=headers,
     )
 
@@ -219,6 +231,22 @@ async def capture_video(capture_id: uuid.UUID, request: Request):
     if not row or not row["video_path"]:
         raise HTTPException(status_code=404, detail="capture has no recorded video")
     return _serve_ref(str(row["video_path"]), request)
+
+
+@router.get("/page-captures/{capture_id}/image")
+async def page_capture_image(capture_id: uuid.UUID, request: Request):
+    pool = db.get()
+    row = await pool.fetchrow(
+        "SELECT image_ref FROM page_captures WHERE id = $1 AND status = 'ok'", capture_id
+    )
+    if not row or not row["image_ref"]:
+        raise HTTPException(status_code=404, detail="page capture has no image")
+    ref = str(row["image_ref"])
+    if not is_managed_ref(ref):
+        # Screenshots are only ever served from managed storage — never a
+        # host path (the legacy path fallback would open any readable file).
+        raise HTTPException(status_code=404, detail="page capture image is not in storage")
+    return _serve_ref(ref, request)
 
 
 # ------------------------------------------------------- media GC (WP-G §5.6.4)

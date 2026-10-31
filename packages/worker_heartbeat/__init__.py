@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import threading
 from typing import Any, Optional
 
@@ -155,3 +156,16 @@ def heartbeat_once(
 
 
 __all__ = ["DEFAULT_INTERVAL_S", "WorkerHeartbeat", "heartbeat_once"]
+
+
+def lease_holder(role: str) -> str:
+    """Unique job-lease holder for THIS process: ``<role>-<host>-<pid>``.
+
+    Lease fencing only works when holders are distinct. A shared name such as
+    "render-worker" let two processes renew and settle each other's jobs, so
+    a worker whose lease expired could still overwrite the new holder's
+    outcome. Bounded to the API's 120-character holder limit.
+    """
+    host = (socket.gethostname() or "host").split(".")[0]
+    return f"{role}-{host}-{os.getpid()}"[:120]
+

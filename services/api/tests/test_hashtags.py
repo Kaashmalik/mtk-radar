@@ -225,3 +225,25 @@ def test_hashtagify_and_parse_round_trip():
     assert hashtagify("") == ""
     parsed = parse_hashtags("hook #One two #three_x #اردو #One")
     assert parsed == ["#One", "#three_x", "#اردو"]
+
+
+def test_youtube_count_rules_separate_editorial_preference_from_platform_law():
+    # Six description tags: over the channel preference (5), labelled editorial.
+    six = " ".join(f"#t{i}" for i in range(6))
+    editorial = [p for p in hashtag_gate_problems("youtube", {"caption": six})
+                 if p["code"] == "hashtag_count"]
+    assert editorial and all("editorial" in p["detail"] or "preference" in p["detail"]
+                             for p in editorial)
+    assert not any("past 15" in p["detail"] for p in editorial), "obsolete rule"
+
+    # The documented platform rule: more than 60 → YouTube ignores them all.
+    many = {"caption": "#a #b #c", "hashtags": [f"#t{i}" for i in range(61)]}
+    platform = [p for p in hashtag_gate_problems("youtube", many)
+                if "platform rule" in p["detail"]]
+    assert platform and platform[0]["blocking"] is True
+
+    # 16 proposed tags is NOT a platform violation any more.
+    sixteen = {"caption": "#a #b #c", "hashtags": [f"#t{i}" for i in range(16)]}
+    assert not any("platform rule" in p["detail"]
+                   for p in hashtag_gate_problems("youtube", sixteen))
+

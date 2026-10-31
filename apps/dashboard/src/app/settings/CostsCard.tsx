@@ -27,6 +27,9 @@ export type CostsSummary = {
   by_kind: ByKind[];
   published_videos_30d: number;
   cost_per_published_video_usd_30d: number | null;
+  /** One video cross-posted to N platforms is N posts. Absent on older APIs. */
+  published_posts_30d?: number;
+  cost_per_published_post_usd_30d?: number | null;
   pricing: {
     llm_input_usd_per_mtok: number;
     llm_output_usd_per_mtok: number;
@@ -121,12 +124,24 @@ export default function CostsCard({
           </strong>
         </div>
         <div>
-          <div className="muted small">cost / published video (30d)</div>
+          <div className="muted small" title="Spend ÷ unique videos (offer × language), however many platforms each went to">
+            cost / unique video (30d)
+          </div>
           <strong style={{ fontSize: "1.2rem" }}>
             {summary?.cost_per_published_video_usd_30d != null
               ? usd(summary.cost_per_published_video_usd_30d)
               : "—"}
           </strong>
+          <div className="muted small">{summary?.published_videos_30d ?? 0} videos</div>
+        </div>
+        <div>
+          <div className="muted small" title="Spend ÷ platform publications">cost / post (30d)</div>
+          <strong style={{ fontSize: "1.2rem" }}>
+            {summary?.cost_per_published_post_usd_30d != null
+              ? usd(summary.cost_per_published_post_usd_30d)
+              : "—"}
+          </strong>
+          <div className="muted small">{summary?.published_posts_30d ?? 0} posts</div>
         </div>
       </div>
 

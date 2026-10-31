@@ -31,6 +31,9 @@ Integration happens through pinned packages, pinned images, or APIs.
 | Next.js / React | `next 16.4.3`, `react 19.3.1` (apps/dashboard/package.json) | MIT | Library | — |
 | TypeScript | `^5.7.2` range (root + dashboard), resolves `5.9.3` in `pnpm-lock.yaml` | Apache-2.0 | Library | Range, not an exact pin |
 | zod | `^3.24.1` range (packages/offer-schema), resolves `3.25.76` | MIT | Library | Offer schema shared with the dashboard; range, not an exact pin |
+| Pillow | `12.3.0` (workers/requirements.txt) | MIT-CMU (HPND) | Library | Render QC measures caption widths with the real font file (libass sizing rule); also produces PNG covers. Without it QC falls back to a labelled estimate. |
+| tzdata | `2026.4` (services/api/requirements.txt) | Apache-2.0 (package), public-domain IANA data | Library | Supplies `zoneinfo` data where the OS has none (Windows); used for the YouTube Pacific quota day and schedule time zones. |
+| moto (test-only) | services/api tests | Apache-2.0 | Library (dev) | S3 mock used by the object-storage tests |
 
 ## Evaluated and NOT adopted (with the reason)
 

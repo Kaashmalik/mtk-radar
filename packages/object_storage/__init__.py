@@ -97,6 +97,21 @@ def capture_key(offer_id: str, session_id: str, filename: str) -> str:
             f"{_safe_part(session_id, 'session id')}/{safe_name}")
 
 
+def page_capture_key(offer_id: str, capture_id: str) -> str:
+    """Public-page screenshot used by a storyboard `page` scene."""
+    return (f"pages/{_safe_part(offer_id, 'offer id')}/"
+            f"{_safe_part(capture_id, 'capture id')}.png")
+
+
+def tts_key(sha256_hex: str, extension: str = "mp3") -> str:
+    """Content-addressed narration audio (G25): identical speech is stored
+    once and shared by every render host; the digest IS the identity."""
+    digest = str(sha256_hex).lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("tts key needs a sha256 hex digest")
+    return f"tts/{digest[:2]}/{digest}.{_safe_part(extension, 'extension')}"
+
+
 def is_managed_ref(ref: str) -> bool:
     return "://" in str(ref) and str(ref).split("://", 1)[0] in SCHEMES
 

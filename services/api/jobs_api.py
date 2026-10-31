@@ -42,7 +42,7 @@ router = APIRouter(tags=["jobs"])
 
 DEFAULT_LEASE_S = 900
 JOB_KINDS = ("publish_schedule", "render_package", "collect", "recheck", "notify",
-             "trend_scan", "script")
+             "trend_scan", "script", "page_capture")
 
 
 class JobIn(BaseModel):
@@ -65,6 +65,9 @@ class JobResultIn(BaseModel):
     ok: bool
     detail: Optional[str] = Field(default=None, max_length=2000)
     retry_after_s: Optional[int] = Field(default=None, ge=1, le=86400)
+    # Lease fencing: when given, only the CURRENT holder may settle the job.
+    # Omitted by older workers (accepted, unfenced, as before).
+    worker: Optional[str] = Field(default=None, min_length=3, max_length=120)
 
 
 @router.post("/jobs", status_code=201)
@@ -184,7 +187,7 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "SELECT status, attempts, max_attempts FROM jobs "
+                "SELECT status, attempts, max_attempts, lease_holder FROM jobs "
                 "WHERE id = $1 FOR UPDATE",
                 job_id,
             )
@@ -193,6 +196,14 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
             if row["status"] in ("done", "cancelled"):
                 raise HTTPException(
                     status_code=409, detail="job already finished")
+            if body.worker is not None and (
+                    row["status"] != "leased" or row["lease_holder"] != body.worker):
+                # A stale holder (lease lost, job re-leased or reset by an
+                # operator) must not overwrite the current owner's outcome.
+                raise HTTPException(
+                    status_code=409,
+                    detail="lease not held by this worker — outcome not recorded",
+                )
             if body.ok:
                 await conn.execute(
                     "UPDATE jobs SET status = 'done', last_error = NULL, "

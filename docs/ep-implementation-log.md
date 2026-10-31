@@ -266,3 +266,92 @@ extension; `ruff`, `pnpm typecheck`, doc-link and filename guards clean; gitleak
 unit tests and not exercised by the E2E; no Firefox claim (Chrome MV3 only);
 remote CI execution still blocked by the owner billing lock (logged, not
 touched).
+## 2026-10-28 audit follow-up — M1 Full HD encoding + M8 shell (slice 1)
+
+Plan: [`enhancement-plan-2026-10-28-gap-audit.md`](enhancement-plan-2026-10-28-gap-audit.md).
+
+| Work | Commit / evidence |
+|---|---|
+| M1 delivery encoding: explicit yuv420p / H.264 High@4.2 / BT.709 / 2 s GOP / 48 kHz stereo; 1080p presets CRF 18, maxrate 12 Mbps; render applies `loudnorm` at the QC target (QC measured −16 LUFS but nothing normalized) | `1d93070` — `workers/render/render.py` `delivery_args()`/`loudnorm_filter()`, `presets.py`, `main.py`; 4 new tests in `test_render.py` |
+| M8 slice 1: grouped sidebar shell (Discover/Produce/Publish/System) with icons and mobile drawer, refreshed light/dark tokens, operator theme switch (system/light/dark, no-flash boot script), skip link, arrival/hover/press motion under `prefers-reduced-motion`, unified form controls, non-color-only status dots; hard-coded dark backgrounds replaced by tokens | this commit — `SiteNav.tsx`, `ThemeToggle.tsx`, `layout.tsx`, `globals.css` |
+
+**Checks executed** (Windows 10, Python 3.13, Node 24): render worker
+`pytest` 97 passed; `ruff check workers/render` clean; `pnpm typecheck`
+clean; `next build` clean; built dashboard served locally with a signed
+preview session and screenshotted in Edge (desktop dark/light, mobile +
+drawer) with zero page errors. E2E selectors `.brand`, `.site-nav a`,
+`.site-header [aria-label='API online']` are preserved.
+
+**Still unproven:** a real ffmpeg encode of both presets through QC (ffmpeg
+not installed on this machine — loudnorm/flags are asserted on argv only);
+full `pnpm verify` incl. API integration and Playwright e2e (no Postgres
+here); remote CI (owner billing lock).
+
+## 2026-10-28 audit follow-up — implementation pass (M2–M8)
+
+Plan: [`enhancement-plan-2026-10-28-gap-audit.md`](enhancement-plan-2026-10-28-gap-audit.md).
+
+| Work | Commit |
+|---|---|
+| Test hygiene: HN fixture wall-clock time bomb; `:` filename e2e skipped on NTFS | `9e432fc` |
+| G23 TikTok creator_info / offered privacy / creator settings / audit gate; G24 honest hashtag rule labels (YouTube >60 rule) | `1c111f0` |
+| G26 account-aware UTC + cross-page conflicts; Settings/Queue honest outage states; legacy palette → tokens | `3e20862` |
+| G19 per-platform account/render/privacy; G20 `POST /schedules/approve-and-queue` + calendar Review & queue; client conflict override fixed | `3711698` |
+| Job lease fencing with per-process holders (render/publishing/collector/batch) | `2174805` |
+| Per-account publishing circuit breaker | `47c4393` |
+| Research claim attention group; offer research ledger UI; queue content track | `2c5fcf2` |
+| Unique-video vs per-post unit economics; verified-local free TTS (`TTS_LOCAL`) | `a8bf53c` |
+| Opt-in near-lossless FFmpeg capture; media type per extension; env MATRIX extended | `625d62b` |
+| Research explainer renders without capture + scene manifest; format-bound capture-less registration | `d3fb9e6` |
+| Native 9:16 explainer cards | `346851a` |
+
+**Checks executed** (Windows 10, Python 3.13, Node 24): full Python unit
+suite **1013 passed, 4 skipped** (skips: 3 integration-gated + 1 NTFS-only);
+`ruff check .` clean; `pnpm typecheck` clean; dashboard `next build` clean.
+
+**Written but NOT executed here (no Postgres on this machine):** integration
+tests for approve-and-queue atomicity/stale preview, job result fencing,
+research attention, explainer candidates/registration, videos-vs-posts
+counting. They run on CI once the owner lifts the Actions billing lock.
+
+**Still unproven:** real FFmpeg encodes (no FFmpeg installed — loudnorm,
+delivery flags, explainer bases and the capture recorder are asserted on
+argv/plan only); live TikTok `creator_info` against an approved app; the
+redesigned calendar/offer pages with live API data in a browser (build and
+shell screenshots only); remote CI.
+
+## 2026-10-28 — second pass: the six remaining items
+
+| Work | Commit |
+|---|---|
+| Durable outbox (packages/outbox) for cost telemetry + monitor notifications; idempotent usage events (migration 041); compose volume | `5331ba2`, `e09d869` |
+| Shared content-addressed narration audio with sha256 verification; versioned context-complete TTS cache key | `fb5761e` |
+| YouTube quota reservation ledger (migration 042, Pacific day, package-level reservation, settle consumed/released, Settings card) | `998bfdf` |
+| TikTok creator_info snapshot (migration 043) + consent/disclosure UI + worker enforcement | `7307887` |
+| Caption QC measured with the real font (libass sizing rule), Pillow pinned | `e71aa76` |
+| Activity-following vertical reframing for captures (opt-in) | `b2be8a8` |
+
+**Checks executed** (office machine): unit suite **1059 passed, 4 skipped**;
+`ruff check .` clean; `pnpm typecheck` clean; `next build` clean.
+
+**Written, not executed here (no Postgres/FFmpeg):** integration tests for
+usage-event dedup, quota ledger lifecycle, TikTok options/consent hashing;
+migrations 041–043 on a real database; real FFmpeg sampling for reframing;
+live TikTok `creator_info`. See the home checklist.
+
+## 2026-10-28 — third pass: storyboard editor + public-page capture
+
+| Work | Commit |
+|---|---|
+| packages/storyboard (shared rules), storyboard + page-capture API (migration 044), sandboxed page_capture worker, renderer draws the saved storyboard with verified screenshots | `b0a8ca1` |
+| Studio storyboard editor (reorder/drag, include, duration, locked claim scenes, add claims/pages, conflict-safe save) + capture panel | this commit |
+
+**Checks executed:** unit suite green (storyboard rules, page-capture policy
+incl. fake-Playwright sandbox tests, overlay graph, saved-storyboard render);
+`ruff`, `pnpm typecheck`, `next build`; the editor was exercised in Edge
+against a mock API (reorder, exclude, unsaved state, capture panel) in both
+themes with no page errors.
+
+**Not executed here:** Postgres integration tests for migration 044, a real
+Chromium page capture, and an FFmpeg render with page overlays.
+

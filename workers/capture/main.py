@@ -13,7 +13,9 @@ Usage:
 What it does:
   1. Loads the offer + latest approved script checklist from the API (gated on
      verified state server-side).
-  2. Opens a headed Chromium context recording native 1920x1080 video.
+  2. Opens a headed Chromium context recording native 1920x1080 video —
+     Playwright's recorder by default, or (MTK_CAPTURE_BACKEND=ffmpeg) a
+     near-lossless FFmpeg screen recording of the kiosk browser (recorder.py).
   3. For each checklist step with a URL: navigates, waits for the operator to
      press ENTER when the step is complete, appends a timestamped step-log row.
   4. Scans the step log for secret patterns (redaction review) and POSTs the
@@ -38,6 +40,7 @@ from object_storage import capture_key, make_from_env  # noqa: E402
 
 from redact_local import scan as scan_secrets  # slim copy of the API's scanner
 from qa import run_checks as run_capture_checks
+import recorder as recorder_mod
 
 API_URL_DEFAULT = "http://localhost:8000"
 MTK_API_TOKEN = (os.environ.get("MTK_WORKER_TOKEN")
@@ -97,30 +100,56 @@ class CaptureSession:
         print("Human-operated session: you perform every account action.")
         print("Automation only navigates, records, and keeps the step log.\n")
 
+        use_ffmpeg = recorder_mod.backend() == "ffmpeg"
+        screen = None
+        if use_ffmpeg:
+            config = recorder_mod.CaptureConfig.from_env()
+            print("High-quality screen recording (FFmpeg): the kiosk browser covers the")
+            print("recorded region — keep other windows and notifications away from it.\n")
+            screen = recorder_mod.ScreenRecorder(self.out_dir / "capture", config)
+
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                record_video_dir=str(self.out_dir),
-                record_video_size={"width": 1920, "height": 1080},
-            )
+            if use_ffmpeg:
+                browser = p.chromium.launch(
+                    headless=False, args=recorder_mod.browser_launch_args(config))
+                context = browser.new_context(no_viewport=True)
+            else:
+                browser = p.chromium.launch(headless=False)
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    record_video_dir=str(self.out_dir),
+                    record_video_size={"width": 1920, "height": 1080},
+                )
             page = context.new_page()
+            if screen is not None:
+                screen.start()
 
-            if redemption:
-                self._step(page, 0, "open_offer_page", redemption)
+            try:
+                if redemption:
+                    self._step(page, 0, "open_offer_page", redemption)
 
-            for n, step in enumerate(nav_steps, start=1):
-                url = step.get("url")
-                if url:
-                    self._step(page, n, step.get("kind", "step"), url)
-                else:
-                    input(f"[step {n}] {step.get('text', '')} — press ENTER when done… ")
-                    self._log(n, step.get("kind", "step"), description=step.get("text", ""))
+                for n, step in enumerate(nav_steps, start=1):
+                    url = step.get("url")
+                    if url:
+                        self._step(page, n, step.get("kind", "step"), url)
+                    else:
+                        input(f"[step {n}] {step.get('text', '')} — press ENTER when done… ")
+                        self._log(n, step.get("kind", "step"), description=step.get("text", ""))
 
-            input("\nRecording done — press ENTER to stop and save… ")
-            video = page.video
-            context.close()  # flushes the video file
-            video_path = str(video.path()) if video else None
+                input("\nRecording done — press ENTER to stop and save… ")
+            except BaseException:
+                # Ctrl+C or a crash must never leave a screen recorder running.
+                if screen is not None:
+                    screen.stop()
+                raise
+            if screen is not None:
+                recorded = screen.stop()
+                video_path = str(recorded) if recorded else None
+                context.close()
+            else:
+                video = page.video
+                context.close()  # flushes the video file
+                video_path = str(video.path()) if video else None
             browser.close()
 
         self._finish(video_path)

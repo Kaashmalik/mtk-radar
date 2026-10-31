@@ -86,6 +86,7 @@ NON_HUMAN_ROUTE_GRANTS: dict[str, tuple[tuple[str, frozenset[str]], ...]] = {
 REVIEWER_ONLY_ROUTES: tuple[tuple[str, frozenset[str]], ...] = (
     ("/media/gc", frozenset({"POST"})),          # destructive reclamation
     ("/jobs/bulk-retry", frozenset({"POST"})),   # operator-only un-wedging
+    ("/schedules/approve-and-queue", frozenset({"POST"})),  # G20 human publish decision
 )
 
 

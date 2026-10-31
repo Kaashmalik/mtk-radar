@@ -9,6 +9,7 @@ import OfferActions from "../../review/OfferActions";
 import { PlaybackReview } from "./PlaybackReview";
 import RedactionReview from "./RedactionReview";
 import { ReleaseReadiness } from "./ReleaseReadiness";
+import ResearchPanel, { type ResearchBrief } from "./ResearchPanel";
 import ScheduleForm from "./ScheduleForm";
 import SnapshotInspector from "./SnapshotInspector";
 import { apiFetch } from "@/lib/api";
@@ -253,6 +254,21 @@ async function getImpact(id: string): Promise<ImpactRow | null> {
   }
 }
 
+type ResearchState =
+  | { status: "ok"; current: ResearchBrief | null; versions: number }
+  | { status: "unavailable" };
+
+async function getResearch(id: string): Promise<ResearchState> {
+  try {
+    const res = await apiFetch(`/offers/${id}/research`, { cache: "no-store" });
+    if (!res.ok) return { status: "unavailable" };
+    const body = (await res.json()) as { current: ResearchBrief | null; briefs?: unknown[] };
+    return { status: "ok", current: body.current ?? null, versions: body.briefs?.length ?? 0 };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 export default async function OfferPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const offer = await getOffer(id);
@@ -262,7 +278,9 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
     getRenders(id),
     getSources(),
   ]);
-  const [corrections, impact] = await Promise.all([getCorrections(id), getImpact(id)]);
+  const [corrections, impact, research] = await Promise.all([
+    getCorrections(id), getImpact(id), getResearch(id),
+  ]);
 
   if (!offer) {
     return (
@@ -347,6 +365,18 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
         )}
       </section>
 
+      <section className="card" id="research">
+        <h2>Research brief &amp; claim ledger</h2>
+        {research.status === "unavailable" ? (
+          <p className="notice small" role="status">
+            Research data unavailable — the API did not answer. This is not
+            &ldquo;no claims&rdquo;; reload once it is reachable.
+          </p>
+        ) : (
+          <ResearchPanel offerId={offer.id} brief={research.current} versions={research.versions} />
+        )}
+      </section>
+
       <section className="card">
         <h2>Capture sessions ({captures.length})</h2>
         {captures.length === 0 ? (
@@ -361,7 +391,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                 <div>
                   {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
                   {c.redaction_reviewed ? (
-                    <span style={{ color: "#3fb950" }}>redaction reviewed ✓</span>
+                    <span style={{ color: "var(--ok)" }}>redaction reviewed ✓</span>
                   ) : (
                     <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
                   )}
@@ -409,14 +439,14 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                   <span style={{ color: "#f0883e" }}> · TTS narration (label required)</span>
                 )}
                 {" · "}
-                <span style={{ color: r.qc_status === "passed" ? "#3fb950" : "#f85149" }}>
+                <span style={{ color: r.qc_status === "passed" ? "var(--ok)" : "var(--danger)" }}>
                   QC {r.qc_status}
                 </span>
                 {r.status !== "rendered" && (
-                  <span style={{ color: "#f85149" }}> · {r.status}</span>
+                  <span style={{ color: "var(--danger)" }}> · {r.status}</span>
                 )}
                 {renderQcErrors(r.qc_report).length > 0 && (
-                  <div className="small" style={{ color: "#f85149" }}>
+                  <div className="small" style={{ color: "var(--danger)" }}>
                     {renderQcErrors(r.qc_report).join(" · ")}
                   </div>
                 )}

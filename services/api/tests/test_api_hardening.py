@@ -368,3 +368,14 @@ def test_route_matrix_decision_function_unit():
     # workers keep broad pipeline access
     assert raf("worker", "POST", "/jobs") is None
     assert raf("worker", "GET", "/offers") is None
+
+
+def test_approve_and_queue_is_reviewer_only_centrally():
+    """G20: the one-click publish decision is refused for every non-human
+    credential at the transport layer, independent of the router check."""
+    path, method = "/schedules/approve-and-queue", "POST"
+    for cls in (api_hardening.CREDENTIAL_SERVICE, api_hardening.CREDENTIAL_WORKER,
+                api_hardening.CREDENTIAL_EXTENSION):
+        assert api_hardening.route_authorization_failure(cls, method, path), cls
+    assert api_hardening.route_authorization_failure(
+        api_hardening.CREDENTIAL_REVIEWER, method, path) is None

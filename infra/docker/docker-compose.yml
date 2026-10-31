@@ -156,6 +156,9 @@ services:
       COST_LLM_INPUT_PER_MTOK: ${COST_LLM_INPUT_PER_MTOK:-0.15}
       COST_LLM_OUTPUT_PER_MTOK: ${COST_LLM_OUTPUT_PER_MTOK:-0.60}
       COST_TTS_PER_MCHAR: ${COST_TTS_PER_MCHAR:-15.0}
+      # Q1: YouTube quota ledger limits (per Pacific day).
+      YOUTUBE_QUOTA_UNITS_PER_DAY: ${YOUTUBE_QUOTA_UNITS_PER_DAY:-10000}
+      YOUTUBE_QUOTA_UPLOADS_PER_DAY: ${YOUTUBE_QUOTA_UPLOADS_PER_DAY:-0}
     volumes:
       - storage-data:/data
     ports:
@@ -240,6 +243,16 @@ services:
       TIKTOK_CLIENT_KEY: ${TIKTOK_CLIENT_KEY:-}
       TIKTOK_CLIENT_SECRET: ${TIKTOK_CLIENT_SECRET:-}
       TIKTOK_REFRESH_TOKEN: ${TIKTOK_REFRESH_TOKEN:-}
+      TIKTOK_APP_AUDITED: ${TIKTOK_APP_AUDITED:-0}
+      MTK_TIKTOK_CAPABILITY_TTL_S: ${MTK_TIKTOK_CAPABILITY_TTL_S:-1800}
+      MTK_PUBLISH_BREAKER_THRESHOLD: ${MTK_PUBLISH_BREAKER_THRESHOLD:-3}
+      MTK_PUBLISH_BREAKER_COOLDOWN_S: ${MTK_PUBLISH_BREAKER_COOLDOWN_S:-900}
+      YOUTUBE_QUOTA_COST_UPLOAD: ${YOUTUBE_QUOTA_COST_UPLOAD:-1600}
+      YOUTUBE_QUOTA_COST_THUMBNAIL: ${YOUTUBE_QUOTA_COST_THUMBNAIL:-50}
+      YOUTUBE_QUOTA_COST_CAPTIONS: ${YOUTUBE_QUOTA_COST_CAPTIONS:-400}
+      YOUTUBE_QUOTA_COST_PLAYLIST: ${YOUTUBE_QUOTA_COST_PLAYLIST:-50}
+      YOUTUBE_QUOTA_COST_COMMENT: ${YOUTUBE_QUOTA_COST_COMMENT:-50}
+      YOUTUBE_QUOTA_COST_STATUS_POLLS: ${YOUTUBE_QUOTA_COST_STATUS_POLLS:-60}
       # G13: Instagram Graph publishing (v0.19) + public media URL + Meta
       # long-lived token refresh (WP-G) — documented in .env.example, consumed
       # here (and INSTAGRAM_* also by the metrics adapters below).
@@ -265,10 +278,14 @@ services:
     restart: unless-stopped
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
+    # EP-07: undeliverable cost telemetry survives restarts in the outbox.
+    volumes:
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       # Shared with the API: unsigned machine evidence is refused.
       MTK_FETCH_SIGNING_KEY: ${MTK_FETCH_SIGNING_KEY:-}
       MTK_FETCH_IDENTITY: ${MTK_FETCH_IDENTITY:-verification-worker}
@@ -348,9 +365,11 @@ services:
       - storage-data:/data
       - storage-cache:/repo/.storage-cache
       - render-projects:/repo/projects
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
       MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
       MTK_STORAGE_CACHE: ${MTK_STORAGE_CACHE:-/repo/.storage-cache}
@@ -370,6 +389,14 @@ services:
       TTS_API_KEY_UR: ${TTS_API_KEY_UR:-}
       TTS_MODEL_UR: ${TTS_MODEL_UR:-}
       TTS_VOICE_UR: ${TTS_VOICE_UR:-}
+      # M7: 1 = the TTS endpoint is a self-hosted, keyless, free server. Only
+      # honoured for loopback/private/compose-service hosts (fail-closed).
+      TTS_LOCAL: ${TTS_LOCAL:-0}
+      # M1: x264 speed/size trade-off for the delivery encode.
+      MTK_RENDER_X264_PRESET: ${MTK_RENDER_X264_PRESET:-medium}
+      # V5: activity-following 9:16 crop for screen captures (opt-in).
+      MTK_VERTICAL_REFRAME: ${MTK_VERTICAL_REFRAME:-full}
+      MTK_VERTICAL_REFRAME_WIDTH: ${MTK_VERTICAL_REFRAME_WIDTH:-0.5}
       # v0.29 measured QC — see docs/render-qc.md. Blank inherits the code default.
       MTK_RENDER_QC_TARGET_LUFS: ${MTK_RENDER_QC_TARGET_LUFS:-}
       MTK_RENDER_QC_LUFS_TOLERANCE: ${MTK_RENDER_QC_LUFS_TOLERANCE:-}
@@ -397,6 +424,39 @@ services:
       api:
         condition: service_healthy
 
+  # Storyboard source pages: screenshots of PUBLIC pages a reviewer asked
+  # for (sandboxed Chromium behind a validating egress proxy). Its own image:
+  # Chromium + system libraries come from the pinned Playwright image.
+  page-capture:
+    profiles: ["workers"]
+    image: mtk-radar-page-capture:local
+    build:
+      context: ../..
+      dockerfile: workers/capture/Dockerfile
+    restart: unless-stopped
+    working_dir: /repo
+    # Chromium needs more shared memory than Docker's 64 MB default.
+    shm_size: "1gb"
+    volumes:
+      - storage-data:/data
+    environment:
+      API_URL: http://api:8000
+      MTK_API_TOKEN: ${MTK_API_TOKEN:-}
+      MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      # Screenshots are served by the API from managed storage only.
+      MTK_STORAGE_BACKEND: ${MTK_STORAGE_BACKEND:-}
+      MTK_STORAGE_LOCAL_ROOT: ${MTK_STORAGE_LOCAL_ROOT:-/data}
+      MTK_S3_ENDPOINT: ${MTK_S3_ENDPOINT:-http://minio:9000}
+      MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
+      MTK_S3_ACCESS_KEY: ${MTK_S3_ACCESS_KEY:-mtk-storage}
+      MTK_S3_SECRET_KEY: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
+    command: >
+      python workers/capture/page_capture.py --watch --api http://api:8000 --out /tmp/page-captures
+    depends_on:
+      api:
+        condition: service_healthy
+
   monitor:
     profiles: ["workers"]
     image: mtk-radar-workers:local
@@ -406,10 +466,14 @@ services:
     restart: unless-stopped
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
+    # EP-07: notifications that failed to send are replayed from the outbox.
+    volumes:
+      - outbox-data:/var/lib/mtk-outbox
     environment:
       API_URL: http://api:8000
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
+      MTK_OUTBOX_DIR: /var/lib/mtk-outbox
       MTK_PUBLIC_BASE_URL: ${MTK_PUBLIC_BASE_URL:-}
       # Optional alert delivery. Blank values disable that channel; the
       # monitor still logs every alert. See docs/notifications.md.
@@ -468,3 +532,4 @@ volumes:
   storage-data:
   storage-cache:
   render-projects:
+  outbox-data:

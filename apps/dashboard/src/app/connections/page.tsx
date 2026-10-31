@@ -77,7 +77,7 @@ export default async function ConnectionsPage() {
                       <td><code className="small">{a.credential_source}</code></td>
                       <td className="small">{(a.scopes ?? []).join(", ") || "–"}</td>
                       <td>
-                        <span style={{ color: a.status === "active" ? "#3fb950" : "#f85149" }}>
+                        <span style={{ color: a.status === "active" ? "var(--ok)" : "var(--danger)" }}>
                           {a.status}
                         </span>
                       </td>

@@ -96,3 +96,70 @@
           font-size: 0.85rem;
           margin: 0.6rem 0;
         }
+
+/* Schedule form (G19): one row per target platform with its own pins. */
+.schedule-form { display: grid; gap: 0.75rem; margin-top: 0.6rem; }
+.schedule-shared { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.schedule-windows { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.chip-btn {
+  padding: 0.15rem 0.6rem; font: inherit; font-size: 0.74rem; border-radius: 999px;
+  border: 1px solid var(--border-subtle); background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: color var(--speed) ease, border-color var(--speed) ease;
+}
+.chip-btn:hover { color: var(--text); border-color: var(--accent); }
+.schedule-targets { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.schedule-target {
+  border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 0.65rem 0.8rem;
+  background: color-mix(in srgb, var(--bg-inset) 55%, transparent);
+  transition: border-color var(--speed) ease, background-color var(--speed) ease;
+}
+.schedule-target[data-selected] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.schedule-target[data-blocked]:not([data-selected]) { opacity: 0.65; }
+.schedule-target-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; cursor: pointer; }
+.schedule-target[data-blocked]:not([data-selected]) .schedule-target-head { cursor: not-allowed; }
+.schedule-target-body {
+  display: grid; gap: 0.4rem; margin-top: 0.55rem;
+  animation: rise-in var(--speed-slow) var(--ease-out) both;
+}
+.schedule-note { margin: 0; }
+.schedule-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+
+/* Research brief + claim ledger (EP-03 UI). */
+.research { display: grid; gap: 0.8rem; }
+.research-brief { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; font-size: 0.86rem; }
+.research-brief dt { color: var(--text-muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; padding-top: 0.15rem; }
+.research-brief dd { margin: 0; }
+.claim-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; }
+.claim {
+  --claim: var(--text-muted);
+  border: 1px solid var(--border-subtle); border-left: 3px solid var(--claim);
+  border-radius: var(--radius-sm); padding: 0.65rem 0.8rem; display: grid; gap: 0.4rem;
+  background: color-mix(in srgb, var(--claim) 5%, transparent);
+}
+.claim[data-status="supported"] { --claim: var(--ok); }
+.claim[data-status="contradicted"] { --claim: var(--danger); }
+.claim[data-status="unknown"] { --claim: var(--warn); }
+.claim-head { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.claim-status { color: var(--claim); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.claim-text { margin: 0; font-size: 0.9rem; }
+.claim-excerpt { margin: 0; padding-left: 0.7rem; border-left: 2px solid var(--border); color: var(--text-muted); font-size: 0.8rem; }
+.claim-foot { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; flex-wrap: wrap; font-size: 0.8rem; }
+.claim-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.claim-actions [aria-pressed="true"] { color: var(--claim); border-color: var(--claim); }
+@media (max-width: 640px) { .research-brief { grid-template-columns: 1fr; } }
+
+/* TikTok Direct Post panel (creator info + disclosure + consent). */
+.tiktok-panel {
+  display: grid; gap: 0.5rem; padding: 0.6rem 0.7rem; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-inset) 70%, transparent);
+  border: 1px solid var(--border-subtle);
+}
+.tiktok-group { border: 0; margin: 0; padding: 0; display: flex; gap: 0.35rem 0.9rem; flex-wrap: wrap; }
+.tiktok-group legend { width: 100%; margin-bottom: 0.15rem; }
+.tiktok-group label, .tiktok-consent { display: inline-flex; gap: 0.35rem; align-items: center; }
+.tiktok-consent { align-items: flex-start; }
+.tiktok-consent input { margin-top: 0.2rem; }
+

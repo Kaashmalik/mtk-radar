@@ -119,6 +119,29 @@ def test_job_touch_extends_lease_for_the_current_holder_only(client):
     assert hijack.status_code == 409, "only the current holder may extend"
 
 
+def test_job_result_is_fenced_to_the_current_holder(client):
+    """A worker that lost its lease cannot overwrite the new holder's outcome;
+    an unfenced (older) worker report is still accepted."""
+    claim = client.post("/jobs/claim", json={
+        "worker": "render-host-1", "lease_s": 60, "kinds": ["collect"]})
+    assert claim.status_code == 200, claim.text
+    body = claim.json()
+    if not body.get("claimed"):
+        pytest.skip("no due collect job available to claim")
+    job_id = body["id"]
+
+    stale = client.post(f"/jobs/{job_id}/result",
+                        json={"ok": True, "worker": "render-host-2"})
+    assert stale.status_code == 409, stale.text
+    assert _run("SELECT status::text AS s FROM jobs WHERE id = $1",
+                uuidlib.UUID(job_id))[0]["s"] == "leased", "nothing recorded"
+
+    owner = client.post(f"/jobs/{job_id}/result",
+                        json={"ok": True, "worker": "render-host-1"})
+    assert owner.status_code == 200, owner.text
+    assert owner.json()["status"] == "done"
+
+
 # ---------------------------------------------------------------- media GC
 
 def _rendered_offer(client, marker: str) -> str:
@@ -576,3 +599,57 @@ def test_best_times_derived_blend_is_permission_gated(client, monkeypatch):
         "with permission granted, the derived blend ranks H1 above H2"
     assert mine[0]["avg_views"] == 100.0 and mine[1]["avg_views"] == 200.0
 
+
+
+def test_cost_per_video_counts_unique_packages_not_cross_posts(client):
+    """M7: one video posted to two platforms is ONE video and TWO posts."""
+    before = client.get("/costs/summary").json()
+    marker = uuidlib.uuid4().hex[:8]
+    offer_id, project_id = _sched_setup(client, marker)
+    _add_schedule(marker, offer_id, project_id, platform="youtube",
+                  offset_min=-30, state="published")
+    _add_schedule(marker, offer_id, project_id, platform="facebook",
+                  offset_min=-20, state="published")
+    after = client.get("/costs/summary").json()
+    assert after["published_posts_30d"] - before["published_posts_30d"] == 2
+    assert after["published_videos_30d"] - before["published_videos_30d"] == 1
+    if after["usd_30d"] > 0:
+        assert after["cost_per_published_video_usd_30d"] >= \
+            after["cost_per_published_post_usd_30d"]
+
+
+def test_youtube_quota_ledger_reserves_atomically_and_refuses_past_the_limit(client, monkeypatch):
+    """Q1: reservations count against the Pacific quota day; a request that
+    would exceed the limit is refused with the reset time; released units
+    return, consumed units stay spent."""
+    monkeypatch.setenv("YOUTUBE_QUOTA_UNITS_PER_DAY", "5000")
+    account = f"acct-{uuidlib.uuid4().hex[:8]}"
+
+    def reserve(units):
+        return client.post("/quota/reserve", json={
+            "provider": "youtube", "account": account,
+            "buckets": {"units": units}, "operation": "upload_package"})
+
+    first = reserve(3000)
+    assert first.status_code == 200 and first.json()["allowed"] is True, first.text
+    refused = reserve(2500).json()
+    assert refused["allowed"] is False and refused["reservation_id"] is None
+    assert refused["buckets"]["units"]["remaining"] == 2000
+    assert refused["retry_after_s"] > 0 and refused["resets_at"]
+
+    rid = first.json()["reservation_id"]
+    released = client.post(f"/quota/{rid}/settle", json={"status": "released"})
+    assert released.status_code == 200 and released.json()["settled"] == 1
+    assert reserve(4500).json()["allowed"] is True, "released units return to the pool"
+
+    again = client.post(f"/quota/{rid}/settle", json={"status": "consumed"})
+    assert again.json()["settled"] == 0, "a settled reservation never flips"
+    assert client.post(f"/quota/{uuidlib.uuid4()}/settle",
+                       json={"status": "consumed"}).status_code == 404
+    unknown = client.post("/quota/reserve", json={
+        "provider": "youtube", "account": account, "buckets": {"bogus": 1}})
+    assert unknown.status_code == 422
+
+    usage = client.get("/quota", params={"provider": "youtube"}).json()
+    mine = [a for a in usage["accounts"] if a["account"] == account]
+    assert mine and mine[0]["reserved"] == 4500

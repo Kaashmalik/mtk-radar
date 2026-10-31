@@ -28,6 +28,10 @@ type ScheduleRow = {
   local_time: string;
   timezone: string;
   privacy: string;
+  platform_account_id?: string | null;
+  render_id?: string | null;
+  package_hash?: string | null;
+  language?: string | null;
   approved_by: string | null;
   version_hash: string | null;
   remote_post_id: string | null;
@@ -80,6 +84,9 @@ async function getBestTimes(): Promise<BestTimes | null> {
 /** Client-side mirror of the API rule (schedules_api._annotate_conflicts):
  *  same platform, same local day, within 60 minutes → conflict. */
 function annotateConflicts(rows: ScheduleRow[]): ScheduleRow[] {
+  // The API annotates account-aware, cross-page, UTC conflicts (G26). Only
+  // an older API without the field falls back to this page-local estimate.
+  if (rows.some((r) => typeof r.conflict === "boolean")) return rows;
   const WINDOW_MIN = 60;
   const active = rows.filter((r) =>
     ["needs_approval", "approved", "scheduled"].includes(r.state),
@@ -94,7 +101,10 @@ function annotateConflicts(rows: ScheduleRow[]): ScheduleRow[] {
     return { day, minute: h * 60 + m };
   };
   const buckets = new Map<string, { row: ScheduleRow; minute: number }[]>();
-  for (const row of rows) row.conflict = false;
+  for (const row of rows) {
+    row.conflict = false;
+    row.conflict_with = [];
+  }
   for (const row of active) {
     const { day, minute } = slot(row);
     const key = `${row.platform}|${day}`;
@@ -135,12 +145,12 @@ async function getAccounts(): Promise<AccountRow[]> {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  draft: "#8b949e",
-  needs_approval: "#d29922",
-  approved: "#3fb950",
-  scheduled: "#58a6ff",
+  draft: "var(--text-muted)",
+  needs_approval: "var(--warn)",
+  approved: "var(--ok)",
+  scheduled: "var(--accent)",
   published: "#bc8cff",
-  failed: "#f85149",
+  failed: "var(--danger)",
   paused: "#f0883e",
 };
 
@@ -252,9 +262,9 @@ export default async function CalendarPage() {
           <div style={{ display: "grid", gap: "0.5rem" }}>
             {accounts.map((a) => {
               const color =
-                a.status === "active" ? "#3fb950"
-                : a.status === "token_expired" ? "#f85149"
-                : "#8b949e";
+                a.status === "active" ? "var(--ok)"
+                : a.status === "token_expired" ? "var(--danger)"
+                : "var(--text-muted)";
               return (
                 <article key={a.id} className="entry">
                   <div className="entry-head">
@@ -293,6 +303,12 @@ export default async function CalendarPage() {
             offer_title: s.offer_title,
             local_time: s.local_time,
             state: s.state,
+            privacy: s.privacy,
+            language: s.language ?? null,
+            render_id: s.render_id ?? null,
+            platform_account_id: s.platform_account_id ?? null,
+            package_hash: s.package_hash ?? null,
+            conflict: Boolean(s.conflict),
           }))}
         />
       )}
@@ -345,7 +361,7 @@ export default async function CalendarPage() {
                           <div
                             key={s.id}
                             style={{
-                              border: s.conflict ? "2px solid #f85149" : "1px solid transparent",
+                              border: s.conflict ? "2px solid var(--danger)" : "1px solid transparent",
                               borderRadius: 6,
                               padding: "0.35rem 0.4rem",
                             }}
@@ -358,7 +374,7 @@ export default async function CalendarPage() {
                               {s.offer_title}
                             </a>
                             {s.conflict && (
-                              <div className="small" style={{ color: "#f85149" }}>
+                              <div className="small" style={{ color: "var(--danger)" }}>
                                 ⚠ {s.platform} posts again within an hour — move one BEFORE
                                 approving (double-posting reads as spam to the audience and
                                 the platform).
@@ -371,8 +387,8 @@ export default async function CalendarPage() {
                               <span
                                 className="badge"
                                 style={{
-                                  color: STATE_COLORS[s.state] ?? "#8b949e",
-                                  borderColor: STATE_COLORS[s.state] ?? "#8b949e",
+                                  color: STATE_COLORS[s.state] ?? "var(--text-muted)",
+                                  borderColor: STATE_COLORS[s.state] ?? "var(--text-muted)",
                                 }}
                               >
                                 {s.state}
@@ -413,7 +429,7 @@ export default async function CalendarPage() {
                           {outcome && <> · {outcome}</>}
                         </div>
                         {s.conflict && (
-                          <div className="small" style={{ color: "#f85149" }}>
+                          <div className="small" style={{ color: "var(--danger)" }}>
                             ⚠ {s.platform} posts again within an hour — move one BEFORE
                             approving (double-posting reads as spam to the audience and
                             the platform).
@@ -429,7 +445,7 @@ export default async function CalendarPage() {
                       </div>
                       <span
                         className="badge"
-                        style={{ color: STATE_COLORS[s.state] ?? "#8b949e", borderColor: STATE_COLORS[s.state] ?? "#8b949e" }}
+                        style={{ color: STATE_COLORS[s.state] ?? "var(--text-muted)", borderColor: STATE_COLORS[s.state] ?? "var(--text-muted)" }}
                       >
                         {s.state}
                       </span>

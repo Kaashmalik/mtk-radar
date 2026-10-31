@@ -233,3 +233,17 @@ def test_attention_exposes_costs_section(client):
     counts = body.get("counts") or {}
     by_kind = body.get("by_kind") or {}
     assert "costs" in by_kind and "costs" in counts
+
+
+def test_replayed_usage_event_is_counted_once(client):
+    """EP-07: an outbox replay after a lost response must not double-meter."""
+    event_id = f"evt-{uuid.uuid4().hex}"
+    event = {"kind": "tts", "units": 1000, "provider": "test",
+             "event_id": event_id, "meta": {"replay_test": event_id}}
+    for _ in range(3):
+        r = client.post("/costs/usage", json={"events": [event]})
+        assert r.status_code == 200, r.text
+    from test_integration import _run
+
+    rows = _run("SELECT count(*) AS n FROM usage_events WHERE event_id = $1", event_id)
+    assert rows[0]["n"] == 1, "three deliveries of one event_id → one ledger row"

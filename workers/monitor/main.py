@@ -274,6 +274,11 @@ def run_once(client: httpx.Client) -> list[dict]:
     alerts.extend(check_platform_accounts(client))
     alerts.extend(check_metrics_freshness(client))
     alerts.extend(check_attention(client))
+    # Deliver what an earlier outage left behind before today's digests.
+    try:
+        notifications.flush_outbox()
+    except Exception as exc:  # noqa: BLE001 — alerting must not stop the sweep
+        log.exception("notification outbox replay crashed: %s", exc)
     # Immediate failures page now; pending human work travels in a digest.
     for delivery in ("immediate", "digest"):
         group = [a for a in alerts if a.get("delivery", "immediate") == delivery]

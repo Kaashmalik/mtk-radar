@@ -26,7 +26,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Final, Iterable, Optional
+from typing import Any, Callable, Final, Iterable, Optional
+
+import fontmetrics
 
 FFMPEG: Final[str] = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE: Final[str] = os.environ.get("FFPROBE_PATH", "ffprobe")
@@ -688,6 +690,10 @@ def check_captions(
         _fail(check, "captions: no Default ASS style found")
         return check
     font_size = style["font_size"]
+    # V9: measure with the real font file libass will use (estimate only as
+    # a labelled fallback when the font or Pillow is unavailable).
+    measure = fontmetrics.measurer(style.get("font_name") or "", font_size)
+    width_of = measure.width
     margin_l = style["margin_l"]
     margin_r = style["margin_r"]
     margin_v = style["margin_v"]
@@ -704,6 +710,7 @@ def check_captions(
         "cue_count": len(cues),
         "max_lines": 0,
         "max_line_width_px": 0.0,
+        "width_method": measure.method,
     }
     if play_width != width or play_height != height:
         _warn(
@@ -720,13 +727,13 @@ def check_captions(
     if not cues:
         _warn(check, "captions: no Dialogue events found")
     for index, cue in enumerate(cues, start=1):
-        lines = _wrap_ass_text(cue, available_width, font_size)
+        lines = _wrap_ass_text(cue, available_width, font_size, width_of)
         if isinstance(lines, str):
             _fail(check, f"captions: cue {index} has an unbreakable word wider "
                          f"than {available_width:.0f}px ({lines})")
             continue
         line_count = len(lines)
-        max_width = max((_text_width(line, font_size) for line in lines), default=0.0)
+        max_width = max((width_of(line) for line in lines), default=0.0)
         bottom = height - margin_v
         top = bottom - (line_count * font_size * 1.2)
         check["details"]["max_lines"] = max(check["details"]["max_lines"], line_count)
@@ -768,6 +775,7 @@ def _parse_default_style(text: str) -> dict[str, Any] | None:
             continue
         try:
             return {
+                "font_name": parts[1],
                 "font_size": float(parts[2]),
                 "margin_l": float(parts[19]),
                 "margin_r": float(parts[20]),
@@ -794,7 +802,7 @@ def _ass_events(text: str) -> list[str]:
 
 
 def _text_width(value: str, font_size: float) -> float:
-    """Conservative width estimate without introducing Pillow/font probing.
+    """Fallback width estimate (fontmetrics.ESTIMATE_FACTOR × size per char).
 
     ASS/libass wraps with the real font. This estimate is deliberately a little
     wide for the bundled DejaVu Sans/Nastaliq faces, so it catches overflow
@@ -803,16 +811,18 @@ def _text_width(value: str, font_size: float) -> float:
     return len(value) * font_size * 0.60
 
 
-def _wrap_ass_text(value: str, available_width: float, font_size: float) -> list[str] | str:
+def _wrap_ass_text(value: str, available_width: float, font_size: float,
+                   width_of: Optional[Callable[[str], float]] = None) -> list[str] | str:
     """Return wrapped lines, or the offending word when it cannot fit."""
+    measure = width_of or (lambda text: _text_width(text, font_size))
     lines: list[str] = []
     for explicit in value.split("\n"):
         current = ""
         for word in explicit.split():
-            if _text_width(word, font_size) > available_width + 1:
+            if measure(word) > available_width + 1:
                 return word
             candidate = f"{current} {word}".strip()
-            if current and _text_width(candidate, font_size) > available_width + 1:
+            if current and measure(candidate) > available_width + 1:
                 lines.append(current)
                 current = word
             else:

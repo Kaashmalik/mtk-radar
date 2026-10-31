@@ -361,3 +361,188 @@ def test_kill_knob_disables_the_render_queue(monkeypatch, tmp_path):
     assert render_main._drain_render_jobs(
         client, "http://fake", tmp_path, ["landscape"], True, "studio",
         [_candidate()]) == set()
+
+
+def test_lease_keeper_flags_a_lost_lease_and_stops(monkeypatch):
+    """A 409 on renewal means another holder owns the job now: the keeper
+    sets `lost` (so no outcome is reported) and stops touching."""
+    import threading
+
+    monkeypatch.setattr(render_main, "RENDER_LEASE_TOUCH_S", 0)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(409, json={"detail": "held by another worker"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    stop, lost = threading.Event(), threading.Event()
+    render_main._lease_keeper(client, "job-1", stop, "render-a-1", lost)
+    assert lost.is_set()
+    assert len(calls) == 1
+    assert b'"worker":"render-a-1"' in calls[0].content.replace(b" ", b"")
+
+
+
+def test_explainer_base_writes_cards_manifest_and_covers_the_speech(tmp_path, monkeypatch):
+    """M3: without a capture, an explainer job builds its base video from the
+    brief; the base runs past the narration so the timeline preflight holds."""
+    import json as _json
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, cwd):
+        calls.append((cmd, cwd))
+        (Path(cwd) / cmd[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(render_main.render_mod, "run", fake_run)
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = __import__("httpx").Client(  # an API without the storyboard route
+        transport=__import__("httpx").MockTransport(
+            lambda request: __import__("httpx").Response(404)),
+        base_url="http://api")
+    brief = {"id": "b1", "version": 1, "content_type": "explainer",
+             "viewer_question": "Does it work?",
+             "claims": [{"id": "c1", "claim_text": "It improved recall by 12%.",
+                         "claim_class": "author_reported", "status": "supported"}]}
+
+    base, scenes = job._build_explainer_base({"title": "T"}, brief, narration_s=20.0)
+    assert base.endswith("base.mp4") and Path(base).exists()
+    assert scenes[-1]["end"] == pytest.approx(20.6, abs=0.01)
+    manifest = _json.loads((tmp_path / "assets/explainer/scene_manifest.json").read_text())
+    assert manifest["scenes"][1]["claim_ids"] == ["c1"] and len(manifest["sha256"]) == 64
+    assert (tmp_path / "assets/explainer/cards.ass").read_text().startswith("[Script Info]")
+    assert "PlayResX: 1080" in (tmp_path / "assets/explainer/cards-vertical.ass").read_text()
+    assert [c[0][-1] for c in calls] == ["assets/explainer/base.mp4",
+                                        "assets/explainer/base-vertical.mp4"]
+    rel = "assets/explainer/base.mp4"
+    assert job._video_for_preset(rel, "vertical").replace("\\", "/") ==         "assets/explainer/base-vertical.mp4", "9:16 export uses native vertical cards"
+    assert job._video_for_preset(rel, "landscape") == rel
+    assert job._video_for_preset("assets/captures/cap.mkv", "vertical") ==         "assets/captures/cap.mkv", "real captures keep the full-frame composition"
+
+
+def test_explainer_base_failure_is_loud(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(render_main.render_mod, "run",
+                        lambda cmd, cwd: subprocess.CompletedProcess(cmd, 1, "", "boom"))
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = __import__("httpx").Client(  # an API without the storyboard route
+        transport=__import__("httpx").MockTransport(
+            lambda request: __import__("httpx").Response(404)),
+        base_url="http://api")
+    brief = {"id": "b", "version": 1, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": []}
+    with pytest.raises(RuntimeError, match="explainer base render failed"):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=None)
+
+
+def test_vertical_reframe_replaces_only_the_foreground_and_records_the_path(tmp_path, monkeypatch):
+    from presets import get_preset
+
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    keys = [render_main.reframe_mod.Keyframe(0, 0.3), render_main.reframe_mod.Keyframe(4, 0.6)]
+    monkeypatch.setattr(render_main.reframe_mod, "analyse", lambda video, crop: keys)
+    vertical = get_preset("vertical")
+    reframed = job._reframed_vertical(vertical, "cap.mkv")
+    assert reframed.complex_filter and (reframed.width, reframed.height) == (1080, 1920)
+    assert "crop=w=960:h=1080:x='if(lt(t,4)" in reframed.filter_chain
+    assert (tmp_path / "assets/reframe-vertical.json").exists()
+
+    monkeypatch.setattr(render_main.reframe_mod, "analyse", lambda video, crop: None)
+    assert job._reframed_vertical(vertical, "cap.mkv") is vertical, "weak signal → full frame"
+
+
+def test_saved_storyboard_drives_the_explainer_and_verifies_page_images(tmp_path, monkeypatch):
+    """V7: the reviewer's saved order/selection is drawn; a claim contradicted
+    since saving and a tampered screenshot are dropped and recorded."""
+    import hashlib
+    import json as _json
+    import subprocess
+
+    import httpx
+
+    png = b"PNG-real-bytes"
+    brief = {"id": "b1", "version": 2, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": [{"id": "c1", "claim_text": "Supported claim.",
+                         "claim_class": "author_reported", "status": "supported"},
+                        {"id": "c2", "claim_text": "Now contradicted.",
+                         "claim_class": "author_reported", "status": "contradicted"}]}
+    pages = [{"id": "p1", "status": "ok", "url": "https://a.org", "title": "Paper",
+              "image_sha256": hashlib.sha256(png).hexdigest()},
+             {"id": "p2", "status": "ok", "url": "https://b.org", "title": "Other",
+              "image_sha256": "0" * 64}]
+    saved = [{"kind": "page", "page_capture_id": "p1"},
+             {"kind": "claim", "claim_ids": ["c1"]},
+             {"kind": "claim", "claim_ids": ["c2"]},
+             {"kind": "page", "page_capture_id": "p2"},
+             {"kind": "title", "heading": "Q?", "include": False}]
+
+    def handler(request):
+        if request.url.path.endswith("/storyboard"):
+            return httpx.Response(200, json={"current": {"version": 4, "brief_id": "b1",
+                                                         "scenes": saved},
+                                             "page_captures": pages})
+        return httpx.Response(200, content=png)
+
+    commands = []
+
+    def fake_run(cmd, cwd):
+        commands.append(cmd)
+        (Path(cwd) / cmd[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(render_main.render_mod, "run", fake_run)
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    _, scenes = job._build_explainer_base({"title": "T"}, brief, narration_s=20.0)
+
+    assert [s["id"] for s in scenes] == ["page-p1", "claim-c1"], "saved order + drops applied"
+    manifest = _json.loads((tmp_path / "assets/explainer/scene_manifest.json").read_text())
+    assert manifest["storyboard_version"] == 4
+    assert any("contradicted" in d for d in manifest["dropped"])
+    assert any("p2" in d for d in manifest["dropped"]), "tampered screenshot never drawn"
+    assert (tmp_path / "assets/explainer/pages/p1.png").read_bytes() == png
+    assert "assets/explainer/pages/p1.png" in commands[0]
+
+
+def _storyboard_job(tmp_path, handler):
+    import httpx
+
+    job = render_main.RenderJob.__new__(render_main.RenderJob)
+    job.project, job.offer_id = tmp_path, "offer-1"
+    job.api = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    return job
+
+
+def test_transient_storyboard_api_error_stops_the_render_instead_of_guessing(tmp_path):
+    """Review fix: a 5xx must not silently swap the reviewer's storyboard
+    for the auto-suggestion."""
+    import httpx
+
+    job = _storyboard_job(tmp_path, lambda request: httpx.Response(503))
+    brief = {"id": "b1", "version": 1, "content_type": "explainer", "viewer_question": "Q?",
+             "claims": []}
+    with pytest.raises(httpx.HTTPStatusError):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=10.0)
+
+
+def test_storyboard_saved_for_an_older_brief_is_refused(tmp_path, monkeypatch):
+    import httpx
+
+    saved = {"version": 3, "brief_id": "old-brief", "scenes": [{"kind": "title", "heading": "Q"}]}
+    job = _storyboard_job(tmp_path, lambda request: httpx.Response(
+        200, json={"current": saved, "page_captures": []}))
+    monkeypatch.setattr(render_main.render_mod, "run",
+                        lambda cmd, cwd: pytest.fail("must not render"))
+    brief = {"id": "new-brief", "version": 2, "content_type": "explainer",
+             "viewer_question": "Q?", "claims": []}
+    with pytest.raises(RuntimeError, match="older research brief"):
+        job._build_explainer_base({"title": "T"}, brief, narration_s=10.0)
+

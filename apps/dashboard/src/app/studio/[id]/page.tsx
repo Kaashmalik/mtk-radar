@@ -10,6 +10,7 @@ import Link from "next/link";
 import StudioGenerateButton from "./StudioGenerateButton";
 import PackageEditor from "./PackageEditor";
 import ScriptRevise from "./ScriptRevise";
+import StoryboardEditor from "./StoryboardEditor";
 import VariantExplorer from "./VariantExplorer";
 import { apiFetch } from "@/lib/api";
 
@@ -199,6 +200,19 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
           </p>
         </section>
       )}
+
+      <section className="card" id="storyboard">
+        <div className="panel-head">
+          <div>
+            <h2>Storyboard</h2>
+            <p>
+              Choose, order and time the scenes of the explainer. Claim scenes stay
+              locked to the claim ledger; the next render draws the saved version.
+            </p>
+          </div>
+        </div>
+        <StoryboardEditor offerId={offer.id} />
+      </section>
 
       <section className={scriptLanguages.length > 1 ? "grid-2" : ""}>
         {scriptLanguages.map((language) => {

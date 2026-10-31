@@ -56,6 +56,8 @@ class FakeAPI:
 
     def post(self, path, json=None):
         self.posts.append((path, json))
+        if path == "/quota/reserve":  # Q1 ledger: reservation granted
+            return FakeResponse({"allowed": True, "reservation_id": "q-1"})
         if path == "/schedules/sch-1/attempt":
             return FakeResponse({"acquired": True, "attempt_token": "token-1"})
         if path.endswith("/result"):

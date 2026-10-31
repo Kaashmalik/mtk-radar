@@ -43,27 +43,42 @@ type QueueRow = {
   preset_fit: number | null;
   rank_pinned: number | null;
   rank: number;
+  /** EP-03 track: decides capture/render requirements and copy rules. */
+  content_type?: string | null;
 };
 
-async function getQueueAll(): Promise<QueueRow[]> {
+const TRACK_LABEL: Record<string, string> = {
+  explainer: "Explainer",
+  tested_tutorial: "Tested tutorial",
+  claim_walkthrough: "Claim walkthrough",
+  offer: "Offer",
+};
+
+/** `status` distinguishes a genuinely empty queue from an outage (nothing
+ * loaded) and a partial read (a later page failed or the page cap hit). */
+type QueueLoad = { rows: QueueRow[]; status: "complete" | "partial" | "unavailable" };
+
+async function getQueueAll(): Promise<QueueLoad> {
   const rows: QueueRow[] = [];
   let cursor: string | null = null;
+  let pagesRead = 0;
   try {
-    for (let page = 0; page < QUEUE_MAX_PAGES && cursor !== ""; page += 1) {
+    for (let page = 0; page < QUEUE_MAX_PAGES; page += 1) {
       const res = await apiFetch(
         `/production-queue?limit=${QUEUE_PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
         { cache: "no-store" },
       );
-      if (!res.ok) break;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as { queue: QueueRow[] };
       rows.push(...(body.queue ?? []));
+      pagesRead += 1;
       cursor = res.headers.get("X-Next-Cursor");
-      if (!cursor) break;
+      if (!cursor) return { rows, status: "complete" };
     }
+    return { rows, status: "partial" }; // page cap reached with more to read
   } catch {
-    // fall through with what we have
+    return { rows, status: pagesRead === 0 ? "unavailable" : "partial" };
   }
-  return rows;
 }
 
 function daysUntil(iso: string | null): number | null {
@@ -190,7 +205,7 @@ function qcErrors(report: RenderDeadLetterItem["qc_report"]): string[] {
 }
 
 export default async function QueuePage() {
-  const [queue, candidates, captures, offers, schedules, policy, deadLetter] =
+  const [queueLoad, candidates, captures, offers, schedules, policy, deadLetter] =
     await Promise.all([
       getQueueAll(),
       getJsonAll<Candidate>("/render-candidates", []),
@@ -203,6 +218,7 @@ export default async function QueuePage() {
     getJson<{ summary?: PolicySummary }>("/automation/policy", {}),
     getJson<RenderDeadLetter>("/render-dead-letter", { counts: {}, items: [] }),
   ]);
+  const queue = queueLoad.rows;
 
   const summary = policy.summary ?? {
     state: "unknown",
@@ -243,27 +259,27 @@ export default async function QueuePage() {
         <h2>At a glance</h2>
         <div className="stats">
           <div>
-            <strong style={{ color: "#58a6ff" }}>{queue.length}</strong>
+            <strong style={{ color: "var(--accent)" }}>{queueLoad.status === "unavailable" ? "—" : queue.length}</strong>
             <span>videos to make</span>
           </div>
           <div>
-            <strong style={{ color: "#58a6ff" }}>{candidates.length}</strong>
+            <strong style={{ color: "var(--accent)" }}>{candidates.length}</strong>
             <span>rendering automatically</span>
           </div>
           <div>
-            <strong style={{ color: "#d29922" }}>{awaitingVerification.length}</strong>
+            <strong style={{ color: "var(--warn)" }}>{awaitingVerification.length}</strong>
             <span>awaiting verification</span>
           </div>
           <div>
-            <strong style={{ color: "#d29922" }}>{awaitingRedaction.length}</strong>
+            <strong style={{ color: "var(--warn)" }}>{awaitingRedaction.length}</strong>
             <span>awaiting redaction review</span>
           </div>
           <div>
-            <strong style={{ color: "#d29922" }}>{awaitingApproval.length}</strong>
+            <strong style={{ color: "var(--warn)" }}>{awaitingApproval.length}</strong>
             <span>awaiting approval</span>
           </div>
           <div>
-            <strong style={{ color: renderFailures ? "#f85149" : "#3fb950" }}>
+            <strong style={{ color: renderFailures ? "var(--danger)" : "var(--ok)" }}>
               {renderFailures}
             </strong>
             <span>render QC / failures</span>
@@ -278,7 +294,19 @@ export default async function QueuePage() {
           20% freshness + 15% preset fit — recomputed from evidence on every
           load, never stored. Pins are operator overrides.
         </p>
-        {queue.length === 0 ? (
+        {queueLoad.status === "unavailable" && (
+          <div className="notice notice-danger" role="alert">
+            Queue unavailable — the API did not answer. This is not an empty
+            queue; reload once the stack is reachable.
+          </div>
+        )}
+        {queueLoad.status === "partial" && (
+          <div className="notice" role="status">
+            Partial list — {queue.length} rows loaded before a later page failed
+            or the page cap was reached. Counts below may be low.
+          </div>
+        )}
+        {queueLoad.status === "unavailable" ? null : queue.length === 0 ? (
           <p className="muted small">
             Empty. Promote a rising topic from the{" "}
             <a href="/radar">radar</a> — an offer candidate and its queue row
@@ -295,12 +323,19 @@ export default async function QueuePage() {
                     {row.rank_pinned !== null ? `📌 ${row.rank_pinned}` : row.rank.toFixed(0)}
                   </span>
                   <div className="pq-main">
-                    <strong>{row.title}</strong>
+                    <strong>
+                      {row.offer_id ? <a href={`/offers/${row.offer_id}#research`}>{row.title}</a> : row.title}
+                    </strong>
                     <span className="muted small">
                       {row.provider ?? "unknown"} · {row.kind} · rank {row.rank.toFixed(0)}
                       {row.offer_state ? ` · ${row.offer_state}` : ""}
                     </span>
                     <span className="pq-chips">
+                      {row.content_type && (
+                        <span className="tag tag-accent" title="Content track (research brief)">
+                          {TRACK_LABEL[row.content_type] ?? row.content_type}
+                        </span>
+                      )}
                       {(row.velocity ?? 0) > 0 && (
                         <span className="pill pill-accent" title="Score gained per hour between radar observations">
                           🔥 {(row.velocity as number).toFixed(1)}/h
@@ -312,14 +347,14 @@ export default async function QueuePage() {
                         </span>
                       )}
                       {(row.evidence_count ?? 0) > 0 && (
-                        <span className="pill" style={{ color: "#3fb950" }} title="Evidence snapshots on the offer">
+                        <span className="pill" style={{ color: "var(--ok)" }} title="Evidence snapshots on the offer">
                           🧪 {row.evidence_count}
                         </span>
                       )}
                       {days !== null && (
                         <span
                           className="pill"
-                          style={{ color: days <= 3 ? "#f85149" : undefined }}
+                          style={{ color: days <= 3 ? "var(--danger)" : undefined }}
                           title="Freshness deadline"
                         >
                           {days < 0 ? "⏳ overdue" : `⏳ ${days}d`}
@@ -359,7 +394,7 @@ export default async function QueuePage() {
                     <td><a href={`/offers/${item.offer_id}`}>{item.offer_title}</a></td>
                     <td>{item.preset} · {item.language}</td>
                     <td>
-                      <span className="pill" style={{ color: "#f85149" }}>
+                      <span className="pill" style={{ color: "var(--danger)" }}>
                         {item.status} / {item.qc_status}
                       </span>
                     </td>
