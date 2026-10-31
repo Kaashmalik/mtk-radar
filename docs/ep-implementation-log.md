@@ -86,11 +86,10 @@ only.
 against real Graph/TikTok endpoints (adapters are mocked-transport tested),
 advisory-lock serialization under real multi-process contention (integration
 tests exercise the lock sequentially), and GC deletion against a real S3
-bucket (local/S3 both wired; S3 path untested here). One repo note: the owner
-deliberately committed a production data export (`f079d84`,
-`docs/marshmallow-contact-location-…json`) as an intentional archive — kept on
-main per the owner's decision; it contains customer contact rows, so repo
-visibility choices should account for it.
+bucket (local/S3 both wired; S3 path untested here). One repo note: the owner's deliberate production data archive of 2026-10-12
+(`docs/marshmallow-contact-location-…json`, committed in `f079d84`) was removed
+from the repo on 2026-10-31 at the owner's request; a copy was saved outside the
+repository before deletion. It remains retrievable from git history.
 
 ## EP-02 — Discovery & observable momentum (G06–G11, G13–G16, G22)
 
