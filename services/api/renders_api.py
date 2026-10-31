@@ -52,7 +52,9 @@ class RenderIn(BaseModel):
     video_sha256: Optional[str] = None
     captions_sha256: Optional[str] = None
     cover_sha256: Optional[str] = None
-    capture_id: uuid.UUID
+    # M3: None only for an official_explainer render built from the research
+    # brief (no screen recording exists). Every other format needs a capture.
+    capture_id: Optional[uuid.UUID] = None
     disclosure: dict = Field(default_factory=dict)
     # v0.27 content packaging carried through to schedules.
     language: str = "en"
@@ -99,17 +101,18 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
             detail=f"render blocked: offer state is '{offer['state']}' (§3)",
         )
 
-    capture = await pool.fetchrow(
-        "SELECT redaction_reviewed FROM capture_sessions WHERE id = $1 AND offer_id = $2",
-        render.capture_id, offer_id,
-    )
-    if not capture:
-        raise HTTPException(status_code=404, detail="capture not found for this offer")
-    if not capture["redaction_reviewed"]:
-        raise HTTPException(
-            status_code=409,
-            detail="capture redaction review has not passed — review the footage first (§4)",
+    if render.capture_id is not None:
+        capture = await pool.fetchrow(
+            "SELECT redaction_reviewed FROM capture_sessions WHERE id = $1 AND offer_id = $2",
+            render.capture_id, offer_id,
         )
+        if not capture:
+            raise HTTPException(status_code=404, detail="capture not found for this offer")
+        if not capture["redaction_reviewed"]:
+            raise HTTPException(
+                status_code=409,
+                detail="capture redaction review has not passed — review the footage first (§4)",
+            )
 
     # The render must be bound to the exact script bytes it was produced from.
     script = await pool.fetchrow(
@@ -125,6 +128,17 @@ async def register_render(offer_id: uuid.UUID, render: RenderIn) -> dict:
         raise HTTPException(
             status_code=409,
             detail="render script_version_hash does not match the selected script version",
+        )
+
+    # M3: a capture-less render is allowed ONLY for the official_explainer
+    # format (cards built from the research brief; no footage to redact).
+    # Playback review and measured QC still gate its release.
+    if render.capture_id is None and script["format"] != "official_explainer":
+        raise HTTPException(
+            status_code=422,
+            detail=f"a render without a capture is only allowed for the "
+                   f"'official_explainer' format (script format is "
+                   f"'{script['format'] or 'unset'}') — record and review a capture",
         )
 
     # Format binding at render time (plan §6.C): the declared format is
@@ -443,14 +457,15 @@ async def render_candidates(
         """
         WITH latest_script AS (
           SELECT DISTINCT ON (offer_id, language)
-                 offer_id, language, version, markdown
+                 offer_id, language, version, markdown, format, created_at
           FROM offer_scripts ORDER BY offer_id, language, version DESC
         ),
         base AS (
           SELECT o.id AS offer_id, o.title, o.provider, o.state::text AS state,
                  ls.language, ls.version AS script_version, ls.markdown,
                  c.id AS capture_id, c.video_path,
-                 c.created_at AS capture_created_at,
+                 -- M3: an explainer has no capture; its script time orders it.
+                 COALESCE(c.created_at, ls.created_at) AS capture_created_at,
                  ARRAY(
                    SELECT p.preset
                    FROM unnest($3::text[]) AS p(preset)
@@ -477,13 +492,21 @@ async def render_candidates(
                  ) AS missing_presets
           FROM offers o
           JOIN latest_script ls ON ls.offer_id = o.id
-          JOIN LATERAL (
+          LEFT JOIN LATERAL (
             SELECT c.* FROM capture_sessions c
             WHERE c.offer_id = o.id AND c.redaction_reviewed
             ORDER BY c.created_at DESC LIMIT 1
           ) c ON TRUE
           WHERE o.state IN ('verified', 'approved_for_video')
             AND ls.language = ANY($2::text[])
+            -- A reviewed capture, OR (M3) a research explainer the render
+            -- worker builds from the current brief: official_explainer
+            -- script + current brief content_type 'explainer'.
+            AND (c.id IS NOT NULL OR (
+                  ls.format = 'official_explainer'
+                  AND (SELECT b.content_type FROM research_briefs b
+                       WHERE b.offer_id = o.id
+                       ORDER BY b.version DESC LIMIT 1) = 'explainer'))
         )
         SELECT * FROM base
         WHERE cardinality(missing_presets) > 0

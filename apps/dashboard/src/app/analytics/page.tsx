@@ -118,18 +118,18 @@ async function getAnalytics(): Promise<Analytics | null> {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  candidate: "#8b949e",
-  evidence_needed: "#d29922",
-  verified: "#3fb950",
-  approved_for_video: "#58a6ff",
+  candidate: "var(--text-muted)",
+  evidence_needed: "var(--warn)",
+  verified: "var(--ok)",
+  approved_for_video: "var(--accent)",
   published: "#bc8cff",
-  expired: "#f85149",
+  expired: "var(--danger)",
   corrected: "#f0883e",
-  failed: "#f85149",
+  failed: "var(--danger)",
   paused: "#f0883e",
-  draft: "#8b949e",
-  needs_approval: "#d29922",
-  scheduled: "#58a6ff",
+  draft: "var(--text-muted)",
+  needs_approval: "var(--warn)",
+  scheduled: "var(--accent)",
 };
 
 function n(v: number | null | undefined): string {
@@ -173,7 +173,7 @@ export default async function AnalyticsPage() {
               <div><strong>{n(data.items_total)}</strong><span>inbox items</span></div>
               {(data.offers_by_state ?? []).map((s) => (
                 <div key={s.state}>
-                  <strong style={{ color: STATE_COLORS[s.state] ?? "#8b949e" }}>{n(s.n)}</strong>
+                  <strong style={{ color: STATE_COLORS[s.state] ?? "var(--text-muted)" }}>{n(s.n)}</strong>
                   <span>{s.state.replace(/_/g, " ")}</span>
                 </div>
               ))}
@@ -184,21 +184,21 @@ export default async function AnalyticsPage() {
             <h2>Render QC</h2>
             <div className="stats">
               <div><strong>{n(data.rendering?.total)}</strong><span>render attempts</span></div>
-              <div><strong style={{ color: "#3fb950" }}>{n(data.rendering?.qc_passed)}</strong><span>QC passed</span></div>
+              <div><strong style={{ color: "var(--ok)" }}>{n(data.rendering?.qc_passed)}</strong><span>QC passed</span></div>
               <div>
-                <strong style={{ color: (data.rendering?.qc_failed ?? 0) > 0 ? "#f85149" : undefined }}>
+                <strong style={{ color: (data.rendering?.qc_failed ?? 0) > 0 ? "var(--danger)" : undefined }}>
                   {n(data.rendering?.qc_failed)}
                 </strong>
                 <span>QC rejected</span>
               </div>
               <div>
-                <strong style={{ color: (data.rendering?.render_failed ?? 0) > 0 ? "#f85149" : undefined }}>
+                <strong style={{ color: (data.rendering?.render_failed ?? 0) > 0 ? "var(--danger)" : undefined }}>
                   {n(data.rendering?.render_failed)}
                 </strong>
                 <span>encode failed</span>
               </div>
               <div>
-                <strong style={{ color: (data.rendering?.not_checked ?? 0) > 0 ? "#d29922" : undefined }}>
+                <strong style={{ color: (data.rendering?.not_checked ?? 0) > 0 ? "var(--warn)" : undefined }}>
                   {n(data.rendering?.not_checked)}
                 </strong>
                 <span>legacy / not checked</span>
@@ -225,7 +225,7 @@ export default async function AnalyticsPage() {
                 <span>evidence / offer</span>
               </div>
               <div>
-                <strong style={{ color: (data.verification?.recheck_due ?? 0) > 0 ? "#d29922" : undefined }}>
+                <strong style={{ color: (data.verification?.recheck_due ?? 0) > 0 ? "var(--warn)" : undefined }}>
                   {n(data.verification?.recheck_due)}
                 </strong>
                 <span>recheck due</span>
@@ -255,7 +255,7 @@ export default async function AnalyticsPage() {
                   {data.schedules_by_platform.map((r) => (
                     <tr key={`${r.platform}-${r.state}`}>
                       <td>{r.platform}</td>
-                      <td style={{ color: STATE_COLORS[r.state] ?? "#8b949e" }}>{r.state}</td>
+                      <td style={{ color: STATE_COLORS[r.state] ?? "var(--text-muted)" }}>{r.state}</td>
                       <td>{r.n}</td>
                     </tr>
                   ))}
@@ -446,7 +446,7 @@ export default async function AnalyticsPage() {
                               <span className="muted"> · report {p.report_start} → {p.report_end}</span>
                             )}
                             {p.degraded && (
-                              <span style={{ color: "var(--warn, #d29922)" }}
+                              <span style={{ color: "var(--warn, var(--warn))" }}
                                     title={p.degradation_detail ?? "A metric group was rejected by the provider"}>
                                 {" "}· partial data
                               </span>
@@ -473,7 +473,7 @@ export default async function AnalyticsPage() {
                 {data.account_health.map((a, i) => (
                   <li key={i} className="small">
                     <strong>{a.platform}</strong> —{" "}
-                    <span style={{ color: a.status === "active" ? "#3fb950" : "#f85149" }}>
+                    <span style={{ color: a.status === "active" ? "var(--ok)" : "var(--danger)" }}>
                       {a.status}
                     </span>
                     {a.last_error && <span className="muted small"> · {a.last_error}</span>}

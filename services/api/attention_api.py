@@ -132,6 +132,7 @@ async def build_attention(pool=None) -> dict[str, Any]:
                 "publish_failed": "Publishing failures / holds",
                 "correction": "Corrections to resolve",
                 "offer_expiry": "Expiring / recheck offers",
+                "research_claim": "Research claims to recheck / resolve",
                 "token": "Platform connections",
                 "verification": "Evidence waiting for verification",
                 "budget": "Automation budget",
@@ -322,6 +323,43 @@ async def build_attention(pool=None) -> dict[str, Any]:
                     f"recheck due {_iso(r['recheck_at']) or 'n/a'}. Affected posts are paused."),
             href=f"/offers/{r['id']}", action="Recheck offer",
             at=r["updated_at"], provider=r["provider"],
+        )
+        for r in rows
+    ])
+
+    # ---- research claims (EP-03 follow-up) -------------------------------
+    # Only the CURRENT brief version matters (a new version supersedes).
+    # A standing contradiction blocks copy in every track until a human
+    # resolves it; a due recheck means the cited support may have changed.
+    rows = await pool.fetch(
+        """
+        SELECT c.id, c.offer_id, c.claim_text, c.status, c.recheck_at,
+               c.created_at, o.title, o.provider,
+               COUNT(*) OVER() AS total_count
+        FROM research_claims c
+        JOIN offers o ON o.id = c.offer_id
+        WHERE c.brief_id = (SELECT b.id FROM research_briefs b
+                            WHERE b.offer_id = c.offer_id
+                            ORDER BY b.version DESC LIMIT 1)
+          AND (c.status = 'contradicted'
+               OR (c.recheck_at IS NOT NULL AND c.recheck_at <= now()))
+        ORDER BY (c.status = 'contradicted') DESC, c.recheck_at ASC NULLS LAST
+        LIMIT $1
+        """,
+        LIMIT_PER_KIND,
+    )
+    add("research_claim", _row_total(rows), [
+        _item(
+            kind="research_claim", entity_id=r["id"],
+            severity="error" if r["status"] == "contradicted" else "warning",
+            title=(f"Contradicted claim blocks copy: {r['title']}"
+                   if r["status"] == "contradicted"
+                   else f"Claim recheck due: {r['title']}"),
+            detail=(f"“{(r['claim_text'] or '')[:160]}” — status {r['status']}"
+                    + (f", recheck due {_iso(r['recheck_at'])}" if r["recheck_at"] else "")
+                    + ". Review the source and set the claim status."),
+            href=f"/offers/{r['offer_id']}#research", action="Review claim",
+            at=r["recheck_at"] or r["created_at"], provider=r["provider"],
         )
         for r in rows
     ])

@@ -68,6 +68,10 @@ def estimate_cost(kind: str, units: int, meta: dict[str, Any] | None = None) -> 
         return round((units or 0) * (_LLM_INPUT_PER_MTOK + _LLM_OUTPUT_PER_MTOK)
                      / 1_000_000, 6)
     if kind == "tts":
+        if meta.get("local") is True:
+            # Self-hosted TTS (worker verified the endpoint is local): no
+            # per-character bill; compute/electricity is tracked separately.
+            return 0.0
         return round((units or 0) * _TTS_PER_MCHAR / 1_000_000, 6)
     # Trend fetches are (typically) free APIs; YouTube quota is billed monthly
     # against a free allotment — recorded for visibility, estimated at 0.
@@ -108,7 +112,17 @@ def _coerce_event(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
         "ref_type": str(raw.get("ref_type") or "")[:60] or None,
         "ref_id": raw.get("ref_id") or None,
         "meta": meta,
+        # Client idempotency key (outbox replays): bounded, charset-checked.
+        "event_id": _event_id(raw.get("event_id")),
     }
+
+
+_EVENT_ID = __import__("re").compile(r"^[A-Za-z0-9._:-]{8,64}$")
+
+
+def _event_id(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text if _EVENT_ID.match(text) else None
 
 
 async def record_events(pool, events: list[dict[str, Any]]) -> dict[str, int]:
@@ -126,12 +140,13 @@ async def record_events(pool, events: list[dict[str, Any]]) -> dict[str, int]:
             """
             INSERT INTO usage_events
                 (kind, provider, model, units, unit_type, cost_usd_est,
-                 ref_type, ref_id, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                 ref_type, ref_id, meta, event_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+            ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
             """,
             [(e["kind"], e["provider"], e["model"], e["units"], e["unit_type"],
               e["cost_usd_est"], e["ref_type"], e["ref_id"],
-              __import__("json").dumps(e["meta"])) for e in prepared],
+              __import__("json").dumps(e["meta"]), e["event_id"]) for e in prepared],
         )
     return {"recorded": len(prepared), "dropped": dropped}
 
@@ -173,17 +188,26 @@ async def spend_summary(pool) -> dict[str, Any]:
         GROUP BY kind, unit_type ORDER BY kind
         """
     )
-    # Cost per published video (30 d) — published posts over spend.
-    published_raw = await pool.fetchval(
+    # Unit economics (30 d). A VIDEO is one produced package — the offer's
+    # story in one language — however many platforms it is posted to; a
+    # POST is one platform publication. Dividing spend by posts understated
+    # production cost whenever one video went to several platforms.
+    published_row = await pool.fetchrow(
         """
-        SELECT COUNT(*) FROM schedules
+        SELECT COUNT(*) AS posts,
+               COUNT(DISTINCT (offer_id, COALESCE(language, 'en'))) AS videos
+        FROM schedules
         WHERE state = 'published' AND updated_at >= now() - interval '30 days'
         """
     )
-    try:
-        published = int(published_raw or 0)
-    except (TypeError, ValueError):
-        published = 0
+
+    def _count(name: str) -> int:
+        try:
+            return int((published_row or {})[name] or 0)
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    published, posts = _count("videos"), _count("posts")
     usd_30d = _num(totals, "usd_30d") if totals else 0.0
     return {
         "usd_today": _num(totals, "usd_today") if totals else 0.0,
@@ -193,6 +217,9 @@ async def spend_summary(pool) -> dict[str, Any]:
         "published_videos_30d": published,
         "cost_per_published_video_usd_30d":
             round(usd_30d / published, 4) if published else None,
+        "published_posts_30d": posts,
+        "cost_per_published_post_usd_30d":
+            round(usd_30d / posts, 4) if posts else None,
         "pricing": pricing_view(),
     }
 
@@ -357,19 +384,24 @@ async def settle_reservation(pool, reservation_id: str,
     event = _coerce_event(event)
     if event is None or not reservation_id:
         return {"settled": False, "reason": "invalid reservation settlement"}
+    if event["event_id"] and await pool.fetchval(
+            "SELECT 1 FROM usage_events WHERE event_id = $1", event["event_id"]):
+        # Outbox replay of a settlement that already landed: count it once.
+        return {"settled": True, "duplicate": True}
     result = await pool.execute(
         """
         UPDATE usage_events
         SET units = $2, unit_type = $3,
             cost_usd_est = $4,
-            meta = meta || $5::jsonb
+            meta = meta || $5::jsonb,
+            event_id = COALESCE($6, event_id)
         WHERE id = $1::uuid
           AND meta->>'reservation' = 'true'
           AND meta->>'settled' IS NULL
         """,
         __import__("uuid").UUID(reservation_id),
         event["units"], event["unit_type"], event["cost_usd_est"],
-        __import__("json").dumps({"settled": True}),
+        __import__("json").dumps({"settled": True}), event["event_id"],
     )
     if result.endswith("UPDATE 1"):
         return {"settled": True}

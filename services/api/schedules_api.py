@@ -20,7 +20,7 @@ import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Final, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -81,6 +81,25 @@ _PREFERRED_RENDER_PRESET = {
 # ---------------------------------------------------------------- schemas
 
 
+class TikTokOptionsIn(BaseModel):
+    """Per-post TikTok Direct Post choices (G23 UX, TikTok Content Sharing
+    Guidelines). Shown to the operator next to the creator's live
+    creator_info; nothing here is inferred or defaulted to "on"."""
+
+    disable_comment: bool = False
+    disable_duet: bool = False
+    disable_stitch: bool = False
+    # Commercial content disclosure: promoting yourself (brand_organic) or a
+    # third party (brand_content, "paid partnership"). Never inferred.
+    brand_organic: bool = False
+    brand_content: bool = False
+    # The operator explicitly agreed to TikTok's Music Usage Confirmation
+    # (and Branded Content Policy when brand_content) for this post.
+    consent: bool = False
+    # The creator account the operator saw when consenting.
+    creator_username: Optional[str] = Field(default=None, max_length=100)
+
+
 class ScheduleIn(BaseModel):
     platform: str
     local_time: datetime
@@ -103,6 +122,9 @@ class ScheduleIn(BaseModel):
     # for YouTube/Facebook, 9:16 for Instagram/TikTok). YouTube Shorts can pin
     # a vertical render explicitly.
     render_id: Optional[uuid.UUID] = None
+    # TikTok only: the reviewed Direct Post choices + consent (ignored for
+    # other platforms). Part of the metadata hash the reviewer approves.
+    tiktok: Optional[TikTokOptionsIn] = None
 
 
 class ScheduleTransitionIn(BaseModel):
@@ -405,6 +427,21 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
     # Pin the language of the actual SRT so YouTube labels the track correctly.
     metadata.setdefault("captions_language", language_policy["captions_language"])
 
+    if body.platform == "tiktok" and body.tiktok is not None:
+        options = body.tiktok
+        if options.brand_content and body.privacy != "public":
+            # TikTok: branded content cannot be posted as "only me".
+            raise HTTPException(
+                status_code=422,
+                detail="TikTok branded content (paid partnership) must be public — "
+                       "change privacy or untick branded content",
+            )
+        metadata["tiktok"] = {
+            **options.model_dump(),
+            # Who consented, and when — part of the approved package.
+            "consent_by": actor if options.consent else None,
+        }
+
     cover_path = body.cover_path or render["cover_path"]
     pinned_comment = body.pinned_comment or metadata.get("pinned_comment")
 
@@ -550,6 +587,7 @@ class PlatformOverrideIn(BaseModel):
     platform_account_id: Optional[uuid.UUID] = None
     youtube_playlist_id: Optional[str] = None
     render_id: Optional[uuid.UUID] = None
+    tiktok: Optional[TikTokOptionsIn] = None
 
 
 class BatchScheduleIn(BaseModel):
@@ -623,6 +661,7 @@ async def create_schedules_batch(offer_id: uuid.UUID, body: BatchScheduleIn,
             youtube_playlist_id=(override.youtube_playlist_id if override
                                  and override.youtube_playlist_id is not None
                                  else body.youtube_playlist_id),
+            tiktok=override.tiktok if override and override.tiktok is not None else None,
         )
         try:
             row = await _create_one_schedule(pool, offer_id, single, actor)
@@ -686,6 +725,97 @@ async def batch_transition(body: BatchTransitionIn, request: Request) -> dict:
     }
 
 
+#: The only path to the queue: each step is the ordinary single transition.
+_TO_QUEUE: Final[dict[str, tuple[str, ...]]] = {
+    "draft": ("needs_approval", "approved", "scheduled"),
+    "needs_approval": ("approved", "scheduled"),
+    "approved": ("scheduled",),
+    "scheduled": (),  # already queued: idempotent no-op
+}
+
+
+class ReviewedTargetIn(BaseModel):
+    id: uuid.UUID
+    # The package hash the reviewer SAW in the preview. A package that
+    # changed since (new render/metadata/cover pin) is refused as stale.
+    expected_package_hash: Optional[str] = None
+
+
+class ApproveAndQueueIn(BaseModel):
+    """G20: one final human action after reviewing the exact packages."""
+
+    targets: list[ReviewedTargetIn] = Field(min_length=1, max_length=50)
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.post("/schedules/approve-and-queue")
+async def approve_and_queue(body: ApproveAndQueueIn, request: Request) -> dict:
+    """Approve AND queue reviewed posts in one click (G20).
+
+    For every target, inside ONE transaction: lock the row, refuse a stale
+    preview (package hash changed since review), then walk the existing
+    draft → needs_approval → approved → scheduled transitions via
+    `_transition` — same gates, same audit, same reviewer binding. Any
+    refused step rolls the whole target back to the state it started in, so
+    a partial result is safe to retry: already-queued targets are a no-op
+    and only unresolved targets move. Never expands to other posts.
+    """
+    if credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+        raise HTTPException(
+            status_code=403,
+            detail="approve-and-queue is a human action — use a reviewer credential",
+        )
+    pool = db.get()
+    results: list[dict] = []
+    seen: set[uuid.UUID] = set()
+    for target in body.targets:
+        if target.id in seen:
+            continue
+        seen.add(target.id)
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    current = await conn.fetchrow(
+                        "SELECT state::text AS state, package_hash FROM schedules "
+                        "WHERE id = $1 FOR UPDATE",
+                        target.id,
+                    )
+                    if current is None:
+                        raise HTTPException(status_code=404, detail="schedule not found")
+                    if target.expected_package_hash is not None                             and current["package_hash"] != target.expected_package_hash:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="package changed since review — reload the preview "
+                                   "and review the current package",
+                        )
+                    path = _TO_QUEUE.get(current["state"])
+                    if path is None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"a '{current['state']}' post cannot be approved and "
+                                   "queued from here",
+                        )
+                    row: dict = {"state": current["state"]}
+                    for step in path:
+                        row = await _transition(
+                            conn, target.id,
+                            ScheduleTransitionIn(to=step, reviewer=body.reviewer,
+                                                 note=body.note),
+                            request,
+                        )
+            results.append({"id": str(target.id), "ok": True,
+                            "from": current["state"], "already_queued": not path, **row})
+        except HTTPException as exc:
+            results.append({"id": str(target.id), "ok": False,
+                            "detail": exc.detail, "status": exc.status_code})
+    return {
+        "ok": all(r["ok"] for r in results),
+        "queued": sum(1 for r in results if r["ok"]),
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------- calendar
 
 
@@ -727,7 +857,7 @@ async def list_schedules(
         after_id,
     )
     out = [dict(r) for r in rows]
-    _annotate_conflicts(out)
+    _annotate_conflicts(out, context=await _conflict_neighbors(pool, out))
     set_next_cursor(
         response, out, limit,
         lambda row: encode_cursor(row["local_time"], row["id"]),
@@ -746,45 +876,95 @@ PUBLISH_CONFLICT_WINDOW_MIN = 60
 _CONFLICT_STATES = ("needs_approval", "approved", "scheduled")
 
 
-def _local_slot(row: dict) -> tuple:
-    """(local day, local minute-of-day) of a schedule in ITS display tz."""
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-    when = row.get("local_time")
-    if not isinstance(when, _dt):
-        return ("?", 0)
-    tz = ZoneInfo(str(row.get("timezone") or "Asia/Karachi"))
-    local = when.astimezone(tz)
-    return (local.date().isoformat(), local.hour * 60 + local.minute)
+def _same_audience(a: dict, b: dict) -> bool:
+    """Same platform AND same account (G26).
 
-
-def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WINDOW_MIN) -> None:
-    """Mark same-platform-same-window schedules (WP-H).
-
-    Two (or more) posts on one platform inside `window_min` minutes of each
-    other on the same local day each carry `conflict: true` and
-    `conflict_with: [other ids]`. Pure function over the fetched page — the
-    calendar fetches up to 200 rows, falling inside one page by construction;
-    conflicts are advisory: a human decides, the release gate is unchanged.
+    Two different channels on one platform do not double-post to one
+    audience. An unpinned post (no account yet) is conservatively treated
+    as potentially any account on its platform.
     """
-    active = [r for r in rows if r.get("state") in _CONFLICT_STATES]
+    if a.get("platform") != b.get("platform"):
+        return False
+    acc_a, acc_b = a.get("platform_account_id"), b.get("platform_account_id")
+    return acc_a is None or acc_b is None or str(acc_a) == str(acc_b)
+
+
+async def _conflict_neighbors(pool, page: list[dict],
+                              window_min: int = PUBLISH_CONFLICT_WINDOW_MIN) -> list[dict]:
+    """Active schedules OUTSIDE this page that fall within the window of it.
+
+    Keyset pages split the timeline; without these, two posts 10 minutes
+    apart on adjacent pages were never compared (G26).
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    times = [r["local_time"] for r in page
+             if r.get("state") in _CONFLICT_STATES and isinstance(r.get("local_time"), _dt)]
+    if not times:
+        return []
+    window = _td(minutes=window_min)
+    rows = await pool.fetch(
+        """
+        SELECT s.id, s.platform, s.platform_account_id, s.state::text AS state,
+               s.local_time
+        FROM schedules s
+        WHERE s.state::text = ANY($1::text[])
+          AND s.local_time BETWEEN $2 AND $3
+          AND NOT (s.id = ANY($4::uuid[]))
+        ORDER BY s.local_time
+        LIMIT 500
+        """,
+        list(_CONFLICT_STATES), min(times) - window, max(times) + window,
+        [r["id"] for r in page],
+    )
+    return [dict(r) for r in rows]
+
+
+def _annotate_conflicts(rows: list[dict], window_min: int = PUBLISH_CONFLICT_WINDOW_MIN,
+                        *, context: list[dict] | None = None) -> None:
+    """Mark same-audience schedules inside the publish window (WP-H, G26).
+
+    Two (or more) posts for the same platform ACCOUNT whose absolute (UTC)
+    times are within `window_min` minutes each carry `conflict: true` and
+    `conflict_with: [other ids]`. Comparing instants instead of local
+    (day, minute) buckets catches 23:50 vs 00:10 and posts displayed in
+    different timezones. `context` holds active neighbours from outside the
+    page so page boundaries cannot hide a conflict; only `rows` are
+    annotated. Conflicts are advisory: a human decides, the gate is unchanged.
+    """
+    from datetime import datetime as _dt
+
     for row in rows:
         row["conflict"] = False
         row["conflict_with"] = []
-    buckets: dict[tuple, list[dict]] = {}
-    for row in active:
-        day, minute = _local_slot(row)
-        buckets.setdefault((row.get("platform"), day), []).append(
-            (minute, row))
-    for entries in buckets.values():
-        entries.sort(key=lambda pair: pair[0])
-        for i, (minute, row) in enumerate(entries):
-            for j, (other_min, other) in enumerate(entries):
-                if i == j:
-                    continue
-                if abs(minute - other_min) <= window_min:
-                    row["conflict"] = True
-                    row["conflict_with"].append(str(other["id"]))
+    page_ids = {str(r.get("id")) for r in rows}
+    candidates = [r for r in rows if r.get("state") in _CONFLICT_STATES]
+    candidates += [r for r in (context or [])
+                   if r.get("state") in _CONFLICT_STATES and str(r.get("id")) not in page_ids]
+    candidates = [r for r in candidates if isinstance(r.get("local_time"), _dt)]
+    candidates.sort(key=lambda r: r["local_time"])
+    limit_s = window_min * 60
+
+    def _within(a: dict, b: dict) -> bool:
+        return abs((a["local_time"] - b["local_time"]).total_seconds()) <= limit_s
+
+    for i, row in enumerate(candidates):
+        if str(row.get("id")) not in page_ids:
+            continue
+        # Time-sorted: walk outward in each direction until the window ends.
+        neighbours = []
+        for j in range(i - 1, -1, -1):
+            if not _within(row, candidates[j]):
+                break
+            neighbours.append(candidates[j])
+        for j in range(i + 1, len(candidates)):
+            if not _within(row, candidates[j]):
+                break
+            neighbours.append(candidates[j])
+        for other in neighbours:
+            if _same_audience(row, other):
+                row["conflict"] = True
+                row["conflict_with"].append(str(other["id"]))
 
 
 @router.get("/schedules/best-times")

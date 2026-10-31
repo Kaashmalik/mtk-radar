@@ -6188,3 +6188,272 @@ def test_extension_intake_contract_idempotent_with_context(client):
     assert evidence["payload_hash"] == obs[0]["payload_hash"]
     assert evidence["retrieved_at"] == obs[0]["observed_at"].isoformat()
     assert evidence["url"] == link
+
+
+def test_approve_and_queue_is_atomic_per_target_and_rejects_stale_previews(auth_client):
+    """G20: one human click approves AND queues reviewed packages. Each target
+    is all-or-nothing, a changed package is refused as stale, repeats are
+    idempotent, and service credentials are refused."""
+    marker, stamp = uuid.uuid4().hex, "2027-05-09T13:00:00+00:00"
+    offer_id = _wpd_ready_offer(auth_client, marker)
+    batched = auth_client.post(f"/offers/{offer_id}/schedules/batch", headers=SVC, json={
+        "platforms": ["youtube", "facebook"], "local_time": stamp, "privacy": "private",
+    }).json()
+    ids = [r["id"] for r in batched["results"] if r["ok"]]
+    assert len(ids) == 2, batched
+    hashes = {r["id"]: r["package_hash"] for r in _run(
+        "SELECT id::text, package_hash FROM schedules WHERE id = ANY($1::uuid[])", ids)}
+    yt, fb = ids
+
+    refused = auth_client.post("/schedules/approve-and-queue", headers=SVC, json={
+        "targets": [{"id": yt}]})
+    assert refused.status_code == 403, refused.text
+
+    # The facebook preview is stale: the reviewer saw a different package.
+    first = auth_client.post("/schedules/approve-and-queue", headers=AUTH, json={
+        "targets": [{"id": yt, "expected_package_hash": hashes[yt]},
+                    {"id": fb, "expected_package_hash": "not-what-is-stored"}]})
+    assert first.status_code == 200, first.text
+    results = {r["id"]: r for r in first.json()["results"]}
+    assert results[fb]["ok"] is False and results[fb]["status"] == 409
+    assert "changed since review" in results[fb]["detail"]
+
+    states = {r["id"]: r["state"] for r in _run(
+        "SELECT id::text, state::text FROM schedules WHERE id = ANY($1::uuid[])", ids)}
+    assert states[fb] == "draft", "a refused target keeps the state it started in"
+    if results[yt]["ok"]:
+        assert states[yt] == "scheduled"
+    else:
+        # A release gate may refuse queueing in this fixture; the walk must
+        # then roll back completely instead of stranding the post half-way.
+        assert states[yt] == "draft", results[yt]
+
+    # Repeat submit: no duplicate work, no state churn.
+    again = auth_client.post("/schedules/approve-and-queue", headers=AUTH, json={
+        "targets": [{"id": yt, "expected_package_hash": hashes[yt]}]})
+    assert again.status_code == 200
+    entry = again.json()["results"][0]
+    if results[yt]["ok"]:
+        assert entry["ok"] is True and entry["already_queued"] is True
+    rows = _run("SELECT count(*) AS n FROM schedules WHERE offer_id = $1", offer_id)
+    assert rows[0]["n"] == 2, "approve-and-queue never creates posts"
+
+
+def test_attention_lists_due_and_contradicted_research_claims_of_current_brief(auth_client):
+    """EP-03 follow-up: a due claim recheck or a standing contradiction on the
+    CURRENT brief is operator attention; superseded versions are not."""
+    provider = f"ResearchAttention {uuid.uuid4()}"
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": provider, "category": "research_intro", "offer_type": "trend_topic",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    past = "2026-01-01T00:00:00+00:00"
+
+    old = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "claims": [{"claim_text": "Superseded claim, recheck long overdue.",
+                    "claim_class": "author_reported", "recheck_at": past}],
+    })
+    assert old.status_code == 201, old.text
+    current = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer",
+        "claims": [
+            {"claim_text": "Current claim whose recheck is due.",
+             "claim_class": "author_reported", "recheck_at": past},
+            {"claim_text": "Current claim a reviewer found contradicted.",
+             "claim_class": "editorial_analysis", "status": "contradicted"},
+            {"claim_text": "Current claim, fine, recheck in the future.",
+             "claim_class": "author_reported", "recheck_at": "2099-01-01T00:00:00+00:00"},
+        ],
+    })
+    assert current.status_code == 201, current.text
+    due_id, contradicted_id, future_id = [c["id"] for c in current.json()["claims"]]
+    old_id = old.json()["claims"][0]["id"]
+
+    attention = auth_client.get("/attention", headers=SVC).json()
+    ours = {i["entity_id"]: i for i in attention["items"] if i["kind"] == "research_claim"}
+    assert ours[contradicted_id]["severity"] == "error"
+    assert ours[due_id]["severity"] == "warning"
+    assert future_id not in ours and old_id not in ours
+    assert ours[due_id]["href"] == f"/offers/{offer_id}#research"
+
+
+def test_research_explainer_renders_without_capture_only_as_official_explainer(auth_client):
+    """M3: an explainer (current brief content_type 'explainer') is a render
+    candidate without a capture and may register a capture-less render; any
+    other script format still requires a redaction-reviewed capture."""
+    marker = uuid.uuid4().hex
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": f"Explainer {marker}", "category": "research_intro",
+        "offer_type": "trend_topic",
+    }).json()
+    offer_id = uuid.UUID(offer["id"])
+    markdown = f"# Explainer {marker}\n\nWhat the paper reports, with sources."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language, format) "
+         "VALUES ($1, 1, $2, 'en', 'official_explainer')", offer_id, markdown)
+    _run("UPDATE offers SET state = 'verified' WHERE id = $1", offer_id)
+
+    # Not yet an explainer brief → not a capture-less candidate.
+    before = auth_client.get("/render-candidates", headers=SVC).json()
+    assert not [c for c in before if c["offer_id"] == offer["id"]]
+
+    brief = auth_client.post(f"/offers/{offer['id']}/research", headers=AUTH, json={
+        "content_type": "explainer", "viewer_question": "Does it hold up?",
+        "claims": [{"claim_text": "Recall improved by 12 percent.",
+                    "claim_class": "author_reported", "status": "supported"}],
+    })
+    assert brief.status_code == 201, brief.text
+    after = auth_client.get("/render-candidates", headers=SVC).json()
+    mine = [c for c in after if c["offer_id"] == offer["id"]]
+    assert mine and mine[0]["capture_id"] is None
+
+    registered = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": f"projects/{marker}/explainer.mp4", "script_version": 1,
+        "script_version_hash": script_version_hash(markdown),
+        "status": "qc_failed", "qc_status": "failed",
+        "qc_report": {"version": 1, "status": "failed", "errors": ["fixture"]},
+    })
+    assert registered.status_code == 201, registered.text
+
+    tutorial_md = f"# Tutorial {marker}\n\nSteps."
+    _run("INSERT INTO offer_scripts (offer_id, version, markdown, language, format) "
+         "VALUES ($1, 2, $2, 'en', 'tested_tutorial')", offer_id, tutorial_md)
+    refused = auth_client.post(f"/offers/{offer['id']}/renders", headers=SVC, json={
+        "preset": "landscape", "width": 1920, "height": 1080,
+        "video_path": f"projects/{marker}/tutorial.mp4", "script_version": 2,
+        "script_version_hash": script_version_hash(tutorial_md),
+        "status": "qc_failed", "qc_status": "failed",
+        "qc_report": {"version": 1, "status": "failed", "errors": ["fixture"]},
+    })
+    assert refused.status_code == 422, refused.text
+    assert "official_explainer" in refused.json()["detail"]
+
+
+def test_tiktok_options_and_consent_are_part_of_the_hashed_package(auth_client):
+    """G23 UX: the reviewed TikTok choices + who consented are stored in the
+    schedule metadata (inside the metadata hash); branded content cannot be
+    posted as private."""
+    marker = uuid.uuid4().hex
+    offer_id = _wpd_ready_offer(auth_client, marker)
+    branded_private = auth_client.post(f"/offers/{offer_id}/schedules", headers=AUTH, json={
+        "platform": "tiktok", "local_time": "2027-06-01T13:00:00+00:00",
+        "privacy": "private", "tiktok": {"brand_content": True, "consent": True}})
+    assert branded_private.status_code == 422, branded_private.text
+    assert "branded content" in branded_private.json()["detail"]
+
+    created = auth_client.post(f"/offers/{offer_id}/schedules", headers=AUTH, json={
+        "platform": "tiktok", "local_time": "2027-06-02T13:00:00+00:00",
+        "privacy": "private",
+        "tiktok": {"consent": True, "disable_duet": True, "creator_username": "mtk"}})
+    assert created.status_code == 201, created.text
+    row = _run("SELECT metadata::text AS m FROM schedules WHERE id = $1",
+               uuid.UUID(created.json()["id"]))[0]
+    tiktok = json.loads(row["m"])["tiktok"]
+    assert tiktok["consent"] is True and tiktok["disable_duet"] is True
+    assert tiktok["consent_by"], "the consenting reviewer is recorded"
+
+
+def _explainer_offer(auth_client, marker):
+    offer = auth_client.post("/offers", headers=SVC, json={
+        "provider": f"Storyboard {marker}", "category": "research_intro",
+        "offer_type": "trend_topic",
+    })
+    assert offer.status_code == 201, offer.text
+    offer_id = offer.json()["id"]
+    brief = auth_client.post(f"/offers/{offer_id}/research", headers=AUTH, json={
+        "content_type": "explainer", "viewer_question": "Does it hold up?",
+        "claims": [
+            {"claim_text": "Recall improved by 12 percent.",
+             "claim_class": "author_reported", "status": "supported"},
+            {"claim_text": "It replaces sleep entirely.",
+             "claim_class": "editorial_analysis", "status": "contradicted"},
+        ],
+    })
+    assert brief.status_code == 201, brief.text
+    return offer_id, [c["id"] for c in brief.json()["claims"]]
+
+
+def test_storyboard_is_versioned_derived_from_the_ledger_and_human_only(auth_client):
+    """V7: the editor saves scene SELECTION/ORDER; claim text is always the
+    ledger's; contradicted claims are refused; concurrent edits conflict."""
+    offer_id, (supported, contradicted) = _explainer_offer(auth_client, uuid.uuid4().hex)
+
+    board = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()
+    assert board["current"] is None
+    kinds = [s["kind"] for s in board["suggested"]]
+    assert kinds == ["title", "claim", "close"], "the contradicted claim is not suggested"
+
+    machine = auth_client.post(f"/offers/{offer_id}/storyboard", headers=SVC, json={
+        "scenes": board["suggested"]})
+    assert machine.status_code == 403
+
+    refused = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": [{"kind": "claim", "claim_ids": [contradicted]}]})
+    assert refused.status_code == 422
+    assert "contradicted" in str(refused.json()["detail"])
+
+    rewritten = [{"kind": "close", "heading": "Sources", "weight": 2},
+                 {"kind": "claim", "claim_ids": [supported], "body": "It is PROVEN!"}]
+    saved = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten})
+    assert saved.status_code == 201, saved.text
+    body = saved.json()
+    assert body["version"] == 1 and len(body["sha256"]) == 64
+    assert [s["kind"] for s in body["scenes"]] == ["close", "claim"], "order kept"
+    assert body["scenes"][1]["body"] == "Recall improved by 12 percent."
+
+    stale = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten, "expected_version": 0})
+    assert stale.status_code == 409, "an editor that started before v1 must reload"
+    second = auth_client.post(f"/offers/{offer_id}/storyboard", headers=AUTH, json={
+        "scenes": rewritten, "expected_version": 1})
+    assert second.status_code == 201 and second.json()["version"] == 2
+
+    current = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()["current"]
+    assert current["version"] == 2
+
+
+def test_page_capture_requests_filter_unsafe_urls_and_record_results(auth_client):
+    """M2: only https public URLs are queued (a page_capture job is armed);
+    results are written once; screenshots stream only for ok captures."""
+    offer_id, _ = _explainer_offer(auth_client, uuid.uuid4().hex)
+    denied = auth_client.post(f"/offers/{offer_id}/page-captures/request", headers=SVC,
+                              json={"urls": ["https://example.org/paper"]})
+    assert denied.status_code == 403
+
+    asked = auth_client.post(f"/offers/{offer_id}/page-captures/request", headers=AUTH, json={
+        "urls": ["https://example.org/paper", "http://example.org/insecure",
+                 "https://user:pw@example.org/", "https://127.0.0.1/admin",
+                 "https://example.org/paper"]})
+    assert asked.status_code == 202, asked.text
+    queued, refused = asked.json()["queued"], asked.json()["refused"]
+    assert len(queued) == 1, "duplicates collapse; unsafe URLs never queue"
+    assert len(refused) == 3
+    jobs = _run("SELECT count(*) AS n FROM jobs WHERE kind = 'page_capture' AND entity_id = $1",
+                uuid.UUID(offer_id))
+    assert jobs[0]["n"] == 1
+
+    capture_id = queued[0]
+    incomplete = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
+                                  json={"status": "ok"})
+    assert incomplete.status_code == 422, "ok needs the image ref + sha256"
+    for hostile in ("/app/.env", "../services/api/.env", "local://pages/other/x.png",
+                    f"local://pages/{offer_id}/{capture_id}.png/../../secret"):
+        bad = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC, json={
+            "status": "ok", "image_ref": hostile, "image_sha256": "a" * 64})
+        assert bad.status_code == 422, hostile
+    done = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC, json={
+        "status": "ok", "final_url": "https://example.org/paper", "title": "Paper",
+        "image_ref": f"local://pages/{offer_id}/{capture_id}.png",
+        "image_sha256": "a" * 64, "http_status": 200})
+    assert done.status_code == 200, done.text
+    again = auth_client.post(f"/page-captures/{capture_id}/result", headers=SVC,
+                             json={"status": "failed"})
+    assert again.status_code == 409, "a recorded result is never overwritten"
+
+    listed = auth_client.get(f"/offers/{offer_id}/page-captures", headers=SVC).json()
+    assert listed[0]["status"] == "ok" and "image_ref" not in listed[0]
+    board = auth_client.get(f"/offers/{offer_id}/storyboard", headers=SVC).json()
+    assert [s["kind"] for s in board["suggested"]][:2] == ["title", "page"]

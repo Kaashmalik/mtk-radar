@@ -62,7 +62,7 @@ export default function CorrectionForm({ offerId }: { offerId: string }) {
         <button type="submit" disabled={busy || note.trim().length < 3}>
           {busy ? "Recording…" : "Record correction"}
         </button>
-        {error && <span className="small" style={{ color: "#f85149" }}>{error}</span>}
+        {error && <span className="small" style={{ color: "var(--danger)" }}>{error}</span>}
       </div>
     </form>
   );

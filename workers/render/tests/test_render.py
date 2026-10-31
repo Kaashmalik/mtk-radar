@@ -4,7 +4,7 @@ import pytest
 
 from presets import PRESETS, get_preset
 from project import build_edit_manifest, write_preset_captions
-from render import build_ffmpeg_cmd, describe, resolve_timeline
+from render import Loudness, build_ffmpeg_cmd, describe, resolve_timeline
 
 
 class TestPresets:
@@ -93,6 +93,45 @@ class TestFfmpegCommand:
         assert cmd[cmd.index("-map", cmd.index("-map") + 1) + 1] == "0:a?"
         assert "-shortest" not in cmd
         assert "-t" not in cmd
+
+
+class TestDeliveryFlags:
+    @pytest.mark.parametrize("key", ["landscape", "vertical"])
+    def test_full_hd_delivery_is_explicit(self, key):
+        cmd = build_ffmpeg_cmd("capture.mp4", "out.mp4", get_preset(key))
+
+        def arg(flag):
+            return cmd[cmd.index(flag) + 1]
+
+        assert arg("-pix_fmt") == "yuv420p"
+        assert arg("-profile:v") == "high"
+        assert arg("-g") == "60", "2-second GOP at 30 fps"
+        assert arg("-colorspace") == "bt709"
+        assert arg("-ar") == "48000" and arg("-ac") == "2"
+        assert int(arg("-crf")) <= 18
+        assert int(arg("-maxrate").rstrip("k")) >= 8000, "≥ YouTube 1080p SDR guidance"
+        assert cmd[-1] == "out.mp4", "output stays the final argument"
+
+    def test_audio_is_normalized_to_the_qc_target(self):
+        cmd = build_ffmpeg_cmd(
+            "capture.mp4", "out.mp4", get_preset("landscape"),
+            narration="assets/narration.mp3", duration=10.0,
+            loudness=Loudness(target_lufs=-14.0, max_true_peak=-1.0),
+        )
+        af = cmd[cmd.index("-af") + 1]
+        assert af.startswith("loudnorm=I=-14:TP=-1.5:LRA=11")
+        assert af.endswith("aresample=48000"), "loudnorm upsamples to 192 kHz"
+
+    def test_vertical_normalizes_audio_outside_the_video_graph(self):
+        cmd = build_ffmpeg_cmd("capture.mp4", "out.mp4", get_preset("vertical"))
+        assert "loudnorm" not in cmd[cmd.index("-filter_complex") + 1]
+        assert "loudnorm" in cmd[cmd.index("-af") + 1]
+
+    def test_loudness_can_be_disabled(self):
+        cmd = build_ffmpeg_cmd(
+            "capture.mp4", "out.mp4", get_preset("landscape"), loudness=None
+        )
+        assert "-af" not in cmd
 
 
 class TestTimeline:

@@ -30,9 +30,9 @@ type Source = {
 };
 
 const TIER_COLORS: Record<string, string> = {
-  A_provider_owned: "#3fb950",
-  B_discovery_lead: "#d29922",
-  C_excluded: "#f85149",
+  A_provider_owned: "var(--ok)",
+  B_discovery_lead: "var(--warn)",
+  C_excluded: "var(--danger)",
 };
 
 export default async function SourcesPage() {
@@ -113,7 +113,7 @@ export default async function SourcesPage() {
                         ) : null}
                       </td>
                       <td>
-                        <span style={{ color: TIER_COLORS[s.trust_tier] ?? "#8b949e" }}>
+                        <span style={{ color: TIER_COLORS[s.trust_tier] ?? "var(--text-muted)" }}>
                           {s.trust_tier.replace(/^[ABC]_/, "")}
                         </span>
                       </td>
@@ -126,7 +126,7 @@ export default async function SourcesPage() {
                           : "never"}
                       </td>
                       <td>
-                        <span style={{ color: s.enabled ? "#3fb950" : "#8b949e" }}>
+                        <span style={{ color: s.enabled ? "var(--ok)" : "var(--text-muted)" }}>
                           {s.enabled ? "enabled" : "disabled"}
                         </span>
                       </td>

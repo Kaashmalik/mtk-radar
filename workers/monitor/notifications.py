@@ -11,6 +11,12 @@ an error — the monitor continues to log exactly as before.
 
 The payload is deliberately small and contains no credentials. Alert details
 must already be redacted by the caller.
+
+Durability (EP-07): a channel that fails is spooled to a durable outbox
+(packages/outbox) keyed by channel + alert fingerprint and replayed on the
+next monitor tick with backoff, so a transient alert raised while the
+webhook/mail server is down is still delivered. Every digest carries a
+`delivery_id`; webhooks receive it as `Idempotency-Key` to drop replays.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import smtplib
 import socket
 import ssl
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -202,6 +209,7 @@ def build_payload(
         "severity": _severity(items),
         "alert_count": len(items),
         "dashboard_url": base or None,
+        "delivery_id": uuid.uuid4().hex,
         "alerts": items,
     }
 
@@ -223,6 +231,9 @@ def send_webhook(
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if payload.get("delivery_id"):
+        # Receivers deduplicate outbox replays of the same digest.
+        headers["Idempotency-Key"] = str(payload["delivery_id"])
     try:
         response = http.post(url, json=payload, headers=headers, timeout=timeout_s)
         response.raise_for_status()
@@ -415,6 +426,9 @@ def notify(
         for channel in ("webhook", "email")
         if result.get(channel) != "not_configured"
     ]
+    for channel in configured:
+        if result.get(channel) == "failed":
+            _spool(channel, fingerprint, payload)
     if configured and all(result.get(channel) == "sent" for channel in configured):
         _LAST_SENT[fingerprint] = time.monotonic()
         if len(_LAST_SENT) > 128:
@@ -422,3 +436,57 @@ def notify(
             oldest = min(_LAST_SENT, key=_LAST_SENT.get)
             _LAST_SENT.pop(oldest, None)
     return result
+
+
+# ------------------------------------------------------- durable outbox (EP-07)
+
+def _outbox():
+    from outbox import FileOutbox
+    return FileOutbox("notifications", max_pending=500, max_attempts=48,
+                      base_backoff_s=60.0, max_backoff_s=3600.0)
+
+
+def _spool(channel: str, fingerprint: str, payload: Mapping[str, Any]) -> None:
+    """Keep a failed digest for replay. One entry per channel + alert set:
+    a persistent outage does not pile up a copy every tick."""
+    try:
+        _outbox().put(f"{channel}-{fingerprint[:32]}",
+                      {"channel": channel, "payload": dict(payload)})
+    except (OSError, ImportError) as exc:
+        log.error("notification outbox unavailable (%s) — digest not kept", exc)
+
+
+def flush_outbox(
+    *,
+    config: NotificationConfig | None = None,
+    webhook_client: httpx.Client | None = None,
+    smtp_factory: Callable[..., Any] | None = None,
+    limit: int = 20,
+) -> dict[str, int]:
+    """Replay spooled digests through the channel they failed on."""
+    cfg = config or NotificationConfig.from_env()
+
+    def send(record: Any) -> bool | None:
+        if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
+            return None
+        channel, payload = record.get("channel"), record["payload"]
+        if channel == "webhook":
+            if not cfg.webhook_enabled:
+                return None  # channel removed since: nothing to deliver to
+            return send_webhook(cfg.webhook_url, payload, token=cfg.webhook_token,
+                                timeout_s=cfg.timeout_s, client=webhook_client)
+        if channel == "email":
+            if not cfg.email_enabled:
+                return None
+            return send_email(cfg, payload, smtp_factory=smtp_factory)
+        return None
+
+    try:
+        stats = _outbox().flush(send, limit=limit)
+    except (OSError, ImportError) as exc:
+        log.error("notification outbox unavailable: %s", exc)
+        return {"sent": 0, "retry": 0, "dead": 0}
+    if any(stats.values()):
+        log.info("notification outbox replay: %s", stats)
+    return stats
+

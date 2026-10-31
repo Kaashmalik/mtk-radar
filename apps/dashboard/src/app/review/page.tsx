@@ -56,12 +56,12 @@ async function getStale(): Promise<StaleRow[]> {
 }
 
 const STATE_COLORS: Record<string, string> = {
-  candidate: "#8b949e",
-  evidence_needed: "#d29922",
-  verified: "#3fb950",
-  approved_for_video: "#58a6ff",
+  candidate: "var(--text-muted)",
+  evidence_needed: "var(--warn)",
+  verified: "var(--ok)",
+  approved_for_video: "var(--accent)",
   published: "#bc8cff",
-  expired: "#f85149",
+  expired: "var(--danger)",
   corrected: "#f0883e",
 };
 
@@ -126,8 +126,8 @@ export default async function ReviewPage() {
                     className="badge"
                     style={{
                       background: "transparent",
-                      color: STATE_COLORS[offer.state] ?? "#8b949e",
-                      borderColor: STATE_COLORS[offer.state] ?? "#8b949e",
+                      color: STATE_COLORS[offer.state] ?? "var(--text-muted)",
+                      borderColor: STATE_COLORS[offer.state] ?? "var(--text-muted)",
                     }}
                   >
                     {offer.state}

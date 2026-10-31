@@ -68,3 +68,23 @@
           color: var(--accent);
           text-decoration: none;
         }
+
+/* Review & queue (G20): every pending package visible before one decision. */
+.review-list { display: grid; gap: 0.45rem; margin: 0.4rem 0 0.9rem; }
+.review-item {
+  display: flex; gap: 0.7rem; align-items: flex-start; padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius);
+  cursor: pointer; transition: border-color var(--speed) ease, background-color var(--speed) ease;
+}
+.review-item:hover { border-color: var(--border); }
+.review-item[data-selected] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.review-item input { margin-top: 0.2rem; }
+.review-item-main { display: grid; gap: 0.35rem; min-width: 0; flex: 1; }
+.review-item-title { display: flex; gap: 0.5rem; align-items: baseline; min-width: 0; }
+.review-item-title strong { text-transform: capitalize; }
+.review-outcome { margin: 0; color: var(--danger); }
+.review-outcome[data-ok] { color: var(--ok); }
+.schedule-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }

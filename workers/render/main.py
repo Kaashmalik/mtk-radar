@@ -45,6 +45,8 @@ from api_paging import iter_pages  # noqa: E402
 
 import captions as captions_mod  # noqa: E402
 import covers as covers_mod  # noqa: E402
+import explainer as explainer_mod  # noqa: E402
+import reframe as reframe_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
 import narration as narration_mod  # noqa: E402
 import project as project_mod  # noqa: E402
@@ -58,7 +60,7 @@ from object_storage import (  # noqa: E402
     render_key,
 )
 from presets import get_preset  # noqa: E402
-from worker_heartbeat import WorkerHeartbeat  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, lease_holder  # noqa: E402
 
 API_URL_DEFAULT = "http://localhost:8000"
 VIDEO_STATES = ("verified", "approved_for_video", "published")
@@ -264,6 +266,151 @@ class RenderJob:
             pass
         return str(offer.get("redemption_url") or "")
 
+    def _explainer_brief(self) -> dict | None:
+        """The current research brief when this offer is an explainer (M3)."""
+        try:
+            research = self._get(f"/offers/{self.offer_id}/research")
+        except Exception:  # noqa: BLE001 — older API / unreachable: no explainer
+            return None
+        return explainer_mod.eligible_brief(research)
+
+    def _storyboard_inputs(self) -> dict:
+        """Saved storyboard + page captures from the API.
+
+        Only an API WITHOUT the storyboard route (404) may fall back to the
+        suggested scenes. Any other failure stops the render: drawing the
+        suggestion instead of the reviewer's saved storyboard would publish
+        scenes nobody approved. The job is retried and surfaces in attention.
+        """
+        resp = self.api.get(f"/offers/{self.offer_id}/storyboard")
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+        board = resp.json()
+        if not isinstance(board, dict):
+            raise RuntimeError("storyboard API returned an unexpected payload")
+        return board
+
+    def _fetch_page_image(self, capture: dict) -> str | None:
+        """Download a page screenshot via the API and verify its sha256."""
+        import hashlib
+
+        rel = f"assets/explainer/pages/{capture['id']}.png"
+        try:
+            resp = self.api.get(f"/page-captures/{capture['id']}/image")
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("page capture %s unavailable: %s", capture["id"], exc)
+            return None
+        if hashlib.sha256(resp.content).hexdigest() != capture.get("image_sha256"):
+            log.warning("page capture %s failed its sha256 check — scene dropped", capture["id"])
+            return None
+        path = self.project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(resp.content)
+        return rel
+
+    def _build_explainer_base(self, offer: dict, brief: dict,
+                              narration_s: float | None) -> tuple[str, list[dict]]:
+        """Render the card base video + scene manifest into the project.
+
+        Scenes come from the reviewer-saved storyboard when one exists
+        (re-validated against TODAY's claim ledger), else the suggestion.
+        Page scenes use verified screenshots; anything that cannot be drawn
+        honestly is dropped before timing and listed in the manifest. The
+        base runs slightly past the speech so the timeline preflight
+        (capture must cover narration) holds without truncating anything.
+        """
+        sb = explainer_mod.storyboard
+        total = (narration_s + 0.6) if narration_s else None
+        board = self._storyboard_inputs()
+        pages = [p for p in board.get("page_captures") or [] if p.get("status") == "ok"]
+        current = board.get("current") or None
+        dropped: list[str] = []
+        if current:
+            saved_for = current.get("brief_id")
+            if saved_for and str(saved_for) != str(brief.get("id")):
+                # Claim ids belong to a brief version; re-validating an old
+                # storyboard against a new brief would drop every claim and
+                # render a near-empty explainer. A human must re-save.
+                raise RuntimeError(
+                    f"storyboard v{current.get('version')} was saved for an older "
+                    "research brief — open Studio → Storyboard, review and save it "
+                    "again before rendering")
+            scenes, dropped = sb.validate(current.get("scenes") or [], brief, pages)
+            version = current.get("version")
+        else:
+            scenes, version = sb.suggest(offer, brief, pages), None
+        images: dict[str, str] = {}
+        kept = []
+        for scene in scenes:
+            if scene["kind"] == "page" and scene.get("include", True):
+                capture = next((p for p in pages if str(p["id"]) == scene["page_capture_id"]), None)
+                rel = self._fetch_page_image(capture) if capture else None
+                if rel is None:
+                    dropped.append(f"page scene {scene['id']}: screenshot unavailable")
+                    continue
+                images[scene["id"]] = rel
+            kept.append(scene)
+        if dropped:
+            log.warning("storyboard: %d scene(s) dropped: %s", len(dropped), "; ".join(dropped))
+        scenes = sb.apply_timing(kept, total)
+        if not scenes:
+            raise RuntimeError("explainer has no drawable scenes — fix the storyboard")
+        out_dir = self.project / "assets" / "explainer"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        manifest = explainer_mod.scene_manifest(self.offer_id, brief, scenes,
+                                                storyboard_version=version, dropped=dropped)
+        (out_dir / "scene_manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        duration = scenes[-1]["end"]
+        page_layers = [(images[s["id"]], s["start"], s["end"])
+                       for s in scenes if s["id"] in images]
+        # One base per orientation: the vertical export gets natively
+        # composed 9:16 cards (see _video_for_preset), not a shrunken strip.
+        for orientation, suffix in (("landscape", ""), ("vertical", "-vertical")):
+            cards = f"assets/explainer/cards{suffix}.ass"
+            (self.project / cards).write_text(
+                explainer_mod.cards_ass(scenes, orientation), encoding="utf-8")
+            cmd = explainer_mod.base_video_cmd(
+                cards, f"assets/explainer/base{suffix}.mp4", duration, orientation,
+                pages=page_layers)
+            log.info("explainer %s base (%d scenes, storyboard %s, %.1fs, manifest %s) :: %s",
+                     orientation, len(scenes), f"v{version}" if version else "suggested",
+                     duration, manifest["sha256"][:12], render_mod.describe(cmd))
+            proc = render_mod.run(cmd, self.project)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"explainer base render failed: {(proc.stderr or '')[-600:]}")
+        return str(out_dir / "base.mp4"), scenes
+
+    def _reframed_vertical(self, preset, capture_video: str):
+        """The vertical preset with an activity-following crop, or unchanged."""
+        import dataclasses
+
+        crop = reframe_mod.crop_fraction()
+        keys = reframe_mod.analyse(capture_video, crop)
+        if not keys:
+            log.info("vertical reframe: activity signal too weak — full-frame composition")
+            return preset
+        (self.project / "assets").mkdir(parents=True, exist_ok=True)
+        (self.project / "assets" / "reframe-vertical.json").write_text(json.dumps({
+            "crop_fraction": crop,
+            "keyframes": [{"t": k.t, "center": k.center} for k in keys],
+        }, indent=2), encoding="utf-8")
+        log.info("vertical reframe: %d keyframes, crop %.0f%% of width", len(keys), crop * 100)
+        return dataclasses.replace(
+            preset, filter_chain=reframe_mod.vertical_focus_chain(keys, crop))
+
+    def _video_for_preset(self, video_rel: str, preset_key: str) -> str:
+        """The natively composed vertical explainer base when it exists."""
+        if preset_key == "vertical" and video_rel.replace("\\", "/").endswith(
+                "assets/explainer/base.mp4"):
+            vertical = self.project / "assets" / "explainer" / "base-vertical.mp4"
+            if vertical.exists():
+                return os.path.relpath(vertical, self.project)
+        return video_rel
+
     def run(self, capture_video: str | None, preset_keys: list[str],
             skip_narration: bool, capture_id: str | None = None,
             languages: tuple[str, ...] | None = None) -> None:
@@ -303,25 +450,32 @@ class RenderJob:
 
         if capture_video is None and capture:
             capture_video = capture.get("video_path")
+        explainer_brief = None
         if not capture_video:
-            raise SystemExit(
-                "no capture video — pass --video or record one first "
-                "(workers/capture/main.py)"
+            # M3: a research EXPLAINER needs no hands-on capture — its base
+            # video is built from the current brief after narration is known.
+            # Every other track still requires a real recording.
+            explainer_brief = self._explainer_brief()
+            if explainer_brief is None:
+                raise SystemExit(
+                    "no capture video — pass --video or record one first "
+                    "(workers/capture/main.py)"
+                )
+        if capture_video:
+            # v0.15: a managed ref (s3://, local://) is materialized into the
+            # project first; plain paths keep working on the host that has them.
+            if not isinstance(capture_video, str):  # defensive: asyncpg row value
+                capture_video = str(capture_video)
+            local_capture = materialize(
+                capture_video, self.project / "assets" / "captures"
             )
-        # v0.15: a managed ref (s3://, local://) is materialized into the
-        # project first; plain paths keep working on the host that has them.
-        if not isinstance(capture_video, str):  # defensive: asyncpg row value
-            capture_video = str(capture_video)
-        local_capture = materialize(
-            capture_video, self.project / "assets" / "captures"
-        )
-        if local_capture is not None:
-            capture_video = str(local_capture)
-        elif not Path(capture_video).exists():
-            raise SystemExit(
-                f"capture video unavailable on this host: {capture_video} — "
-                "configure MTK_STORAGE_* or pass --video with a local file"
-            )
+            if local_capture is not None:
+                capture_video = str(local_capture)
+            elif not Path(capture_video).exists():
+                raise SystemExit(
+                    f"capture video unavailable on this host: {capture_video} — "
+                    "configure MTK_STORAGE_* or pass --video with a local file"
+                )
 
         # optional TTS narration — synthetic narration must be disclosed (§5).
         # Synthesize BEFORE captions so we can align cues to the actual spoken
@@ -361,11 +515,23 @@ class RenderJob:
                         cursor += duration
                     aligned_captions = aligned or None
 
+        explainer_scenes: list[dict] = []
+        if explainer_brief is not None:
+            narration_s = (render_mod.probe_duration(str(self.project / narration_file))
+                           if narration_file else None)
+            capture_video, explainer_scenes = self._build_explainer_base(
+                offer, explainer_brief, narration_s)
+
         # Captions from narration timing when available; otherwise from the
         # step log (source-derived, deterministic) with the real step
         # timestamps, not a synthetic words-per-minute timeline.
         if aligned_captions:
             segments = aligned_captions
+        elif explainer_scenes:
+            # No speech timing: caption each card for its on-screen time.
+            segments = [{"text": f"{s['heading']}: {s.get('body', '')}".strip(": "),
+                         "start": s["start"], "duration": s["end"] - s["start"]}
+                        for s in explainer_scenes]
         else:
             step_log = json.loads(capture["step_log"]) if capture and isinstance(capture.get("step_log"), str) \
                 else (capture or {}).get("step_log") or []
@@ -420,6 +586,10 @@ class RenderJob:
         results = []
         for key in preset_keys:
             preset = get_preset(key)
+            if key == "vertical" and explainer_brief is None and reframe_mod.enabled():
+                # V5: follow on-screen activity instead of shrinking the whole
+                # 16:9 capture (falls back to full frame on a weak signal).
+                preset = self._reframed_vertical(preset, capture_video)
             # Pair each delivery frame with the cover designed for it. A 16:9
             # thumbnail on a 9:16 Reel/TikTok is the wrong asset.
             selected_cover = covers_mod.cover_for_preset(cover_bundle, preset.key)
@@ -454,11 +624,17 @@ class RenderJob:
                 template=self.motion_template,
             )
             cmd = render_mod.build_ffmpeg_cmd(
-                video_rel, output, preset,
+                self._video_for_preset(video_rel, preset.key), output, preset,
                 captions=captions_rel,
                 narration=narration_file,  # mixed track maps 1:a
                 motion=motion_filter,
                 duration=expected_duration if narration_file else None,
+                # Normalize to exactly what QC will measure, so a correct
+                # render is not rejected for loudness it was never given.
+                loudness=render_mod.Loudness(
+                    target_lufs=qc_config.target_lufs,
+                    max_true_peak=qc_config.max_true_peak,
+                ),
             )
             log.info("rendering %s/%s :: %s", language, preset.key,
                      render_mod.describe(cmd))
@@ -753,7 +929,9 @@ RENDER_LEASE_S = int(os.environ.get("MTK_RENDER_LEASE_S", "3600"))
 RENDER_LEASE_TOUCH_S = int(os.environ.get("MTK_RENDER_LEASE_TOUCH_S", "600"))
 
 
-def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event) -> None:
+def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event,
+                  holder: str = "render-worker",
+                  lost: threading.Event | None = None) -> None:
     """Renew the render job's lease while the encode runs (WP-G §5.6.6).
 
     A 4K encode can outlive the one-hour claim lease; without renewal the
@@ -761,12 +939,22 @@ def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event) -> N
     fight an in-flight render. The keeper extends the SAME holder's lease
     every RENDER_LEASE_TOUCH_S until the render finishes or the process dies
     (a dead process stops touching → the lease genuinely expires, as before).
+
+    A 409 means this process no longer holds the lease (expired and taken
+    over, or reset by an operator): `lost` is set so the caller does not
+    report an outcome for work it no longer owns.
     """
     while not stop.wait(RENDER_LEASE_TOUCH_S):
         try:
             resp = client.post(f"/jobs/{job_id}/touch",
-                               json={"worker": "render-worker",
+                               json={"worker": holder,
                                      "lease_s": RENDER_LEASE_S})
+            if resp.status_code == 409:
+                log.error("render job %s: lease lost (%s) — this render will not "
+                          "report an outcome", job_id, resp.text[:200])
+                if lost is not None:
+                    lost.set()
+                return
             if resp.status_code != 200:
                 log.warning("lease renewal for render job %s refused (%s)",
                             job_id, resp.status_code)
@@ -786,10 +974,11 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
         return set()
     by_key = {(c["offer_id"], c.get("language") or "en"): c for c in candidates}
     rendered_keys: set = set()
+    holder = lease_holder("render")
     for _ in range(50):  # bounded per sweep; results remove claimed jobs
         try:
             resp = client.post("/jobs/claim", json={
-                "worker": "render-worker", "lease_s": 3600,
+                "worker": holder, "lease_s": RENDER_LEASE_S,
                 "kinds": ["render_package"]})
         except httpx.HTTPError:
             return rendered_keys
@@ -814,32 +1003,41 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
             # rendered meanwhile / offer state moved on / script superseded:
             # the derived list no longer owes this render.
             _job_result(client, job_id, ok=True,
-                        detail="no longer a render candidate — nothing owed")
+                        detail="no longer a render candidate — nothing owed",
+                        worker=holder)
             continue
-        keeper_stop = threading.Event()
+        keeper_stop, lease_lost = threading.Event(), threading.Event()
         keeper = threading.Thread(
-            target=_lease_keeper, args=(client, str(job_id), keeper_stop),
+            target=_lease_keeper,
+            args=(client, str(job_id), keeper_stop, holder, lease_lost),
             name=f"lease-keeper-{str(job_id)[:8]}", daemon=True)
         keeper.start()
         try:
             _render_candidate(api_url, out_root, skip_narration, motion_template,
                               candidate, preset_keys)
-            _job_result(client, job_id, ok=True, detail="rendered")
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=True, detail="rendered", worker=holder)
             rendered_keys.add((offer_id, language))
         except SystemExit as exc:
-            _job_result(client, job_id, ok=True, detail=f"skipped: {exc}")
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=True, detail=f"skipped: {exc}",
+                            worker=holder)
         except Exception as exc:  # noqa: BLE001 — one candidate never stops the drain
             log.exception("render job %s failed for offer %s", job_id, offer_id)
-            _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
-                        retry_after_s=300)
+            if not lease_lost.is_set():
+                _job_result(client, job_id, ok=False, detail=f"render failed: {exc}",
+                            retry_after_s=300, worker=holder)
         finally:
             keeper_stop.set()
     return rendered_keys
 
 
 def _job_result(client: httpx.Client, job_id: str, *, ok: bool,
-                detail: str | None = None, retry_after_s: int | None = None) -> None:
+                detail: str | None = None, retry_after_s: int | None = None,
+                worker: str | None = None) -> None:
     payload: dict = {"ok": ok}
+    if worker:
+        payload["worker"] = worker  # lease fencing: only the holder settles
     if detail:
         payload["detail"] = detail[:1900]
     if retry_after_s is not None:

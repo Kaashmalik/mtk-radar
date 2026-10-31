@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from worker_heartbeat import WorkerHeartbeat, heartbeat_once  # noqa: E402
+from worker_heartbeat import WorkerHeartbeat, heartbeat_once, lease_holder  # noqa: E402
 
 
 def test_payload_is_operational_only_and_names_worker():
@@ -33,3 +33,14 @@ def test_heartbeat_is_best_effort_when_api_is_down():
 
 def test_once_helper_does_not_raise_when_unreachable():
     assert heartbeat_once("http://127.0.0.1:1", "metrics") is False
+
+
+def test_lease_holder_is_unique_per_process_and_bounded():
+    import os
+
+    holder = lease_holder("render")
+    assert holder.startswith("render-") and holder.endswith(f"-{os.getpid()}")
+    assert lease_holder("render") == holder, "stable within one process"
+    assert lease_holder("publishing") != holder
+    assert len(lease_holder("x" * 200)) == 120
+
