@@ -17,6 +17,10 @@ still planned.
 
 - [Runbook](runbook.md)
 - [Go-live checklist](go-live-checklist.md)
+- [Production-readiness gate list (2026-11-01)](production-readiness-2026-11-01.md) —
+  what the production-readiness review marked done, which execution proofs
+  remain owed (PROOF-04/05/06), and the interim evidence convention while CI
+  is billing-locked.
 - [Production queue](production-queue.md)
 - [Notifications](notifications.md)
 - [Render QC](render-qc.md)

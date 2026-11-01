@@ -55,6 +55,9 @@ The base compose file is now deployment-shaped:
 - PostgreSQL, Redis and MinIO are **not published to the host**; only the
   dashboard (`3000`) is exposed and the API binds to `127.0.0.1:8000` for a
   local reverse proxy. Nothing else on the network can reach the database.
+  (2026-11-01 pass: the dashboard publish is loopback-only as well — public
+  ingress goes through the `tunnel` profile or a reverse proxy; see the
+  hardening section below.)
 - Media lives on explicit named volumes (`storage-data`, `render-projects`,
   `storage-cache`) — `docker compose down` keeps them; `down -v` destroys them.
 - The dashboard has a `/api/health` liveness probe; the API `/health` probe
@@ -70,6 +73,44 @@ docker compose -f infra/docker/docker-compose.yml \
 
 Never use the dev override on a reachable host: it republishes the database
 and cache ports.
+
+### Deploy hardening — env file, startup guard, public-HTTPS path (2026-11-01 pass)
+
+The 2026-11-01 production-readiness pass hardened the deploy surface itself:
+
+- **Env-file wiring.** Deploy invocations read the deployment environment
+  from `infra/.env` (`docker compose --env-file infra/.env …` — the usage
+  the compose file's header documents), so the stack boots with exactly the
+  secrets `scripts/deploy.sh` generates — never with whatever happens to
+  sit in a root `.env`, and never with a missing variable papered over by a
+  dev default. `POSTGRES_PASSWORD` is required: the compose file fails fast
+  if it is unset rather than silently starting with the dev password.
+- **API startup guard.** The API refuses to run unauthenticated outside
+  dev-open mode unless `MTK_ALLOW_UNAUTHENTICATED=1` is set explicitly and
+  on purpose — a deployment that forgot its tokens fails at boot instead of
+  serving open on a reachable host.
+- **Public HTTPS via cloudflared tunnel (profile `tunnel`).** For a
+  laptop/VPS without its own TLS termination,
+  `docker compose -f infra/docker/docker-compose.yml --profile tunnel up -d`
+  starts a cloudflared sidecar that fronts **only the dashboard**; set
+  `MTK_TUNNEL_TOKEN` (the tunnel's connector token) in `infra/.env` — the
+  compose profile refuses to start without it. Both publishes in the
+  production file are loopback-only (API `127.0.0.1:8000`, dashboard
+  `127.0.0.1:3000`); the tunnel is container-to-container, so public ingress
+  needs no host port at all (a host-side reverse proxy such as Caddy is the
+  documented local alternative). Setup notes for both paths:
+  `infra/proxy/README.md`.
+- **Backup verification (re-check after every deploy).** Confirm the nightly
+  backup and the monthly drill are armed (§2): the drill restores the newest
+  dump into a throwaway database and compares row counts — a red drill unit
+  means the backups are unusable, not merely "unverified". Re-run the drill
+  before resuming schedules after a major upgrade.
+
+Version labels vs. tagged releases: this runbook's inline labels (v0.30,
+v0.31, …) name the feature batch that landed the described behavior, while
+`package.json` still says `0.30.0`. On-tree features are intentionally ahead
+of the tagged version until the next release is cut — a label like "v0.31"
+is not evidence that a tagged release exists.
 
 ### Laptop-first start, heartbeats and the Start button (v0.30)
 

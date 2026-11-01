@@ -354,3 +354,42 @@ themes with no page errors.
 **Not executed here:** Postgres integration tests for migration 044, a real
 Chromium page capture, and an FFmpeg render with page overlays.
 
+## 2026-11-01 — production-readiness pass
+
+A five-way review re-checked every gap-audit item at file level. The verdict:
+**fixed in code, execution still to prove.** Also on this date the repository
+history was purged and force-pushed (the 2026-10-12 contact/location archive
+noted under EP-01 was removed from history; see the incident log in
+[`security-and-redaction.md`](security-and-redaction.md)) — the earlier note
+that it "remains retrievable from git history" is resolved by that rewrite.
+
+| Work (2026-11-01 fix set) | Knob / evidence |
+|---|---|
+| Compose env-file wiring: `docker compose --env-file infra/.env …`; `POSTGRES_PASSWORD` required — the compose file fails fast if unset, and `scripts/deploy.sh` mints the value into `infra/.env` | `POSTGRES_PASSWORD` |
+| API startup guard: refuses to run unauthenticated outside dev-open mode | `MTK_ALLOW_UNAUTHENTICATED=1` (explicit opt-in) |
+| cloudflared `tunnel` compose profile (dashboard-only public HTTPS; API stays loopback) + proxy docs in `infra/proxy/` | `MTK_TUNNEL_TOKEN` |
+| FFmpeg encode timeout + lease cap; render worker SIGTERM handling | `MTK_RENDER_ENCODE_TIMEOUT_S` (+ `MTK_RENDER_LEASE_S`) |
+| Legacy media-path confinement (no arbitrary host-file reads via legacy rows) | `MTK_STORAGE_BACKEND` / `MTK_STORAGE_LOCAL_ROOT` |
+| Request size/rate middleware (bounded bodies; v0.33 auth brute-force throttle retained) | middleware-enforced |
+| Automation-actor attribution (`automation:<stage>` / `system:` only for non-human callers) | `api_hardening.py` credential matrix |
+| Publishing/collector `ValueError` guards → actionable failed states, never a crashed sweep loop | job/post outcome + `audit_log` |
+| TikTok ≤64 MiB single-chunk cap refused up front with an actionable message (no chunked upload yet — export a shorter/split edit) | `MAX_SINGLE_CHUNK_BYTES` |
+| Dashboard standalone output + `/api/health` liveness probe | `output: "standalone"` (`apps/dashboard/next.config.ts`) |
+| Extension terminal-failure cap (visible abandonment, no infinite retry) | `MAX_ATTEMPTS = 5` (`apps/extension/core.js`) |
+
+**Checks executed for this pass:** the review was a read-through at file
+level (grep-verified guards and knobs); it did not re-run the suite. The
+latest full local run remains the 2026-10-25 evidence
+([`evidence/verify-pnpm-2026-10-25.log`](evidence/verify-pnpm-2026-10-25.log)).
+
+**Still unproven (execution proof owed):** a full `pnpm verify` re-run after
+this pass; migrations 041→044 on a real database; PROOF-04 (CI — Actions
+billing lock persists, nothing here claims CI is fixed), PROOF-05 (live
+private/test post per provider, needs owner OAuth keys), PROOF-06 (dated
+real-render QC artifact). Interim evidence convention while CI is blocked:
+timestamp the `pnpm verify` output of each pass and commit it under
+[`evidence/`](evidence). Owner cleanup: delete the pre-rewrite backup bundle
+(`mtk-radar-pre-rewrite.bundle`) after verifying the rewritten history. The
+gate list lives in
+[`production-readiness-2026-11-01.md`](production-readiness-2026-11-01.md).
+

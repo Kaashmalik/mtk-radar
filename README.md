@@ -126,7 +126,9 @@ workers/collectors/        # Source collection jobs (RSS, GitHub, page watch +
                            # Google Trends — Tier-B leads for the radar)
 workers/verification/      # Extraction & evidence jobs
 workers/batch/             # Script generation + pipeline readiness
-workers/capture/           # Playwright capture session (human-operated)
+workers/capture/           # Playwright capture session (human-operated) +
+                           # sandboxed page_capture worker (storyboard scene
+                           # shots; compose service `page-capture`)
 workers/render/            # FFmpeg renders, captions, narration, handoff
 workers/video/             # Alias for workers/render (master plan §12 layout)
 workers/publishing/        # Platform upload jobs (+ platform adapters)
@@ -138,6 +140,7 @@ packages/object_storage/   # S3-compatible storage driver (httpx + SigV4)
 apps/extension/            # Save-current-page extension (Manifest V3)
 infra/docker/              # Docker Compose dev environment (api, dashboard, workers)
 infra/systemd/             # Backup + restore-drill timers
+scripts/deploy.sh          # One-command host deploy (secrets + build + boot + smoke)
 scripts/verify.sh          # One-command verification (same steps as CI)
 docs/                      # Master plan, runbook, go-live checklist, notices
 ```
@@ -145,15 +148,45 @@ docs/                      # Master plan, runbook, go-live checklist, notices
 ## Quick Start
 
 ```bash
-cp .env.example .env                  # never commit the real .env
-docker compose -f infra/docker/docker-compose.yml up -d --build \
+bash scripts/deploy.sh --with-workers          # one command: secrets + build + boot + smoke check
+# optional S3-compatible storage alongside workers:
+bash scripts/deploy.sh --with-workers --with-storage
+```
+
+`scripts/deploy.sh` is the supported path onto a fresh host: on first run it
+generates `infra/.env` with strong random secrets (never committed — `.*env*`
+is gitignored), builds the immutable API/dashboard/worker images, starts the
+stack (postgres, redis, migrations, API, dashboard, and — with the flags
+above — every worker plus MinIO storage), waits for health and runs a
+connected smoke check (authenticated API probe + dashboard `/api/health`).
+Re-running the same command after `git pull` upgrades in place (migrations
+apply only new files; volumes persist).
+
+For **any deployment beyond localhost** the stack must boot with the required
+environment variables set — `POSTGRES_PASSWORD` is fail-closed (the compose
+file refuses to run until it is set; `scripts/deploy.sh` mints one
+automatically), plus the service credentials `MTK_API_TOKEN`,
+`MTK_WORKER_TOKEN` and the dashboard's `MTK_SESSION_SECRET`; every knob is
+documented in [`.env.example`](.env.example) and
+[`docs/go-live-checklist.md`](docs/go-live-checklist.md) §2 lists how to
+mint each. The dev path below is only for local development:
+
+```bash
+cp .env.example .env                  # never commit the real .env; then
+                                      # uncomment POSTGRES_PASSWORD and mirror
+                                      # it in DATABASE_URL (compose aborts
+                                      # without it — see .env.example)
+docker compose --env-file .env -f infra/docker/docker-compose.yml up -d --build \
   --profile workers --profile storage  # postgres + redis + api + dashboard + workers
-docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
+docker compose --env-file .env -f infra/docker/docker-compose.yml exec api python db_migrate.py
 ```
 
 The base compose file builds immutable API/dashboard/worker images and keeps
-PostgreSQL, Redis and MinIO off the host network. For host-side hot reload and
-published development ports use
+PostgreSQL, Redis and MinIO off the host network; the API and the dashboard
+both bind to the loopback interface in production (the browser talks to the
+backend through the dashboard proxy; public HTTPS goes through the
+cloudflared `tunnel` profile; see [`infra/proxy/README.md`](infra/proxy/README.md)
+for both paths). For host-side hot reload and published development ports use
 `-f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml`.
 
 - Dashboard (operator console): http://localhost:3000 · API health: http://localhost:8000/health
@@ -258,6 +291,7 @@ browser step.
 - [`docs/third-party-notices.md`](docs/third-party-notices.md) — pinned upstream dependencies, licenses, obligations, and the evaluated-but-not-adopted list.
 - [`docs/tool-stack-alignment-2026-10-23.md`](docs/tool-stack-alignment-2026-10-23.md) — **external tool-stack evaluation**: Perkstack, OBS, Descript, CapCut, Opus Clip, Metricool, Loomly, Runway, HeyGen mapped against the in-house pipeline, with adopt/skip decisions and guardrails.
 - [`docs/go-live-checklist.md`](docs/go-live-checklist.md) — **the operator procedure**: which keys to add, how to connect each social account, the first real post, and the daily/weekly operations.
+- [`docs/production-readiness-2026-11-01.md`](docs/production-readiness-2026-11-01.md) — **the 2026-11-01 go-live gate list**: what the production-readiness review marked done, which execution proofs are still owed (PROOF-04/05/06), and the interim evidence convention while CI stays billing-locked.
 - [`docs/master-plan-traceability.md`](docs/master-plan-traceability.md) — every master-plan item mapped to its code and its proof.
 - [`docs/upgrade-checklist.md`](docs/upgrade-checklist.md) — how a pinned dependency or image is upgraded safely.
 
@@ -270,31 +304,58 @@ browser step.
 | 2. Verification desk | Structured extraction, evidence snapshots, staleness rules | No unverified offer enters script generation | ✅ v0.7–v0.9 |
 | 3. Script & checklist | Claim guide, command cards, citations | Every factual claim traceable to evidence | ✅ v0.10 |
 | 4. Capture & video | Screen recording, redaction, captions, FFmpeg exports | One complete video package reproducible | ✅ v0.11–v0.14, v0.17 |
-| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 (handoff export; no timeline editor — WP10 planned) |
-| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ⚠️ v0.19 — adapters + mocked tests + fail-closed private smoke harness; live private/test posts unproven (needs keys) |
+| 5. Editing & schedule | Editor handoff, calendar, approval gates | Schedule pauses, retries, and exports safely | ✅ v0.15, v0.16, v0.23 + the 2026-10-28 EP-05 pass (handoff export **and** the in-Studio storyboard editor; no full timeline editor) |
+| 6. Publishing integrations | YouTube, Meta, Instagram, TikTok | Each connector passes private/test posting | ⚠️ v0.19 + EP-06 pass — adapters + per-platform scheduling + quota ledger + TikTok consent + mocked tests + fail-closed private smoke harness; live private/test posts unproven (needs owner keys) |
 | 7. Analytics & scale | Views, corrections, source freshness | Data improves packaging without weakening verification | ✅ v0.18, v0.22, v0.24 |
 | 8. Automation & control | Manual / assisted / autopilot policy per stage | Every gated write re-checks the policy; human stages cannot be bypassed | ✅ v0.26 |
 | 9. Production polish | Trend radar, bilingual studio, covers/motion, English-first packaging, growth analytics | English package + captions for every video; Urdu voiceover opt-in; verified render/schedule path | ✅ v0.27 |
 
-> **Status note (2026-10-28):** the ✅ marks above record the original v0.x
-> delivery, not production certification. Current open work — scene-based
-> video (EP-05), one-click reviewed scheduling (EP-06) and recovery/robustness
-> (EP-07) — is tracked in
+> **Status note (2026-11-01):** the ✅ marks above record the original v0.x
+> delivery, not production certification. The 2026-10-28 gap-audit work
+> packages are now implemented in the tree and verified at file level —
+> **EP-05** (opt-in ffmpeg capture, 12 Mbps 1080p presets, explicit
+> yuv420p/high-profile/BT.709/2 s-GOP delivery flags, loudness normalization
+> applied-then-verified by QC, opt-in vertical reframe, the in-Studio
+> storyboard editor + sandboxed page-capture worker, content-addressed
+> narration, font-measured caption QC), **EP-06** (approve-and-queue,
+> per-platform scheduling, TikTok creator_info consent, YouTube quota
+> ledger), and **EP-07** (lease heartbeat + fencing, per-account circuit
+> breakers, durable outbox, worker heartbeats). See
 > [`docs/enhancement-plan-2026-10-28-gap-audit.md`](docs/enhancement-plan-2026-10-28-gap-audit.md)
 > and [`docs/ep-implementation-log.md`](docs/ep-implementation-log.md).
-> To prove the latest pass on a fully set-up machine, follow
-> [`docs/verify-at-home-2026-10-28.md`](docs/verify-at-home-2026-10-28.md).
+> What remains open is **execution proof, not missing features** — the live
+> gate list is [`docs/production-readiness-2026-11-01.md`](docs/production-readiness-2026-11-01.md).
 
-Remaining, with reasons: SSO/self-serve logins (single-operator token model is
-sufficient — see runbook §9), Postgres HA (single instance at this scale),
-TikTok publishing (requires an approved developer app), the WP10 in-app light
-editor (handoff export exists; there is no timeline editor), EP-05–EP-07
-(evidence-to-video plan, still proposed), live private/test posting (needs
-provider keys and an approved clip), and GitHub Actions (currently blocked by
-the owner account's billing lock). The Postgres integration suite and the
-loaded-extension Chromium E2E now run locally; see the
-[evidence log](docs/evidence/verify-pnpm-2026-10-25.log). The ordered
-remediation plan is the [implementation roadmap](docs/implementation-roadmap-2026-10-25.md).
+Remaining, with reasons (2026-11-01 production-readiness review):
+
+- **Live private/test posts per provider** — adapters and the fail-closed smoke
+  harness exist, but no live post has been confirmed here; needs the owner's
+  OAuth keys (PROOF-05 in the [implementation roadmap](docs/implementation-roadmap-2026-10-25.md)).
+- **A dated real-render QC artifact** — measured QC runs in the suite, but the
+  ledger still lacks an artifact from a real encode (PROOF-06).
+- **A green CI run** — GitHub Actions remains blocked by the owner account's
+  billing lock (PROOF-04); nothing in this repo claims otherwise. Interim
+  convention: timestamped `pnpm verify` output committed under
+  [`docs/evidence/`](docs/evidence) (latest full run: the
+  [2026-10-25 evidence log](docs/evidence/verify-pnpm-2026-10-25.log)). A
+  full `pnpm verify` re-run after today's hardening pass is still owed.
+- **Migrations 041→044 on a real database** — the last full real-runner proof
+  (2026-10-25) applied 001→040; 041–044 (outbox, quota ledger, TikTok
+  capability, storyboard/page-capture) are unit-tested but not yet exercised
+  against a real database.
+- SSO/self-serve logins — the single-operator token model is sufficient at
+  this scale (runbook §9).
+- Postgres HA — a single instance remains the deliberate choice at this scale.
+- TikTok publishing — still requires an approved developer app (public posts
+  refuse until `TIKTOK_APP_AUDITED=1`); extension store packaging/CSP review
+  is likewise still open.
+- **Owner cleanup** — delete the pre-rewrite git backup bundle after verifying
+  the rewritten history (see the incident log in
+  [security-and-redaction.md](docs/security-and-redaction.md)).
+
+The ordered remediation plan is the [implementation roadmap](docs/implementation-roadmap-2026-10-25.md).
+To prove the latest pass on a fully set-up machine, follow
+[`docs/verify-at-home-2026-10-28.md`](docs/verify-at-home-2026-10-28.md).
 
 For the detailed twelve-week implementation sequence, see the [master plan](docs/master%20plan.md).
 
@@ -312,6 +373,13 @@ MTK RADAR catalogs offers as distinct types: free/open-weight models, hosted inf
 
 ## License
 
-Project license to be determined before first release. Third-party dependencies (n8n — Sustainable Use License, Postiz — AGPL-3.0, Remotion — commercial terms, etc.) are evaluated individually and recorded in `THIRD_PARTY_NOTICES`.
+This repository's code is released under the **MIT License** — see
+[`LICENSE`](LICENSE). Third-party dependencies keep their own licenses, and
+each integration (adopted or evaluated) is recorded individually with its
+license and obligations in
+[`docs/third-party-notices.md`](docs/third-party-notices.md); upstreams we
+evaluated but did **not** adopt (n8n — Sustainable Use License, Postiz —
+AGPL-3.0, Remotion — commercial terms, etc.) remain governed by their own
+licenses and are not part of this repo's distribution.
 
 > ⚠️ Program terms, platform APIs, and repository licenses change. Use this plan as the build blueprint; verify each live offer and integration at implementation time.

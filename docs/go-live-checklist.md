@@ -29,7 +29,7 @@ the database, never in the browser, never in git. The database only records
 
 | Area | How it is proven |
 | --- | --- |
-| API + DB | integration tests against real Postgres 16, migrations 001→040 applied by the real runner |
+| API + DB | integration tests against real Postgres 16; migration files 001→044 (enforced, numbered — `db_migrate.py` refuses gaps); the last full real-runner proof applied 001→040 on 2026-10-25 — re-run for the current release before trusting counts |
 | State machine (§3) | unit/integration tests — illegal transitions, expiry, hash-binding, redaction and automation gates |
 | Workers | collector, verification, monitor, publishing, metrics, batch, render — unit-tested + live `--once` sweeps |
 | Dashboard | production build + Playwright smoke against the real API (9 browser tests) |
@@ -52,7 +52,18 @@ pnpm verify                    # the full pipeline (same steps as CI)
 ## 1. Start the stack
 
 ```bash
-cp .env.example .env
+bash scripts/deploy.sh --with-workers --with-storage   # one command: secrets + build + boot + smoke
+```
+
+`scripts/deploy.sh` generates `infra/.env` with strong random secrets on the
+first run (see §2.1), applies migrations automatically (the one-shot
+`migrate` service) and waits for health. The dev path, if you insist on the
+manual steps:
+
+```bash
+cp .env.example .env          # then fill in §2/§3 keys; uncomment POSTGRES_PASSWORD
+                              # and mirror it in DATABASE_URL — compose aborts
+                              # without it (fail-closed; see .env.example)
 docker compose -f infra/docker/docker-compose.yml up -d \
   --profile workers --profile storage
 docker compose -f infra/docker/docker-compose.yml exec api python db_migrate.py
@@ -76,10 +87,13 @@ Services (compose file `infra/docker/docker-compose.yml`):
 | Service | Role | Human gate? |
 | --- | --- | --- |
 | `api` | FastAPI + Postgres + Redis | no |
-| `dashboard` | operator console (Next.js) | no |
+| `dashboard` | operator console (Next.js); loopback-only publish (`127.0.0.1:3000`) — public ingress via the `tunnel` profile/proxy | no |
+| `migrate` | one-shot schema migration runner (`db_migrate.py`) | no |
 | `collectors` | polls registered sources → inbox | no |
+| `verification` | extraction & evidence jobs; signs machine-collected fetches | no |
 | `batch` | generates scripts, reports readiness, and (only when enabled) approves/schedules inside guardrails | per policy |
-| `render` | renders the ready queue (ffmpeg) | per policy |
+| `render` | renders the ready queue (ffmpeg) and runs measured QC | per policy |
+| `page-capture` | sandboxed Chromium screenshots of public pages for storyboard scenes | reviewer-requested |
 | `monitor` | expiry/token sweeps, alerts | no |
 | `publishing` | uploads posts that are already approved **and** scheduled; retries per policy | approval only |
 | `metrics` | pulls audience numbers per post | no |
@@ -113,6 +127,20 @@ openssl rand -hex 16            # → POSTGRES_PASSWORD
 `MTK_API_TOKEN`, `MTK_WORKER_TOKEN`, `MTK_EXTENSION_TOKEN` and
 `MTK_SESSION_SECRET` are server-side only. Never prefix them with
 `NEXT_PUBLIC_`.
+
+`scripts/deploy.sh` mints every value above (including `POSTGRES_PASSWORD`)
+into `infra/.env` on its first run and reuses the file afterwards — prefer it
+on a fresh host; hand-mint only for the non-Docker path or to rotate a value.
+Check after any deploy that the file exists with all five minted secrets set
+and permissions 600 (`bash scripts/deploy.sh` prints what it generated). If you
+expose the dashboard beyond the host, also read the deployment hardening
+section of [`runbook.md`](runbook.md) (HTTPS/proxy and startup-guard rules).
+
+If you publish the dashboard over the internet, also mint/copy a **tunnel
+token**: create the Cloudflare tunnel, then set `MTK_TUNNEL_TOKEN` (the
+tunnel's connector token) in `infra/.env`. The compose `tunnel` profile
+refuses to start without it, and it is the only supported public-ingress
+path — the API keeps its loopback bind and only the dashboard is published.
 
 ### 2.2 Reviewer identity (who the audit log names)
 

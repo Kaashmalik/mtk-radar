@@ -44,3 +44,37 @@ Non-negotiable rules from the master plan (§3, §4, §11). Violations block rel
   leaks on 2026-10-25; CI execution is `UNPROVEN` while the owner billing lock
   remains (PROOF-04), so treat the CI gate as configured, not proven.
 - Licenses recorded in `third-party-notices.md` before adoption.
+
+## Incident log
+
+### 2026-11-01 — git history purge (personal-data archive removed)
+
+**What was removed.** A customer contact/location archive
+(`docs/marshmallow-contact-location-…json`, ≈370k lines — issue H1 of the
+[2026-10-28 gap audit](enhancement-plan-2026-10-28-gap-audit.md)) had been
+added by a long-gone commit and remained retrievable from git history even
+after its on-branch deletion. The rewrite also removed an unrelated binary
+(`docs/Fudge (2).zip`) and a separate, mistakenly committed project
+directory (`mtk-codex/`).
+
+**Action taken.** On **2026-11-01** the repository history was rewritten to
+the purged lineage and **force-pushed** to GitHub (`main` now rooted at
+commit `fa05c1f` — the plain removal commit). Anything referenced by the
+removed files should be considered potentially exposed and rotated by the
+owner.
+
+**Caveats and follow-ups:**
+
+- A pre-rewrite backup bundle exists at
+  `D:\MalikTech\mtk-radar-pre-rewrite.bundle` so the owner can verify the
+  rewrite. **Delete it once verified** — the bundle itself still contains the
+  removed personal data.
+- GitHub may serve cached objects from the old history until its garbage
+  collection runs (a cache is not a security boundary); the owner can
+  request an accelerated GC through GitHub Support.
+- Old clones still carry the pre-rewrite history. Re-clone, or point the
+  existing clone at the rewritten remote and hard-reset
+  (`git fetch origin && git reset --hard origin/main`); old local refs,
+  tags and stashes that still name removed objects must be deleted too.
+  Treat any other fork/clone of the old lineage as still containing the
+  removed data.

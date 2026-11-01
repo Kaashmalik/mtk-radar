@@ -118,7 +118,12 @@ unproven checks, following the existing convention.
 
 ## Still open
 
-1. **Owner:** H1 (personal-data export in a public repo), H2 (Actions billing).
+1. **Owner:** ~~H1 (personal-data export in a public repo)~~ — **resolved
+   2026-11-01**: history purged and force-pushed; the remaining owner action
+   is deleting the pre-rewrite backup bundle after verification (see the
+   2026-11-01 section below and the incident log in
+   [security-and-redaction.md](security-and-redaction.md)). H2 (Actions
+   billing) is still open.
 2. **M9 proof on a full machine:** follow
    [`verify-at-home-2026-10-28.md`](verify-at-home-2026-10-28.md) — Postgres
    integration tests, real FFmpeg renders, one private YouTube post.
@@ -127,3 +132,49 @@ unproven checks, following the existing convention.
 4. ~~Storyboard editor (V7 UI) and public-page capture worker (M2 second
    half)~~ — **done** in the third pass (`b0a8ca1` + UI commit): versioned,
    ledger-locked storyboard in Studio; sandboxed page screenshots as scenes.
+
+## 2026-11-01 production-readiness pass
+
+A five-way production-readiness review re-checked this audit item by item
+against the tree. **Verdict:** the audit items are **verified fixed in code**
+— every milestone M0–M8, including the leftovers listed above (storyboard
+editor, page-capture worker, quota ledger, TikTok consent, font-measured
+captions, reframing, durable outbox), has a landed implementation. What
+remains open is **execution proof, not missing features**:
+
+- a **live private/test post per provider** — PROOF-05, needs the owner's
+  OAuth keys;
+- a **dated real-render QC artifact** — PROOF-06, needs one real encode;
+- a **green CI run** — PROOF-04; the GitHub Actions billing lock persists,
+  so no CI claim is made anywhere;
+- **migrations 041→044 on a real database** (last full real-runner proof,
+  2026-10-25, covered 001→040) — `db_migrate.py` enforces numbering and
+  refuses gaps;
+- a **full `pnpm verify` re-run** after today's fixes.
+
+Also on **2026-11-01** the repository history was purged (issue **H1**) and
+force-pushed — see the incident log in
+[`security-and-redaction.md`](security-and-redaction.md). H2 (Actions
+billing) remains an owner action.
+
+### Same-pass robustness/deploy fix set (knob per guardrail)
+
+| Fix (2026-11-01 pass) | Guardrail / knob |
+|---|---|
+| Compose boots from the deployment env file (`docker compose --env-file infra/.env …`) so `scripts/deploy.sh`'s generated secrets actually reach every service; the compose file fails fast when `POSTGRES_PASSWORD` is unset instead of falling back to a dev default | `POSTGRES_PASSWORD` (required; minted into `infra/.env` by `scripts/deploy.sh`) |
+| API startup guard — the API refuses to run unauthenticated outside dev-open mode | `MTK_ALLOW_UNAUTHENTICATED=1` (explicit opt-in for a sealed local network) |
+| Public HTTPS without exposing the API: cloudflared `tunnel` compose profile publishes only the dashboard (the API keeps its `127.0.0.1` bind); proxy notes under `infra/proxy/` | `MTK_TUNNEL_TOKEN` (tunnel connector token) |
+| FFmpeg delivery encodes are bounded by a hard wall-clock timeout and the lease is capped, so a wedged encode fails the job visibly instead of holding the lease forever; the render worker handles SIGTERM and stops cleanly | `MTK_RENDER_ENCODE_TIMEOUT_S` (+ existing `MTK_RENDER_LEASE_S`) |
+| Legacy media-path serving is confined — a legacy row can no longer make the API stream arbitrary readable host files | `MTK_STORAGE_BACKEND` / `MTK_STORAGE_LOCAL_ROOT` (managed storage roots) |
+| Request size + rate middleware: bounded request bodies; the v0.33 auth brute-force throttle (429 budget per IP) stays in force | enforced in middleware, no knob to relax by default |
+| Automation-actor attribution: non-human callers are recorded as `automation:<stage>` / `system:` identities and can never appear as a human reviewer in `audit_log` | existing credential-class matrix (`api_hardening.py`) |
+| Publishing/collector `ValueError` guards: malformed config or metadata pins the post/job into an actionable failed state instead of crashing the sweep loop | failures recorded in `audit_log` / job outcome, never silent |
+| TikTok uploads above the single-chunk cap (≤64 MiB) are refused **up front** with an actionable message; no chunked upload exists yet — export a shorter/split edit | `MAX_SINGLE_CHUNK_BYTES` (`workers/publishing/platforms/tiktok.py`) |
+| Dashboard ships a standalone production build (no runtime `npm install`) with its `/api/health` liveness probe | `output: "standalone"` (`apps/dashboard/next.config.ts`) |
+| Extension terminal failures (401/422/…) cap out and are abandoned visibly instead of retrying forever | `MAX_ATTEMPTS = 5` (`apps/extension/core.js`) |
+
+Owner-side actions from the same review (code cannot do these): mint
+secrets/tokens, provider OAuth consent, set `MTK_TUNNEL_TOKEN`, delete the
+pre-rewrite git backup bundle after verifying the rewritten history, and
+re-clone/reset existing clones. The live gate list is
+[`production-readiness-2026-11-01.md`](production-readiness-2026-11-01.md).
