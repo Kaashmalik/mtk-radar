@@ -1,0 +1,36 @@
+# Optional public ingress: Cloudflare Tunnel (overlay file).
+#
+# Kept OUT of docker-compose.yml on purpose: compose interpolates the whole
+# file on every command, and the fail-closed \${MTK_TUNNEL_TOKEN:?} guard must
+# only abort when the tunnel is actually being started - not every
+# deploy/build/config run. Attaching this overlay is the explicit opt-in.
+#
+# Recommended HTTPS path (docs/cost-laptop-vps-2026-10-22.md): the tunnel
+# DIALS OUT to Cloudflare, so the host needs no open inbound ports, no
+# certificate renewal and no SSH forwarding to babysit.
+#   1. Cloudflare Zero Trust dashboard -> Networks -> Tunnels -> Create a
+#      tunnel; copy the token into infra/.env as MTK_TUNNEL_TOKEN.
+#   2. In the same dashboard add the public hostname mapping:
+#      <your-domain> -> http://dashboard:3000
+#      (and http://api:8000 only if the API must be directly reachable -
+#      the dashboard already proxies browser traffic same-origin at /api).
+#   3. docker compose --env-file infra/.env \
+#        -f infra/docker/docker-compose.yml \
+#        -f infra/docker/docker-compose.tunnel.yml up -d tunnel
+# Routed container-to-container over the compose network - the dashboard
+# keeps its loopback-only host publish. Details + the optional host-side
+# Caddy alternative: infra/proxy/README.md.
+
+services:
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.7
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    command: ["tunnel", "--no-autoupdate", "--token", "${MTK_TUNNEL_TOKEN:?set MTK_TUNNEL_TOKEN in infra/.env (see infra/proxy/README.md)}"]

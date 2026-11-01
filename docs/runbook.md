@@ -56,7 +56,7 @@ The base compose file is now deployment-shaped:
   dashboard (`3000`) is exposed and the API binds to `127.0.0.1:8000` for a
   local reverse proxy. Nothing else on the network can reach the database.
   (2026-11-01 pass: the dashboard publish is loopback-only as well — public
-  ingress goes through the `tunnel` profile or a reverse proxy; see the
+  ingress goes through the `tunnel` overlay or a reverse proxy; see the
   hardening section below.)
 - Media lives on explicit named volumes (`storage-data`, `render-projects`,
   `storage-cache`) — `docker compose down` keeps them; `down -v` destroys them.
@@ -89,12 +89,12 @@ The 2026-11-01 production-readiness pass hardened the deploy surface itself:
   dev-open mode unless `MTK_ALLOW_UNAUTHENTICATED=1` is set explicitly and
   on purpose — a deployment that forgot its tokens fails at boot instead of
   serving open on a reachable host.
-- **Public HTTPS via cloudflared tunnel (profile `tunnel`).** For a
+- **Public HTTPS via cloudflared tunnel (overlay file).** For a
   laptop/VPS without its own TLS termination,
-  `docker compose -f infra/docker/docker-compose.yml --profile tunnel up -d`
+  `docker compose --env-file infra/.env -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.tunnel.yml up -d tunnel`
   starts a cloudflared sidecar that fronts **only the dashboard**; set
-  `MTK_TUNNEL_TOKEN` (the tunnel's connector token) in `infra/.env` — the
-  compose profile refuses to start without it. Both publishes in the
+  `MTK_TUNNEL_TOKEN` (the tunnel's connector token) in `infra/.env` - the
+  overlay refuses to start without it. Both publishes in the
   production file are loopback-only (API `127.0.0.1:8000`, dashboard
   `127.0.0.1:3000`); the tunnel is container-to-container, so public ingress
   needs no host port at all (a host-side reverse proxy such as Caddy is the

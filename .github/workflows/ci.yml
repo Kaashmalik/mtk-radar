@@ -84,6 +84,8 @@ jobs:
           docker compose -f infra/docker/docker-compose.yml config -q
           docker compose -f infra/docker/docker-compose.yml \
             -f infra/docker/docker-compose.dev.yml config -q
+          docker compose -f infra/docker/docker-compose.yml \
+            -f infra/docker/docker-compose.tunnel.yml config -q
 
   node:
     name: Node (offer-schema + dashboard types + production build)

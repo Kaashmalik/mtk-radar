@@ -87,7 +87,7 @@ Services (compose file `infra/docker/docker-compose.yml`):
 | Service | Role | Human gate? |
 | --- | --- | --- |
 | `api` | FastAPI + Postgres + Redis | no |
-| `dashboard` | operator console (Next.js); loopback-only publish (`127.0.0.1:3000`) — public ingress via the `tunnel` profile/proxy | no |
+| `dashboard` | operator console (Next.js); loopback-only publish (`127.0.0.1:3000`) - public ingress via the `tunnel` overlay/proxy | no |
 | `migrate` | one-shot schema migration runner (`db_migrate.py`) | no |
 | `collectors` | polls registered sources → inbox | no |
 | `verification` | extraction & evidence jobs; signs machine-collected fetches | no |
@@ -138,8 +138,8 @@ section of [`runbook.md`](runbook.md) (HTTPS/proxy and startup-guard rules).
 
 If you publish the dashboard over the internet, also mint/copy a **tunnel
 token**: create the Cloudflare tunnel, then set `MTK_TUNNEL_TOKEN` (the
-tunnel's connector token) in `infra/.env`. The compose `tunnel` profile
-refuses to start without it, and it is the only supported public-ingress
+tunnel's connector token) in `infra/.env`. The compose `tunnel` overlay
+(docker-compose.tunnel.yml) refuses to start without it, and it is the only supported public-ingress
 path — the API keeps its loopback bind and only the dashboard is published.
 
 ### 2.2 Reviewer identity (who the audit log names)

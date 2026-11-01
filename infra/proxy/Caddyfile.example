@@ -1,6 +1,6 @@
 # infra/proxy/Caddyfile.example — OPTIONAL host-side HTTPS (Option B).
 #
-# Cloudflare Tunnel (the `tunnel` profile in infra/docker/docker-compose.yml)
+# Cloudflare Tunnel (the `tunnel` overlay: infra/docker/docker-compose.tunnel.yml)
 # is the recommended path; see infra/proxy/README.md. This file is the
 # last-resort alternative for a VPS with open ports.
 #

@@ -185,7 +185,7 @@ The base compose file builds immutable API/dashboard/worker images and keeps
 PostgreSQL, Redis and MinIO off the host network; the API and the dashboard
 both bind to the loopback interface in production (the browser talks to the
 backend through the dashboard proxy; public HTTPS goes through the
-cloudflared `tunnel` profile; see [`infra/proxy/README.md`](infra/proxy/README.md)
+cloudflared `tunnel` overlay; see [`infra/proxy/README.md`](infra/proxy/README.md)
 for both paths). For host-side hot reload and published development ports use
 `-f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml`.
 

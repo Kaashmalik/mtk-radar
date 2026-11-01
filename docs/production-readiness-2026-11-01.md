@@ -34,7 +34,7 @@ below blocks "production-ready".
   schedule time zones).
 - [x] **API startup guard.** The API refuses to run unauthenticated outside
   dev-open mode (explicit opt-in only: `MTK_ALLOW_UNAUTHENTICATED=1`).
-- [x] **Public-HTTPS path.** cloudflared `tunnel` compose profile publishes
+- [x] **Public-HTTPS path.** cloudflared `tunnel` compose overlay publishes
   only the dashboard; the API keeps its loopback bind; `MTK_TUNNEL_TOKEN`
   carries the tunnel connector token.
 - [x] **Same-pass robustness fixes** — encode timeout + lease cap, render
@@ -69,7 +69,7 @@ below blocks "production-ready".
 - [ ] Complete provider OAuth consent per platform and connect the accounts
   ([go-live checklist §3](go-live-checklist.md)).
 - [ ] Tunnel credentials: set `MTK_TUNNEL_TOKEN` (the tunnel's connector
-  token) for the cloudflared `tunnel` profile, or terminate TLS with your
+  token) for the cloudflared `tunnel` overlay, or terminate TLS with your
   own proxy.
 - [ ] Run the first real post end-to-end, private first
   ([go-live checklist §4](go-live-checklist.md)).

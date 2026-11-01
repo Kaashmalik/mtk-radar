@@ -191,6 +191,8 @@ export MTK_TUNNEL_TOKEN=verify
 docker compose -f infra/docker/docker-compose.yml config -q || fail "compose config"
 docker compose -f infra/docker/docker-compose.yml \
   -f infra/docker/docker-compose.dev.yml config -q || fail "dev compose config"
+docker compose -f infra/docker/docker-compose.yml \
+  -f infra/docker/docker-compose.tunnel.yml config -q || fail "tunnel compose config"
 unset POSTGRES_PASSWORD MTK_S3_ACCESS_KEY MTK_S3_SECRET_KEY MTK_TUNNEL_TOKEN
 ok "compose files valid"
 

@@ -23,8 +23,9 @@ Matches the cost model in `docs/cost-laptop-vps-2026-10-22.md`: no open
 inbound ports, no certificate renewal, no SSH-forward babysitting, and the
 "server" can be a laptop behind NAT.
 
-The `tunnel` profile in infra/docker/docker-compose.yml runs
-`cloudflare/cloudflared` inside the compose network and routes
+The `tunnel` service in infra/docker/docker-compose.tunnel.yml (kept OUT of
+the base compose file on purpose) runs `cloudflare/cloudflared` inside the
+compose network and routes
 **container-to-container** — the dashboard needs no host port on the public
 side at all.
 
@@ -47,12 +48,15 @@ Setup:
 
    ```bash
    docker compose --env-file infra/.env \
-     -f infra/docker/docker-compose.yml --profile tunnel up -d tunnel
+     -f infra/docker/docker-compose.yml \
+     -f infra/docker/docker-compose.tunnel.yml up -d tunnel
    ```
+   (the overlay's `MTK_TUNNEL_TOKEN:?` guard fails loudly right here if the
+   token is missing — that guard is in the overlay so it can never abort
+   unrelated compose commands)
 
-`scripts/deploy.sh` users: add the profile flag to it or start the tunnel with
-the command above after the deploy; everything else in the stack is
-unchanged.
+`scripts/deploy.sh` users: run the deploy first, then start the tunnel with
+the command above; everything else in the stack is unchanged.
 
 ## Option B — host-side Caddy (auto-HTTPS via Let's Encrypt)
 
