@@ -7,6 +7,8 @@
 #   1. generates infra/.env on first run — strong random MTK_API_TOKEN,
 #      MTK_WORKER_TOKEN, MTK_EXTENSION_TOKEN, MTK_SESSION_SECRET and
 #      POSTGRES_PASSWORD (secrets never enter git; .env.* is gitignored);
+#      with --with-storage it also generates the MinIO root credentials once
+#      and sets MTK_STORAGE_BACKEND=s3;
 #   2. builds + starts the stack (postgres, redis, migrate -> api, dashboard,
 #      optionally all workers and S3 storage);
 #   3. runs a connected end-to-end smoke check: API health, dashboard health,
@@ -30,21 +32,23 @@ arg_has() { case " $* " in *" $1 "*) return 0;; *) return 1;; esac; }
 arg_has "$@" --with-workers  && PROFILES+=(--profile workers)
 arg_has "$@" --with-storage  && PROFILES+=(--profile storage)
 
-# ---- 1) environment with strong secrets (once) --------------------------
+# ---- 1) environment with strong secrets ----------------------------------
+gen() {
+  if command -v openssl >/dev/null; then openssl rand -hex 32
+  else python3 -c 'import secrets;print(secrets.token_hex(32))'; fi
+}
+# Idempotent: uncomment the line if present, otherwise APPEND it (the .env
+# template documents most vars as comments — a bare sed never adds a var
+# the template does not list at all, which silently skipped POSTGRES_PASSWORD).
+set_in_env() {
+  sed -i "s|^# \?$2=.*|$2=$3|" "$ENV_FILE"
+  grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"
+}
+# NEVER overwrite an existing value (bucket data / volumes are keyed to it):
+add_if_missing() { grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"; }
+
 if [[ ! -f "$ENV_FILE" ]]; then
   cp .env.example "$ENV_FILE"
-  if command -v openssl >/dev/null; then
-    gen() { openssl rand -hex 32; }
-  else
-    gen() { python3 -c 'import secrets;print(secrets.token_hex(32))'; }
-  fi
-  # Idempotent: uncomment the line if present, otherwise APPEND it (the .env
-  # template documents most vars as comments — a bare sed never adds a var
-  # the template does not list at all, which silently skipped POSTGRES_PASSWORD).
-  set_in_env() {
-    sed -i "s|^# \?$2=.*|$2=$3|" "$ENV_FILE"
-    grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"
-  }
   set_in_env "$ENV_FILE" MTK_API_TOKEN        "$(gen)"
   set_in_env "$ENV_FILE" MTK_WORKER_TOKEN     "$(gen)"
   set_in_env "$ENV_FILE" MTK_EXTENSION_TOKEN  "$(gen)"
@@ -54,6 +58,32 @@ if [[ ! -f "$ENV_FILE" ]]; then
   echo "✔ generated $ENV_FILE with fresh secrets (keep it safe; it is gitignored)"
 else
   echo "✔ using existing $ENV_FILE"
+fi
+
+# ---- 1b) storage-profile S3 credentials -----------------------------------
+# compose interpolates the WHOLE file on every command: the minio/storage-init
+# ${MTK_S3_*:?} guards refuse to parse without values even when the storage
+# profile is not started. With --with-storage the real credentials must exist
+# in $ENV_FILE (generated once here; never rotated — existing bucket data is
+# keyed to them) and the clients get MTK_STORAGE_BACKEND=s3. Without the
+# flag, session-scoped placeholders keep the parse valid without persisting
+# anything (a storage-less deploy never writes S3 values into infra/.env).
+if arg_has "$@" --with-storage; then
+  if ! grep -q '^MTK_S3_ACCESS_KEY=' "$ENV_FILE"; then
+    add_if_missing MTK_S3_ACCESS_KEY "$(gen)"
+    echo "✔ generated MTK_S3_ACCESS_KEY in $ENV_FILE (one-time; rotate manually)"
+  fi
+  if ! grep -q '^MTK_S3_SECRET_KEY=' "$ENV_FILE"; then
+    add_if_missing MTK_S3_SECRET_KEY "$(gen)"
+    echo "✔ generated MTK_S3_SECRET_KEY in $ENV_FILE (one-time; rotate manually)"
+  fi
+  add_if_missing MTK_STORAGE_BACKEND s3
+  add_if_missing MTK_S3_ENDPOINT     http://minio:9000
+else
+  if ! grep -q '^MTK_S3_ACCESS_KEY=' "$ENV_FILE"; then
+    export MTK_S3_ACCESS_KEY=parse-only
+    export MTK_S3_SECRET_KEY=parse-only
+  fi
 fi
 
 # ---- 2) build + boot ------------------------------------------------------
