@@ -3,14 +3,34 @@ name: mtk-radar
 # Week 12 hardening: restart policies, healthchecks, env-driven credentials,
 # optional worker services (profiles: workers) — see docs/runbook.md.
 
+# Shared log rotation for every service (aliased into each `logging:` key
+# below): json-file caps each container at 3 × 10 MB, so a long-lived host
+# never grows unbounded logs. A service that defines no `logging` would
+# otherwise keep the daemon default (no rotation).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# NOTE on credentials (fail-closed): this file deliberately has NO dev
+# defaults for POSTGRES_PASSWORD / MTK_S3_ACCESS_KEY / MTK_S3_SECRET_KEY —
+# every `${VAR:?...}` below aborts the compose command until they are set.
+# Pass the secrets file explicitly; compose resolves a bare .env from the
+# project directory (infra/docker/), where none exists:
+#   docker compose --env-file infra/.env -f infra/docker/docker-compose.yml …
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 2g
     environment:
       POSTGRES_USER: mtk
-      # default is dev-only; set POSTGRES_PASSWORD in .env for anything real
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mtk}
+      # no default: compose refuses to run until POSTGRES_PASSWORD is set
+      # (scripts/deploy.sh generates one into infra/.env)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
       POSTGRES_DB: mtk_radar
     # Private by default: only the compose network may reach the database.
     # Publish 5432 only through docker-compose.dev.yml for host tooling.
@@ -32,6 +52,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     expose:
       - "6379"
     healthcheck:
@@ -48,10 +69,15 @@ services:
     profiles: ["storage"]
     image: quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z
     restart: unless-stopped
+    logging: *default-logging
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:-mtk-storage}
-      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      # no defaults: the storage profile refuses to boot on the legacy dev
+      # pair mtk-storage/mtk-storage-secret — set MTK_S3_ACCESS_KEY and
+      # MTK_S3_SECRET_KEY in infra/.env (scripts/deploy.sh runs this profile
+      # only through --env-file, so the same file feeds both sides).
+      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:?set MTK_S3_ACCESS_KEY in infra/.env}
+      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:?set MTK_S3_SECRET_KEY in infra/.env}
     volumes:
       - minio-data:/data
     expose:
@@ -66,6 +92,7 @@ services:
   storage-init:
     profiles: ["storage"]
     image: quay.io/minio/mc:RELEASE.2024-06-13T16-04-24Z
+    logging: *default-logging
     depends_on:
       minio:
         condition: service_healthy
@@ -73,13 +100,18 @@ services:
       sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
              mc mb --ignore-existing local/$${MTK_S3_BUCKET:-mtk-radar}"
     environment:
-      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:-mtk-storage}
-      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:-mtk-storage-secret}
+      # same fail-closed pair as the minio service above
+      MINIO_ROOT_USER: ${MTK_S3_ACCESS_KEY:?set MTK_S3_ACCESS_KEY in infra/.env}
+      MINIO_ROOT_PASSWORD: ${MTK_S3_SECRET_KEY:?set MTK_S3_SECRET_KEY in infra/.env}
       MTK_S3_BUCKET: ${MTK_S3_BUCKET:-mtk-radar}
 
   # ---- one-shot schema migration ------------------------------------------
   # Boot is self-configuring: migrations apply before the API starts, so a
-  # fresh host needs no manual `docker compose exec api python db_migrate.py`.
+  # fresh host needs no manual db_migrate exec. (When one IS needed, use the
+  # same --env-file as every other compose command — a bare
+  # `docker compose -f infra/docker/docker-compose.yml exec api …` reads no
+  # env file and fails closed on the required credentials. See
+  # scripts/deploy.sh and scripts/mtk-start.sh.)
   # The runner records applied migrations in schema_migrations and is
   # idempotent — an upgrade roll applies only the new files.
   migrate:
@@ -88,8 +120,9 @@ services:
       dockerfile: services/api/Dockerfile
     image: mtk-radar-api:local
     restart: "no"
+    logging: *default-logging
     environment:
-      DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
+      DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}@postgres:5432/mtk_radar
     command: python db_migrate.py
     depends_on:
       postgres:
@@ -101,8 +134,10 @@ services:
       dockerfile: services/api/Dockerfile
     image: mtk-radar-api:local
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1g
     environment:
-      DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:-mtk}@postgres:5432/mtk_radar
+      DATABASE_URL: postgresql://mtk:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}@postgres:5432/mtk_radar
       REDIS_URL: redis://redis:6379/0
       MTK_API_TOKEN: ${MTK_API_TOKEN:-}
       MTK_WORKER_TOKEN: ${MTK_WORKER_TOKEN:-}
@@ -186,6 +221,8 @@ services:
       dockerfile: apps/dashboard/Dockerfile
     image: mtk-radar-dashboard:local
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 512m
     environment:
       NODE_ENV: production
       API_URL: http://api:8000
@@ -197,7 +234,12 @@ services:
       # /login renders (with a configuration error).
       MTK_SESSION_SECRET: ${MTK_SESSION_SECRET:-}
     ports:
-      - "3000:3000"
+      # Loopback only: the public side goes through TLS ingress — the
+      # Cloudflare Tunnel profile below (container-to-container, no host
+      # port at all) or a host-side Caddy reverse proxy at 127.0.0.1:3000
+      # (see infra/proxy/README.md). The dev override republishes this as a
+      # plain 3000:3000 so local non-loopback access keeps working.
+      - "127.0.0.1:3000:3000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
       interval: 30s
@@ -216,6 +258,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     volumes:
@@ -265,6 +308,21 @@ services:
       MTK_TOKEN_REFRESH_MARGIN_D: ${MTK_TOKEN_REFRESH_MARGIN_D:-14}
     command: >
       python workers/publishing/main.py --api http://api:8000
+    # Liveness: the worker's own interpreter must be present. The workers
+    # image (python:3.12-slim) ships no pgrep/procps, so the probe scans
+    # /proc cmdlines; the needle is split in the source so the probe's own
+    # command line can never satisfy its own search.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'publishing/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -276,6 +334,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     # EP-07: undeliverable cost telemetry survives restarts in the outbox.
@@ -302,6 +361,19 @@ services:
       VERIFY_LLM_MAX_OUTPUT_TOKENS: ${VERIFY_LLM_MAX_OUTPUT_TOKENS:-2000}
     command: >
       python workers/verification/main.py
+    # Same /proc-cmdline liveness probe as publishing (see the note there;
+    # needle split so the probe cannot match itself).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'verification/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -313,6 +385,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
@@ -326,6 +399,19 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     command: >
       python workers/collectors/main.py --api http://api:8000
+    # Same /proc-cmdline liveness probe as publishing (needle split so the
+    # probe cannot match itself).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'collectors/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -339,6 +425,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
@@ -347,6 +434,19 @@ services:
       MTK_BATCH_INTERVAL: ${MTK_BATCH_INTERVAL:-900}
     command: >
       sh -c "python workers/batch/main.py --api http://api:8000 --interval ${MTK_BATCH_INTERVAL:-900}"
+    # Same /proc-cmdline liveness probe as publishing (the sh -c wrapper's
+    # python child is what is matched).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'batch/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -358,6 +458,11 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
+    # ffmpeg encodes are the heaviest thing in the stack; 4 GB lets a 1080p
+    # delivery encode run while keeping a runaway encode from taking the
+    # host down (enforced by the daemon OOM killer, container-local).
+    mem_limit: 4g
     working_dir: /repo
     # Render writes projects (intermediate media) and materializes remote
     # assets into a cache; both are explicit writable named volumes.
@@ -420,6 +525,21 @@ services:
     # ffmpeg is baked into the image; the render queue serves itself.
     command: >
       python workers/render/main.py --sweep --watch --api http://api:8000 --out ./projects
+    # Same /proc-cmdline liveness probe as publishing (needle split so the
+    # probe cannot match itself).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'render/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # a fresh container may sweep the whole queue before looping, which
+      # can take minutes — cover that with the start period.
+      start_period: 120s
     depends_on:
       api:
         condition: service_healthy
@@ -434,9 +554,13 @@ services:
       context: ../..
       dockerfile: workers/capture/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Chromium needs more shared memory than Docker's 64 MB default.
     shm_size: "1gb"
+    # Chromium + the 1 GB shm segment live comfortably in 2 GB — page renders
+    # are bounded by viewport size, not by the shm allocation.
+    mem_limit: 2g
     volumes:
       - storage-data:/data
     environment:
@@ -453,6 +577,19 @@ services:
       MTK_S3_REGION: ${MTK_S3_REGION:-us-east-1}
     command: >
       python workers/capture/page_capture.py --watch --api http://api:8000 --out /tmp/page-captures
+    # Same /proc-cmdline liveness probe as the slim-image workers (needle
+    # split so the probe cannot match itself).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'page_cap'+b'ture.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -464,6 +601,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     # EP-07: notifications that failed to send are replayed from the outbox.
@@ -492,6 +630,19 @@ services:
       MTK_NOTIFY_SUBJECT_PREFIX: "${MTK_NOTIFY_SUBJECT_PREFIX:-[MTK RADAR]}"
     command: >
       python workers/monitor/main.py --api http://api:8000 --interval 300
+    # Same /proc-cmdline liveness probe as publishing (needle split so the
+    # probe cannot match itself).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'monitor/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
@@ -503,6 +654,7 @@ services:
       context: ../..
       dockerfile: workers/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /repo
     # Code and system dependencies are baked into mtk-radar-workers:local.
     environment:
@@ -522,9 +674,47 @@ services:
       INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
     command: >
       sh -c "python workers/metrics/main.py --api http://api:8000 --interval ${MTK_METRICS_INTERVAL:-3600}"
+    # Same /proc-cmdline liveness probe as publishing (the sh -c wrapper's
+    # python child is what is matched).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import glob,sys;needle=b'metrics/ma'+b'in.py';sys.exit(0
+          if any(needle in open(f,'rb').read() for f in
+          glob.glob('/proc/[0-9]*/cmdline')) else 1)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       api:
         condition: service_healthy
+
+  # ---- optional public ingress: Cloudflare Tunnel (profile: tunnel) --------
+  # Recommended HTTPS path (docs/cost-laptop-vps-2026-10-22.md): the tunnel
+  # DIALS OUT to Cloudflare, so the host needs no open inbound ports, no
+  # certificate renewal and no SSH forwarding to babysit.
+  #   1. Cloudflare Zero Trust dashboard → Networks → Tunnels → Create a
+  #      tunnel; copy the token into infra/.env as MTK_TUNNEL_TOKEN.
+  #   2. In the same dashboard add the public hostname mapping:
+  #      <your-domain>  →  http://dashboard:3000
+  #      (and http://api:8000 only if the API must be directly reachable —
+  #      the dashboard already proxies browser traffic same-origin at /api).
+  #   3. docker compose --env-file infra/.env \
+  #        -f infra/docker/docker-compose.yml --profile tunnel up -d tunnel
+  # Routed container-to-container over the compose network — the dashboard
+  # keeps its loopback-only host publish. Details + the optional host-side
+  # Caddy alternative: infra/proxy/README.md.
+  tunnel:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:2026.10.7
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    command: ["tunnel", "--no-autoupdate", "--token", "${MTK_TUNNEL_TOKEN:?set MTK_TUNNEL_TOKEN in infra/.env (see infra/proxy/README.md)}"]
 
 volumes:
   pgdata:

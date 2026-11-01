@@ -181,15 +181,29 @@ fi
 
 # ------------------------------------------------------------- 5. deploy
 step "Compose configuration (production + dev override)"
+# The compose files are fail-closed (`:?` credentials): config-time
+# interpolation needs values even though nothing starts here. Throwaway
+# values only — they are never written anywhere and evaporate with unset.
+export POSTGRES_PASSWORD=verify-only
+export MTK_S3_ACCESS_KEY=verify
+export MTK_S3_SECRET_KEY=verify
+export MTK_TUNNEL_TOKEN=verify
 docker compose -f infra/docker/docker-compose.yml config -q || fail "compose config"
 docker compose -f infra/docker/docker-compose.yml \
   -f infra/docker/docker-compose.dev.yml config -q || fail "dev compose config"
+unset POSTGRES_PASSWORD MTK_S3_ACCESS_KEY MTK_S3_SECRET_KEY MTK_TUNNEL_TOKEN
 ok "compose files valid"
 
 step "CI workflow YAML"
-"$PYTHON" -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); print('  jobs:', ', '.join(d['jobs']))" \
-  || fail "ci yaml"
-ok "ci workflow parses"
+"$PYTHON" - <<'PY' || fail "ci yaml"
+import yaml
+
+for wf in (".github/workflows/ci.yml", ".github/workflows/dependency-watch.yml"):
+    doc = yaml.safe_load(open(wf))
+    jobs = ", ".join(doc.get("jobs", {}))
+    print(f"  {wf}: {jobs}")
+PY
+ok "CI workflow files parse"
 
 step "Extension (Manifest V3) syntax + core logic tests"
 node --check apps/extension/core.js || fail "extension core.js"

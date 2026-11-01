@@ -75,6 +75,12 @@ jobs:
         run: pytest services/api/tests/test_integration.py -v
       - name: Compose configuration (production + dev override)
         run: |
+          # the compose files are fail-closed (`:?` credentials): config-time
+          # interpolation needs values even though nothing starts here
+          export POSTGRES_PASSWORD=ci-only
+          export MTK_S3_ACCESS_KEY=ci
+          export MTK_S3_SECRET_KEY=ci
+          export MTK_TUNNEL_TOKEN=ci
           docker compose -f infra/docker/docker-compose.yml config -q
           docker compose -f infra/docker/docker-compose.yml \
             -f infra/docker/docker-compose.dev.yml config -q
@@ -90,18 +96,46 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
       - name: Install workspace
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
       - name: Typecheck offer schema
         run: pnpm exec tsc --noEmit -p packages/offer-schema
       - name: Typecheck dashboard
         run: pnpm exec tsc --noEmit -p apps/dashboard
-      - name: Extension syntax check
+      - name: Extension syntax check + unit tests
+        # Mirrors scripts/verify.sh (the extension step there): core.js is the
+        # payload-capture logic the review process depends on — syntax-check
+        # every entry point and run the node:test suite.
         run: |
+          node --check apps/extension/core.js
           node --check apps/extension/background.js
           node --check apps/extension/options.js
           python3 -c "import json; json.load(open('apps/extension/manifest.json'))"
+          ( cd apps/extension && node --test tests/*.test.js )
       - name: Dashboard production build
         run: pnpm --dir apps/dashboard build
+
+  docker-build:
+    name: Docker images (api, dashboard, workers, page-capture)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production images
+        run: |
+          # fail-closed credentials: `docker compose build` interpolates the
+          # whole file at parse time — export throwaway values so `:?` passes.
+          # Nothing is run from the images here, so the values are inert.
+          export POSTGRES_PASSWORD=ci-only
+          export MTK_S3_ACCESS_KEY=ci
+          export MTK_S3_SECRET_KEY=ci
+          export MTK_TUNNEL_TOKEN=ci
+          docker compose -f infra/docker/docker-compose.yml build api dashboard
+          # the workers profile adds two more images: the shared worker image
+          # (building `publishing` covers verification/collectors/batch/
+          # render/monitor/metrics — one Dockerfile) and the Chromium
+          # page-capture image.
+          docker compose -f infra/docker/docker-compose.yml --profile workers \
+            build publishing page-capture
 
   e2e:
     name: "E2E — full stack (Postgres + API + dashboard + browser)"
@@ -138,7 +172,7 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
       - name: Install workspace
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
       - name: Install API dependencies
         run: pip install -r services/api/requirements.txt
       - name: Apply migrations (the real runner)

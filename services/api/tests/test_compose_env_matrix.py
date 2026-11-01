@@ -156,6 +156,60 @@ def test_every_compose_placeholder_is_documented_or_internal(compose_env, docume
     assert not problems, "undeclared compose configuration: " + "; ".join(problems)
 
 
+def test_service_credentials_fail_closed(compose_env):
+    """Credentials a service OWNS must be required (`${VAR:?message}`), never
+    defaulted (`${VAR:-default}`): with a bare `docker compose -f ...` the
+    env file in infra/docker/ is never read, so `${POSTGRES_PASSWORD:-mtk}`
+    and MinIO root mtk-storage/mtk-storage-secret used to boot a working but
+    unauthenticated "production" stack (infra review 2026-11, P0). A missing
+    env file must stop the boot instead.
+
+    Client containers may still receive `${VAR:-}` S3 key defaults — those
+    are inert unless MTK_STORAGE_BACKEND=s3, a mode whose storage profile
+    (fail-closed itself, checked below) refuses to boot without real keys.
+    """
+    required = {
+        ("postgres", "POSTGRES_PASSWORD"): "POSTGRES_PASSWORD",
+        ("migrate", "DATABASE_URL"): "POSTGRES_PASSWORD",
+        ("api", "DATABASE_URL"): "POSTGRES_PASSWORD",
+        ("minio", "MINIO_ROOT_USER"): "MTK_S3_ACCESS_KEY",
+        ("minio", "MINIO_ROOT_PASSWORD"): "MTK_S3_SECRET_KEY",
+        ("storage-init", "MINIO_ROOT_USER"): "MTK_S3_ACCESS_KEY",
+        ("storage-init", "MINIO_ROOT_PASSWORD"): "MTK_S3_SECRET_KEY",
+    }
+    problems = []
+    for (svc, key), ref in required.items():
+        value = str(compose_env[svc].get(key, ""))
+        if f"${{{ref}:?" not in value:
+            problems.append(
+                f"{svc}: {key} must require {ref} (${{{ref}:?...}}), got {value!r}")
+    # No compose-side default may survive ANYWHERE for the postgres password
+    # (every consumer interpolates the same required value).
+    for svc, env in compose_env.items():
+        for key, value in env.items():
+            if "${POSTGRES_PASSWORD:-" in str(value):
+                problems.append(f"{svc}: {key} silently defaults POSTGRES_PASSWORD")
+    assert not problems, "credentials with silent defaults: " + "; ".join(problems)
+
+
+def test_restart_policies_and_log_rotation():
+    """Infra review 2026-11 (P1): every long-running service must restart on
+    its own (unless-stopped) and cap its json-file logs through the shared
+    x-logging anchor — a host that runs for months must not grow unbounded
+    container logs or stay down after a transient crash."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    # one-shot services: migrate explicitly opts out; storage-init exits when
+    # the bucket exists. Both correctly have no self-restart policy.
+    one_shot = {"migrate", "storage-init"}
+    problems = []
+    for name, svc in doc["services"].items():
+        if name not in one_shot and svc.get("restart") != "unless-stopped":
+            problems.append(f"{name}: restart={svc.get('restart')!r}")
+        if not svc.get("logging"):
+            problems.append(f"{name}: no logging (log rotation missing)")
+    assert not problems, "; ".join(problems)
+
+
 def test_matrix_matches_the_consumers_in_code():
     """The matrix itself cannot rot silently: each var must still be READ by
     the named consumer's code (otherwise the entry is stale and belongs here
@@ -195,6 +249,24 @@ def test_matrix_matches_the_consumers_in_code():
         "MTK_TOKEN_REFRESH_MARGIN_D": ["workers/publishing/main.py"],
         "FACEBOOK_APP_ID": ["workers/publishing/main.py"],
         "FACEBOOK_APP_SECRET": ["workers/publishing/main.py"],
+        # The 2026-11 infra roundtrip found this map stale (the guard was
+        # failing at HEAD); the remainder re-covers every MATRIX entry.
+        "TIKTOK_APP_AUDITED": ["workers/publishing/platforms/tiktok.py"],
+        "MTK_TIKTOK_CAPABILITY_TTL_S": ["workers/publishing/main.py"],
+        "MTK_PUBLISH_BREAKER_THRESHOLD": ["workers/publishing/circuit.py"],
+        "MTK_PUBLISH_BREAKER_COOLDOWN_S": ["workers/publishing/circuit.py"],
+        "TTS_LOCAL": ["workers/render/narration.py"],
+        "MTK_RENDER_X264_PRESET": ["workers/render/render.py"],
+        "MTK_VERTICAL_REFRAME": ["workers/render/reframe.py"],
+        "MTK_VERTICAL_REFRAME_WIDTH": ["workers/render/reframe.py"],
+        "YOUTUBE_QUOTA_UNITS_PER_DAY": ["services/api/quota_api.py"],
+        "YOUTUBE_QUOTA_UPLOADS_PER_DAY": ["services/api/quota_api.py"],
+        "YOUTUBE_QUOTA_COST_UPLOAD": ["workers/publishing/quota.py"],
+        "YOUTUBE_QUOTA_COST_THUMBNAIL": ["workers/publishing/quota.py"],
+        "YOUTUBE_QUOTA_COST_CAPTIONS": ["workers/publishing/quota.py"],
+        "YOUTUBE_QUOTA_COST_PLAYLIST": ["workers/publishing/quota.py"],
+        "YOUTUBE_QUOTA_COST_COMMENT": ["workers/publishing/quota.py"],
+        "YOUTUBE_QUOTA_COST_STATUS_POLLS": ["workers/publishing/quota.py"],
     }
     assert set(readers) == set(MATRIX), (
         "every matrix var needs a named reader (and vice versa)")

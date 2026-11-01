@@ -5,8 +5,8 @@
 #
 # Designed for a fresh host (VPS/laptop) with Docker + docker compose plugin:
 #   1. generates infra/.env on first run — strong random MTK_API_TOKEN,
-#      MTK_WORKER_TOKEN, MTK_EXTENSION_TOKEN and MTK_SESSION_SECRET (secrets
-#      never enter git; .env.* is gitignored);
+#      MTK_WORKER_TOKEN, MTK_EXTENSION_TOKEN, MTK_SESSION_SECRET and
+#      POSTGRES_PASSWORD (secrets never enter git; .env.* is gitignored);
 #   2. builds + starts the stack (postgres, redis, migrate -> api, dashboard,
 #      optionally all workers and S3 storage);
 #   3. runs a connected end-to-end smoke check: API health, dashboard health,
@@ -19,8 +19,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-COMPOSE="docker compose -f infra/docker/docker-compose.yml"
+# Compose resolves a bare .env from its PROJECT directory (the folder of the
+# first -f file → infra/docker/), where no env file exists — every invocation
+# must point --env-file at the generated secrets file explicitly.
 ENV_FILE=infra/.env
+COMPOSE="docker compose --env-file $ENV_FILE -f infra/docker/docker-compose.yml"
 PROFILES=()
 
 arg_has() { case " $* " in *" $1 "*) return 0;; *) return 1;; esac; }
@@ -35,7 +38,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
   else
     gen() { python3 -c 'import secrets;print(secrets.token_hex(32))'; }
   fi
-  set_in_env() { sed -i "s|^# \?$2=.*|$2=$3|" "$ENV_FILE"; }
+  # Idempotent: uncomment the line if present, otherwise APPEND it (the .env
+  # template documents most vars as comments — a bare sed never adds a var
+  # the template does not list at all, which silently skipped POSTGRES_PASSWORD).
+  set_in_env() {
+    sed -i "s|^# \?$2=.*|$2=$3|" "$ENV_FILE"
+    grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"
+  }
   set_in_env "$ENV_FILE" MTK_API_TOKEN        "$(gen)"
   set_in_env "$ENV_FILE" MTK_WORKER_TOKEN     "$(gen)"
   set_in_env "$ENV_FILE" MTK_EXTENSION_TOKEN  "$(gen)"
@@ -74,7 +83,10 @@ if [[ -n "$TOKEN" ]] \
    && curl -sf -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/attention >/dev/null 2>&1; then
   echo "✔ backend connected (authenticated /attention call succeeded)"
 else
-  echo "⚠ authenticated probe failed — check MTK_API_TOKEN in $ENV_FILE"
+  echo "✘ authenticated probe failed — the API is up but /attention refused the token." >&2
+  echo "  Check MTK_API_TOKEN in $ENV_FILE (it must match the deployment the API booted" >&2
+  echo "  with) and fix it, then re-run this script." >&2
+  exit 1
 fi
 
 echo "→ waiting for the dashboard…"
@@ -94,14 +106,17 @@ cat <<'EOF'
 
 MTK RADAR is live:
 
-  Dashboard   http://<host-ip>:3000
+  Dashboard   http://127.0.0.1:3000  (loopback-only publish — use an SSH tunnel
+              to reach it from your laptop, or the TLS ingress below)
   API         http://127.0.0.1:8000 (loopback only — browsers proxy via the dashboard)
 
 Next:
   1. Open the dashboard and sign in (reviewer session; secrets in infra/.env).
   2. Settings → Connections: register your platform account (credential REFERENCE).
   3. Settings → Automation: pick stages, then arm automation (or use the kill switch).
-  4. Set MTK_PUBLIC_BASE_URL + MTK_CORS_ORIGINS in infra/.env before exposing HTTPS.
+  4. To expose HTTPS, see infra/proxy/README.md (Cloudflare Tunnel profile or
+     host-side Caddy), then set MTK_PUBLIC_BASE_URL + MTK_CORS_ORIGINS in
+     infra/.env to the public origin.
 
 Re-run this script after `git pull` to upgrade (migrations apply automatically).
 EOF

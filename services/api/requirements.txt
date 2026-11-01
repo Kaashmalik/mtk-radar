@@ -5,11 +5,9 @@ pydantic==2.14.1
 pydantic-settings==2.16.1
 # compose/CI YAML sanity (scripts/verify.sh) + the G13 env-matrix guard test
 PyYAML==6.0.3
-# IANA timezone data: Linux CI has it from the OS, but Python on Windows does
-# not - schedules use ZoneInfo("Asia/Karachi") and crash without this package.
-tzdata==2025.2
+# IANA timezone data: Linux CI gets it from the OS, but Python on Windows does
+# not — schedules resolve ZoneInfo("Asia/Karachi") and the YouTube quota day
+# rolls at America/Los_Angeles; both crash without this package.
+tzdata==2026.4
 # optional cache layer (v0.22) — the system runs without it
 redis==5.2.1
-# IANA time-zone data for zoneinfo on hosts without a system tz database
-# (Windows): YouTube quota day (America/Los_Angeles), schedule display zones.
-tzdata==2026.4

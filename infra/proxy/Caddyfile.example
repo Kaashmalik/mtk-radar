@@ -1,0 +1,30 @@
+# infra/proxy/Caddyfile.example — OPTIONAL host-side HTTPS (Option B).
+#
+# Cloudflare Tunnel (the `tunnel` profile in infra/docker/docker-compose.yml)
+# is the recommended path; see infra/proxy/README.md. This file is the
+# last-resort alternative for a VPS with open ports.
+#
+# Usage:
+#   cp Caddyfile.example Caddyfile   # set your hostname below
+#   caddy run --config infra/proxy/Caddyfile
+#
+# The production compose publishes the dashboard loopback-only
+# ("127.0.0.1:3000:3000"); Caddy terminates TLS on the host and proxies to
+# that loopback port. Caddy obtains and renews Let's Encrypt certificates
+# automatically (ports 80 + 443 must be reachable, and the hostname needs a
+# DNS record). After switching to HTTPS set, in infra/.env:
+#   MTK_PUBLIC_BASE_URL=https://radar.example.com
+#   MTK_CORS_ORIGINS=https://radar.example.com
+
+radar.example.com {
+	# dashboard container via the loopback publish
+	reverse_proxy 127.0.0.1:3000
+}
+
+# Only needed if the API must be directly reachable from outside — the
+# dashboard already proxies browser traffic same-origin at /api, so normally
+# leave this block out (the API publish stays loopback-only either way):
+#
+# api.radar.example.com {
+# 	reverse_proxy 127.0.0.1:8000
+# }

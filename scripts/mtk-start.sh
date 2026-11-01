@@ -13,7 +13,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
+# Compose resolves a bare .env from its PROJECT directory (the folder of the
+# first -f file → infra/docker/), not the repo root — point --env-file at the
+# root .env explicitly on every invocation.
+# Tolerant by design (host-side dev flow must not hard-fail on a missing file):
+# without .env compose itself fails closed on the required credentials, which
+# is the clearer error.
 COMPOSE=(docker compose -f "$REPO_ROOT/infra/docker/docker-compose.yml")
+if [ -f "$REPO_ROOT/.env" ]; then
+  COMPOSE+=(--env-file "$REPO_ROOT/.env")
+else
+  echo "WARNING: .env is missing. Copy .env.example to .env and set real secrets" >&2
+  echo "         (POSTGRES_PASSWORD included). Continuing without --env-file;" >&2
+  echo "         compose will fail closed on the required credentials." >&2
+fi
 OPEN_UI=1
 for arg in "$@"; do
   case "$arg" in
@@ -30,10 +43,6 @@ docker compose version >/dev/null 2>&1 || {
   echo "docker compose v2 is required" >&2
   exit 1
 }
-
-if [ ! -f "$REPO_ROOT/.env" ]; then
-  echo "WARNING: .env is missing. Copy .env.example to .env and set real secrets." >&2
-fi
 
 echo "→ starting PostgreSQL + Redis"
 "${COMPOSE[@]}" up -d postgres redis

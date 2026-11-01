@@ -1,11 +1,15 @@
 # Local development override — NOT for deployment.
 #
-#   docker compose -f infra/docker/docker-compose.yml \
+#   docker compose --env-file .env \
+#                  -f infra/docker/docker-compose.yml \
 #                  -f infra/docker/docker-compose.dev.yml up
 #
 # Restores the conveniences deliberately removed from the production file:
 # database/cache ports published to the host, live-reloading API and dashboard
 # source mounts. The base file still defines the same services and volumes.
+# NOTE: the fail-closed credentials (POSTGRES_PASSWORD, MTK_S3_*) are
+# deliberately NOT loosened here either — copy .env.example to .env first and
+# set POSTGRES_PASSWORD (dev: anything real; mirror it in DATABASE_URL).
 name: mtk-radar
 
 services:
@@ -35,5 +39,13 @@ services:
     working_dir: /repo/apps/dashboard
     volumes:
       - ../..:/repo
+    # The production file publishes the dashboard loopback-only (it is
+    # fronted by the Cloudflare Tunnel profile / a host-side Caddy reverse
+    # proxy — see infra/proxy/README.md). Dev wants the plain 0.0.0.0 publish
+    # so WSL- and other-machine browsers keep working; !override REPLACES the
+    # base publish list instead of unioning both (a 127.0.0.1 + 0.0.0.0
+    # publish of the same port would conflict). Requires compose v2.24+.
+    ports: !override
+      - "3000:3000"
     command: >
       sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev"
