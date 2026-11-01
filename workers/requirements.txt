@@ -3,3 +3,8 @@ feedparser==6.0.14
 # Render QC measures caption widths with the real font (fontmetrics.py);
 # also enables the PNG cover path in covers.py.
 pillow==12.3.0
+# collectors get REDIS_URL for the shared trend cache (compose) - without
+# the client package the cache silently degrades to process memory on every
+# container, defeating the shared-cache setting (live-boot review 2026-11-02;
+# pin matches services/api/requirements.txt so both images resolve identically).
+redis==5.2.1

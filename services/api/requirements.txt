@@ -9,5 +9,12 @@ PyYAML==6.0.3
 # not — schedules resolve ZoneInfo("Asia/Karachi") and the YouTube quota day
 # rolls at America/Los_Angeles; both crash without this package.
 tzdata==2026.4
-# optional cache layer (v0.22) — the system runs without it
+# optional cache layer (v0.22) - the system runs without it
 redis==5.2.1
+# media_api imports packages/object_storage (the S3 driver) and schemas.py
+# inherits source_adapters whose package __init__ loads every adapter - both
+# chains import httpx/feedparser at MODULE load time, so the API image cannot
+# even boot without them (found by the first live container boot, 2026-11-02;
+# pins match workers/requirements.txt so both images resolve identically).
+httpx==0.28.1
+feedparser==6.0.14

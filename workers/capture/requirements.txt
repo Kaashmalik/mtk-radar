@@ -1,3 +1,9 @@
 httpx==0.28.1
 playwright==1.49.1
+# page_capture.py imports source_adapters whose package __init__ loads
+# google_trends - which imports feedparser at module load time (the package
+# __init__ cannot be skipped by importing a submodule directly). Without it
+# the capture worker crash-loops at startup (live boot, 2026-11-02; pin
+# matches workers/api requirements).
+feedparser==6.0.14
 # after install run once: python -m playwright install chromium
