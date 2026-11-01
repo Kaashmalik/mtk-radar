@@ -87,12 +87,14 @@ else
 fi
 
 # ---- 2) build + boot ------------------------------------------------------
-# Build the three images explicitly first: `up --build` can attempt to resolve
-# images of profiled services that were never requested (e.g. minio on quay),
+# Build the images explicitly first: `up --build` can attempt to resolve images
+# of profiled services that were never requested (e.g. minio on the registry),
 # which breaks deploys on hosts where a registry is unreachable. The workers
-# services share one image, so building `publishing` covers them all.
+# services share one image, so building `publishing` covers them all — except
+# page-capture, which has its own Dockerfile and, unpulled+unbuilt, makes `up`
+# try to PULL the local-only mtk-radar-page-capture:local from Docker Hub.
 $COMPOSE build api dashboard
-if arg_has "$@" --with-workers; then $COMPOSE build publishing; fi
+if arg_has "$@" --with-workers; then $COMPOSE build publishing page-capture; fi
 $COMPOSE "${PROFILES[@]}" up -d
 
 # ---- 3) connected smoke check --------------------------------------------
