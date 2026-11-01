@@ -141,6 +141,40 @@ class TestTikTok:
             adapter.upload(_video(tmp_path), {}, privacy="private")
 
 
+class TestOversizeRefusal:
+    def test_oversize_refusal_names_the_limit_seconds_and_the_alternative(
+            self, tmp_path, monkeypatch):
+        """A NORMAL render (~90+ MB at the 12 Mbps delivery bitrate) always
+        exceeds the 64 MiB single-chunk cap — the refusal must therefore be
+        actionable: the exact limit (bytes and ~seconds), what to do instead
+        (export bundle / native upload), and where the upgrade path points
+        (chunked FILE_UPLOAD)."""
+        import platforms.tiktok as tiktok_mod
+
+        monkeypatch.setattr(tiktok_mod, "MAX_SINGLE_CHUNK_BYTES", 16)
+        big = tmp_path / "big.mp4"
+        big.write_bytes(b"0" * 32)
+        adapter = _adapter(tmp_path, access_token="t")
+        with pytest.raises(RuntimeError) as excinfo:
+            adapter.upload(big, {}, privacy="private")
+        message = str(excinfo.value)
+        assert "16B" in message, "the exact size limit must be stated"
+        assert "s at the 12 Mbps delivery bitrate" in message, \
+            "the cap must also be expressed as an approximate clip length"
+        assert "export bundle" in message and "native upload" in message, \
+            "the operator guidance must be embedded, not implied"
+        assert "total_chunk_count > 1" in message, \
+            "the documented upgrade path must be referenced"
+
+    def test_cap_matches_a_real_clip_length(self):
+        """The quoted cap must reflect reality: 64 MiB at 12 Mbps is well
+        under a minute — every normal walkthrough render is refused."""
+        import platforms.tiktok as tiktok_mod
+
+        approx_s = tiktok_mod.MAX_SINGLE_CHUNK_BYTES * 8 / tiktok_mod.DELIVERY_BPS
+        assert approx_s < 60, "the single-chunk cap cannot fit a normal render"
+
+
 class TestDirectPostRules:
     """G23: creator_info first, offered privacy only, creator settings win."""
 

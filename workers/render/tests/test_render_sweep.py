@@ -383,6 +383,115 @@ def test_lease_keeper_flags_a_lost_lease_and_stops(monkeypatch):
     assert b'"worker":"render-a-1"' in calls[0].content.replace(b" ", b"")
 
 
+def test_lease_keeper_stops_renewing_at_the_total_lease_cap(monkeypatch):
+    """Renewal is bounded: once the job's TOTAL lease age reaches
+    MTK_RENDER_MAX_LEASE_S the keeper sets the existing lease-lost flag (so
+    no outcome is reported) and stops touching — the lease then expires on
+    its own and the job returns to the pool instead of being held by a
+    zombie renderer."""
+    import threading
+
+    monkeypatch.setattr(render_main, "RENDER_LEASE_TOUCH_S", 0.05)
+    monkeypatch.setattr(render_main, "RENDER_MAX_LEASE_S", 0.12)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+    stop, lost = threading.Event(), threading.Event()
+    render_main._lease_keeper(client, "job-1", stop, "render-a-1", lost)
+    assert lost.is_set(), "the cap must trip the lease-lost flag"
+    assert 1 <= len(calls) <= 2, "a couple of renewals, then no more touches"
+
+
+# -------------------------------------------------------- graceful stop
+
+
+def test_signal_handler_sets_the_stop_flag(monkeypatch):
+    """SIGTERM/SIGINT (docker stop / systemd) must flip the flag the drain
+    and the sweep watch — the render worker was the only worker without it."""
+    import signal as _signal
+
+    captured = {}
+
+    def fake_signal(sig, handler):
+        captured[sig] = handler
+
+    monkeypatch.setattr(render_main.signal, "signal", fake_signal)
+    monkeypatch.setattr(render_main, "_STOP", False)
+
+    render_main._install_stop_handlers()
+    assert set(captured) == {_signal.SIGTERM, _signal.SIGINT}
+
+    captured[_signal.SIGTERM](_signal.SIGTERM, None)
+    assert render_main._STOP is True
+
+
+def test_stop_flag_stops_the_sweep_between_candidates(monkeypatch, tmp_path):
+    """The encode in flight finishes; the remaining candidates stay for the
+    next sweep instead of being abandoned mid-render."""
+    monkeypatch.setattr(render_main, "_STOP", False)
+    rendered_ids = []
+
+    class FakeJob:
+        def __init__(self, offer_id, api_url, out_root):
+            self.offer_id = offer_id
+
+        def run(self, capture_video, preset_keys, skip_narration, capture_id=None,
+                languages=None):
+            rendered_ids.append(self.offer_id)
+            render_main._STOP = True
+
+    monkeypatch.setattr(render_main, "RenderJob", FakeJob)
+    _patch_client(monkeypatch, [
+        {"offer_id": "off-1", "capture_id": "cap-1"},
+        {"offer_id": "off-2", "capture_id": "cap-2"},
+    ])
+
+    assert render_main.sweep("http://fake", tmp_path, ["landscape"], True) == 1
+    assert rendered_ids == ["off-1"], "the stop must land BETWEEN candidates"
+
+
+def test_stop_flag_stops_the_queue_drain_between_jobs(monkeypatch, tmp_path):
+    monkeypatch.setattr(render_main, "_STOP", False)
+    claims = [_claimed_job(offer_id="off-1"), _claimed_job(offer_id="off-2")]
+    client = QueueClient([_candidate("off-1"), _candidate("off-2")], claims)
+
+    class FakeJob:
+        def __init__(self, offer_id, api_url, out_root):
+            self.offer_id = offer_id
+
+        def run(self, capture_video, preset_keys, skip_narration, capture_id=None,
+                languages=None):
+            render_main._STOP = True  # stop right after the in-flight job
+
+    monkeypatch.setattr(render_main, "RenderJob", FakeJob)
+    keys = render_main._drain_render_jobs(
+        client, "http://fake", tmp_path, ["landscape"], True, "studio",
+        [_candidate("off-1"), _candidate("off-2")])
+    assert keys == {("off-1", "en")}, "only the in-flight job is rendered"
+    assert client.results[-1][1]["detail"] == "rendered"
+
+
+def test_low_disk_stops_the_render_before_any_work(monkeypatch, tmp_path):
+    """Disk preflight: a volume near the MTK_MIN_FREE_DISK_MB threshold must
+    fail before the first encode (an opaque ffmpeg I/O error and a
+    half-written project solve nothing)."""
+    _patch_client(monkeypatch, [])
+    job = render_main.RenderJob("off-1", "http://fake", tmp_path)
+    job.language_policy = {"narration_languages": ["en"]}
+    monkeypatch.setattr(
+        render_main.disk_space_mod, "low_space",
+        lambda path, **k: "only 3 MiB free on the render volume (threshold "
+                         "2048 MiB, MTK_MIN_FREE_DISK_MB) — free disk space")
+    monkeypatch.setattr(job, "_run_language",
+                        lambda *a: pytest.fail("no render may start without free disk"))
+    with pytest.raises(SystemExit, match="MTK_MIN_FREE_DISK_MB"):
+        job.run(None, ["landscape"], True)
+
+
 
 def test_explainer_base_writes_cards_manifest_and_covers_the_speech(tmp_path, monkeypatch):
     """M3: without a capture, an explainer job builds its base video from the

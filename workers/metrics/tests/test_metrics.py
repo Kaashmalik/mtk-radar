@@ -238,3 +238,53 @@ def test_measure_persists_provenance_degradation_and_retention_estimate():
     assert "retention_3s_bucket_ratio" not in snap
     assert "retention_3s_bucket_seconds" not in snap
     assert snap["raw"]["meta"]["unsupported_groups"] == ["impressions"]
+
+
+# -------------------------------------------- sweep-lock renewal (production)
+
+class CountingLockAPI(FakeAPI):
+    """FakeAPI that counts /locks/acquire calls (the initial acquire plus one
+    per mid-sweep renewal); `refuse_on_call` simulates losing the lock by
+    refusing that acquire call number (409-style)."""
+
+    def __init__(self, posts, refuse_on_call=None):
+        super().__init__(posts)
+        self.acquire_calls = 0
+        self._refuse_on_call = refuse_on_call
+
+    def post(self, path, json=None):
+        if path == "/locks/acquire":
+            self.acquire_calls += 1
+            if self._refuse_on_call is not None \
+                    and self.acquire_calls >= self._refuse_on_call:
+                return FakeResponse({"acquired": False}, status_code=409)
+        return FakeAPI.post(self, path, json=json)
+
+
+def test_the_sweep_lock_is_renewed_between_measured_posts():
+    """A backlog of 600s platform pulls can outlive the fixed 300s lock TTL:
+    exclusivity must be re-asserted before each post, or a second metrics
+    worker can silently join mid-flight and double-pull the same rows."""
+    posts = [
+        {"id": "sch-yt", "platform": "youtube", "remote_post_id": "vid1"},
+        {"id": "sch-fb", "platform": "facebook", "remote_post_id": "vid2"},
+    ]
+    api = CountingLockAPI(posts)
+    w = _worker(posts, {"youtube": FakeYouTube(), "facebook": FakeFacebook()})
+    w.api = api
+    assert w.run_once() == 2
+    assert api.acquire_calls == 1 + len(posts), \
+        "the initial acquire plus one renewal before each measured post"
+
+
+def test_a_lost_sweep_lock_aborts_the_rest_of_the_sweep():
+    """Fail closed: once exclusivity cannot be re-proven, a second worker may
+    be measuring the same rows — the rest of the sweep must not run."""
+    posts = [{"id": f"sch-{i}", "platform": "youtube", "remote_post_id": f"vid{i}"}
+             for i in range(1, 4)]
+    api = CountingLockAPI(posts, refuse_on_call=3)  # acquire, renew, REFUSE
+    w = _worker(posts, {"youtube": FakeYouTube()})
+    w.api = api
+    assert w.run_once() == 1, "only the post measured under a proven lock counts"
+    assert api.acquire_calls == 3
+    assert len([b for path, b in api.written if path.endswith("/metrics")]) == 1

@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "packages"))
 
 from api_paging import fetch_all  # noqa: E402
 from circuit import AccountBreaker  # noqa: E402
+import disk_space as disk_space_mod  # noqa: E402
 import quota as quota_mod  # noqa: E402
 from object_storage import materialize  # noqa: E402
 from upload_sessions import APIUploadSessionStore  # noqa: E402
@@ -84,6 +85,12 @@ def _instagram_exchange(token: str, app_id: str, secret: str) -> dict:
 
 API_URL_DEFAULT = "http://localhost:8000"
 SWEEP_INTERVAL_S = 60
+
+#: Upload-attempt lease (MTK_PUBLISH_ATTEMPT_LEASE_S, default 1800): must
+#: cover the WORST case — a 600s YouTube upload + 300s confirmation wait +
+#: package finalize — so a slow-but-legitimate upload never reads as an
+#: abandoned attempt (the v0.23 duplicate protection holds on open markers).
+ATTEMPT_LEASE_S = int(os.environ.get("MTK_PUBLISH_ATTEMPT_LEASE_S", "1800"))
 
 # §17: scheduling/publishing is only allowed from these offer states; the
 # worker rechecks the LIVE state immediately before every upload.
@@ -798,7 +805,16 @@ class Publisher:
                 delay = max(delay, server_after)
             updated = post.get("updated_at")
             if updated:
-                tried = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+                # Malformed timestamps cannot prove the backoff elapsed —
+                # skip (fail closed) rather than hammer the transition.
+                try:
+                    tried = datetime.fromisoformat(
+                        str(updated).replace("Z", "+00:00"))
+                except ValueError:
+                    log.warning("schedule %s: malformed updated_at %r — "
+                                "auto-retry left pending until it is repaired",
+                                post["id"], str(updated)[:100])
+                    continue
                 if tried.tzinfo is None:
                     tried = tried.replace(tzinfo=timezone.utc)
                 if now - tried < timedelta(seconds=delay):
@@ -1071,6 +1087,14 @@ class Publisher:
 
         cache = Path(os.environ.get("MTK_STORAGE_CACHE", "./.storage-cache"))
         video_path = render["video_path"]
+        # Disk preflight BEFORE materializing the package into the cache: a
+        # full volume would otherwise surface as a mid-download error with a
+        # half-written file. Held for a human (attention) with the actionable
+        # reason; the retry is the operator's, not a crash-loop's.
+        low_disk = disk_space_mod.low_space(cache)
+        if low_disk:
+            self._report(post["id"], ok=False, hold=True, detail=low_disk)
+            return False
         # v0.15: managed refs (s3://, local://) are materialized to a local
         # cache before upload; legacy plain paths resolve against the CWD
         # (single-host flow). A ref that can't be produced here fails the post
@@ -1156,7 +1180,15 @@ class Publisher:
                 APIUploadSessionStore(self.api, post["id"]))
 
         remote_id: str | None = None
+        # Q1: the reservation is CONSUMED only when a request may have
+        # reached YouTube. Entering adapter.upload() starts that clock (any
+        # later failure can still have spent quota); NotConfiguredError with
+        # no remote id is the adapter refusing to act BEFORE its first
+        # request — that path RELEASES the reservation instead of burning
+        # the day's quota for nothing.
+        request_sent = False
         try:
+            request_sent = True  # adapter.upload() entered — requests may fire
             remote_id = str(adapter.upload(
                 video_file,
                 meta,
@@ -1268,6 +1300,8 @@ class Publisher:
             self.api.post(f"/schedules/{post['id']}/pause")
             return False
         except NotConfiguredError as exc:
+            if remote_id is None:
+                request_sent = False  # refused before any request — release
             self._report(post["id"], ok=False, hold=True, attempt_token=attempt_token,
                          detail=str(exc))
             return False
@@ -1299,8 +1333,9 @@ class Publisher:
             return False
         finally:
             # Requests may have reached YouTube on every path through the
-            # upload block (failed and retried calls still cost quota).
-            quota_mod.settle(self.api, quota_reservation, sent=True)
+            # upload block once it was entered (failed and retried calls
+            # still cost quota); the never-entered paths above settle False.
+            quota_mod.settle(self.api, quota_reservation, sent=request_sent)
 
     def _render_for_post(self, post: dict) -> dict | None:
         render_id = post.get("render_id")
@@ -1407,8 +1442,8 @@ class Publisher:
         try:
             res = self.api.post(f"/schedules/{schedule_id}/attempt",
                                 json={"detail": "upload started",
-                                      "worker": "publishing-worker",
-                                      "lease_s": 900})
+                                      "worker": lease_holder("publishing"),
+                                      "lease_s": ATTEMPT_LEASE_S})
         except httpx.HTTPError as exc:
             log.error("could not claim upload attempt for %s: %s", schedule_id, exc)
             return None
@@ -1473,7 +1508,10 @@ class Publisher:
                 if _STOP:
                     break
                 time.sleep(interval_s)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, ValueError) as exc:
+                # ValueError: belt-and-braces — any malformed-payload crash
+                # (e.g. a non-JSON response body read as JSON) must degrade
+                # to the retry cadence, not take the loop down.
                 log.error("API unreachable, retrying in %ss: %s", interval_s, exc)
                 time.sleep(interval_s)
 

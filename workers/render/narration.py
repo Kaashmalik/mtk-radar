@@ -198,9 +198,14 @@ def synthesize(text: str, out_path: Path, *,
                         settle_reservation=reservation_id,
                         meta={"local": local})
         return out_path
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # G04: a failed/sent TTS request leaves its reservation standing —
         # the provider may still bill for it; unknown usage is not free.
+        # Log the failure WITHOUT the request (the Authorization header
+        # carries the API key) so the silent capture-audio fallback is at
+        # least visible as a warning in the worker log.
+        log.warning("TTS synthesis failed (%s) — falling back to capture audio: %s",
+                    type(exc).__name__, out_path)
         return None
 
 

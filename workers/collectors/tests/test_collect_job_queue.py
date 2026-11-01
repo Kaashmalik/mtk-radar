@@ -132,3 +132,26 @@ def test_knob_disables_the_drain(monkeypatch):
     c = _collector(client)
     assert asyncio.run(c._drain_collect_jobs([SOURCE])) == 0
     assert not [p for p, _ in client.posts if p.endswith("/jobs/claim")]
+
+
+def test_malformed_sources_registry_is_a_clean_no_op():
+    """A registry payload that is not JSON must not crash the sweep loop —
+    this cycle is a logged no-op (the heartbeat surfaces the persistent
+    failure) instead of a crash-loop; no poll may run off a registry the
+    worker could not even read."""
+    class BrokenJsonResponse(FakeResponse):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class MalformedRegistryClient(FakeClient):
+        def get(self, path, params=None):
+            if path.endswith("/sources"):
+                return BrokenJsonResponse(None)
+            return FakeClient.get(self, path, params)
+
+    client = MalformedRegistryClient([SOURCE], [
+        {"claimed": True, "id": "job-1", "kind": "collect",
+         "entity_id": "src-1", "payload": {}, "attempt": 1}])
+    c = _collector(client)
+    asyncio.run(c.sweep())  # must not raise
+    assert not client.posts, "neither the queue drain nor a poll may run"

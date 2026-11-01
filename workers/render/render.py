@@ -23,6 +23,15 @@ X264_PRESET: Final[str] = os.environ.get("MTK_RENDER_X264_PRESET", "medium")
 AUDIO_SAMPLE_RATE: Final[int] = 48_000
 TRUE_PEAK_HEADROOM_DB: Final[float] = 0.5
 
+# Hard ceiling for ONE delivery encode (MTK_RENDER_ENCODE_TIMEOUT_S, default
+# 2h). Every QC/probe/narration pass already carries its own (shorter)
+# timeout; the main encode had none, so a wedged filter graph or stalled
+# encoder could hold the job's lease forever. TimeoutExpired → the encoder is
+# killed, the partial output is scrubbed, and the failure surfaces through
+# the caller's normal dead-letter conventions.
+ENCODE_TIMEOUT_S: Final[float] = float(
+    os.environ.get("MTK_RENDER_ENCODE_TIMEOUT_S", "7200"))
+
 
 @dataclass(frozen=True)
 class Loudness:
@@ -203,4 +212,21 @@ def describe(cmd: list[str]) -> str:
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     if shutil.which(cmd[0]) is None:
         raise RuntimeError("ffmpeg binary not found — install FFmpeg or set FFMPEG_PATH")
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
+                              timeout=ENCODE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run has already killed the encoder. The output argument
+        # (cmd[-1], relative to cwd like every FFmpeg path here) may hold a
+        # partial file: scrub it the way failed renders are recorded — a
+        # later attempt must never mistake a truncated file for a render.
+        partial = Path(cwd) / cmd[-1]
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:  # noqa: BLE001 — best-effort scrub; nothing was pinned
+            pass
+        raise RuntimeError(
+            f"encode exceeded {ENCODE_TIMEOUT_S:.0f}s "
+            "(MTK_RENDER_ENCODE_TIMEOUT_S) and was killed — inspect the "
+            "filter graph or raise the timeout"
+        ) from exc

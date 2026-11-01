@@ -645,3 +645,67 @@ def test_capability_refresh_publishes_stale_creator_info_only(monkeypatch):
     assert puts == [("/platform-accounts/a1/capabilities",
                      {"capabilities": {"creator_username": "mtk",
                                        "privacy_level_options": ["SELF_ONLY"]}})]
+
+
+# ------------------------------------- attempt lease + preflight (production)
+
+def test_not_configured_adapter_releases_the_quota_reservation():
+    """A NotConfiguredError raised BEFORE the adapter's first request is a
+    pure refusal: nothing could have been spent, so the reservation is
+    RELEASED (not consumed) and the post is held with the actionable reason
+    instead of burning the day's quota for nothing."""
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+
+    class RefusedAdapter(FakeAdapter):
+        def upload(self, path, meta, privacy=None, idempotency_key=None):
+            raise pub.NotConfiguredError(
+                "this account is not configured for direct posts")
+
+    adapter = RefusedAdapter()
+    assert p._publish(_post(render), {"youtube": adapter}) is False
+    assert adapter.uploads == []
+    # the refusal happens AFTER the attempt claim but BEFORE any request —
+    # only the reservation's disposition differs from a real failure
+    assert _posts_to(p.api, "/attempt")
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False and result["hold"] is True
+    assert "not configured" in result["detail"]
+    # nothing was sent → nothing spent
+    (settle,) = _posts_to(p.api, "/quota/q-1/settle")
+    assert settle[2] == {"status": "released"}
+
+
+def test_the_attempt_lease_covers_the_worst_case_and_names_a_unique_holder():
+    """MTK_PUBLISH_ATTEMPT_LEASE_S must cover the worst case (600s upload +
+    300s confirmation + package finalize) or a slow-but-legitimate upload
+    reads as an abandoned attempt; and the holder must be unique per process
+    (lease fencing) — a shared name let workers settle each other's jobs."""
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    assert p._publish(_post(render), {"youtube": FakeAdapter()}) is True
+    (attempt,) = _posts_to(p.api, "/attempt")
+    body = attempt[2]
+    assert body["lease_s"] == pub.ATTEMPT_LEASE_S
+    assert pub.ATTEMPT_LEASE_S >= 1800
+    assert body["worker"] == pub.lease_holder("publishing")
+    assert body["worker"] != "publishing-worker"
+
+
+def test_low_disk_holds_the_post_before_the_cache_is_written(monkeypatch):
+    """Disk preflight: a full volume must fail the post BEFORE the package is
+    materialized into the cache — an actionable hold rather than a mid-
+    download crash with a half-written file and no operator reason."""
+    render = _render("APPROVED")
+    p = _publisher(_healthy_offer(), [render])
+    monkeypatch.setattr(
+        pub.disk_space_mod, "low_space",
+        lambda path, **k: "only 3 MiB free on the cache volume (threshold "
+                         "2048 MiB, MTK_MIN_FREE_DISK_MB) — free disk space")
+    adapter = FakeAdapter()
+    assert p._publish(_post(render), {"youtube": adapter}) is False
+    assert adapter.uploads == []
+    assert not _posts_to(p.api, "/attempt"), "no upload attempt may be claimed"
+    result = _result_calls(p.api)[0][2]
+    assert result["ok"] is False and result["hold"] is True
+    assert "MTK_MIN_FREE_DISK_MB" in result["detail"]

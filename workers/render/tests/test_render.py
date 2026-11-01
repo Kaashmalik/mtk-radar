@@ -134,6 +134,25 @@ class TestDeliveryFlags:
         assert "-af" not in cmd
 
 
+class TestEncodeTimeout:
+    def test_timeout_kills_the_encode_and_scrubs_the_partial_output(self, tmp_path, monkeypatch):
+        """The main encode was the only unbounded subprocess: a wedged filter
+        graph could hold the job lease forever. TimeoutExpired must surface as
+        a normal invocation failure naming the env knob, and the killed
+        encoder's partial output must never survive as a file."""
+        import sys
+
+        import render as render_mod
+        monkeypatch.setattr(render_mod, "ENCODE_TIMEOUT_S", 1)
+        cmd = [sys.executable, "-c",
+               "import time\nopen('out.mp4','wb').write(b'partial')\ntime.sleep(60)\n",
+               "out.mp4"]
+        with pytest.raises(RuntimeError, match="MTK_RENDER_ENCODE_TIMEOUT_S"):
+            render_mod.run(cmd, tmp_path)
+        assert not (tmp_path / "out.mp4").exists(), \
+            "a killed encode must not leave a partial file behind"
+
+
 class TestTimeline:
     def test_speech_is_authoritative_and_capture_overshoot_is_trimmed(self):
         expected, error = resolve_timeline(15.0, 12.0, narration_used=True)

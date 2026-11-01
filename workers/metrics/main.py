@@ -163,6 +163,24 @@ class MetricsWorker:
             log.info("another worker holds the %s lock — this sweep is skipped", name)
         return acquired
 
+    def _renew_sweep_lock(self, name: str) -> bool:
+        """Re-assert exclusivity mid-sweep; False means the lock was lost.
+
+        Mirrors the publishing worker: a sweep that outlives the fixed TTL
+        without renewing would silently let a second worker join mid-flight
+        (both pulling the same platform numbers)."""
+        try:
+            res = self.api.post("/locks/acquire",
+                                json={"name": name, "holder": self._sweep_holder,
+                                      "ttl_s": 300})
+        except Exception as exc:  # noqa: BLE001 — cannot prove exclusivity
+            log.warning("sweep lock renewal failed (%s) — aborting this sweep", exc)
+            return False
+        if res.status_code >= 300 or not bool((res.json() or {}).get("acquired", False)):
+            log.warning("sweep lock lost — aborting this sweep")
+            return False
+        return True
+
     def _release_sweep_lock(self, name: str) -> None:
         try:
             # Always name the holder — a name-only release could free another
@@ -194,6 +212,14 @@ class MetricsWorker:
         for post in posts:
             if not post.get("remote_post_id"):
                 continue
+            # A big backlog with 600s platform pulls can outlive the 300s
+            # lock TTL; renew between posts like the publishing worker —
+            # losing the lock means a second worker may be measuring the same
+            # rows, so the rest of the sweep must not run.
+            if not self._renew_sweep_lock("metrics"):
+                log.error("sweep lock lost after %d/%d post(s) — aborting this sweep",
+                          measured, len(posts))
+                break
             platform = post.get("platform")
             if platform == "tiktok":
                 continue  # documented gap — no insights access without an app

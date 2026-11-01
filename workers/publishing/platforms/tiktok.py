@@ -45,6 +45,18 @@ CREATOR_INFO_URL = "https://open.tiktokapis.com/v2/post/publish/creator_info/que
 TOKEN_MIN_TTL_S = 120
 MAX_SINGLE_CHUNK_BYTES = 64 * 1024 * 1024  # API allows 128MB/chunk; stay under
 
+#: Chunked FILE_UPLOAD (total_chunk_count > 1, one PUT per chunk) is the
+#: DOCUMENTED upgrade path for renders over the single-chunk cap. It is
+#: deliberately not implemented yet: there is no live TikTok app to test the
+#: multi-chunk protocol against, and a guessed implementation could corrupt
+#: uploads. Until it lands, the oversize refusal below carries operator
+#: guidance (export bundle / native upload) instead of a bare error.
+#:
+#: The cap in seconds is quoted at our delivery bitrate so the refusal makes
+#: clear that every NORMAL render (~1-3 min at 12 Mbps ≈ 90-270 MB) is
+#: affected, not just pathological clips.
+DELIVERY_BPS = 12_000_000  # render presets deliver 12 Mbps video (~+192k audio)
+
 PRIVACY_LEVELS = {
     "public": "PUBLIC_TO_EVERYONE",
     "unlisted": "SELF_ONLY",   # TikTok has no unlisted tier; closest is SELF_ONLY
@@ -170,8 +182,18 @@ class TikTokAdapter(PublishAdapter):
     def _do_upload(self, video_path: Path, meta: dict[str, Any], privacy: str) -> str:
         size = Path(video_path).stat().st_size
         if size > MAX_SINGLE_CHUNK_BYTES:
+            cap_s = MAX_SINGLE_CHUNK_BYTES * 8 / DELIVERY_BPS
+            # Actionable, the way other adapter errors carry operator
+            # guidance: this refusal becomes a held attention item in the
+            # worker, so it states the limit (in bytes AND ≈seconds at the
+            # delivery bitrate) and what to do instead.
             raise RuntimeError(
-                f"video {size}B exceeds single-chunk cap — split before uploading"
+                f"video is {size}B but the worker's single-chunk TikTok "
+                f"FILE_UPLOAD cap is {MAX_SINGLE_CHUNK_BYTES}B (~{cap_s:.0f}s "
+                f"at the {DELIVERY_BPS // 1_000_000} Mbps delivery bitrate) — "
+                "use the export bundle / native upload until chunked upload "
+                "is implemented (total_chunk_count > 1 is the documented "
+                "upgrade path)"
             )
 
         level = PRIVACY_LEVELS.get(privacy, "SELF_ONLY")

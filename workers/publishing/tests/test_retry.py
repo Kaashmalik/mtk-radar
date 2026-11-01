@@ -106,3 +106,16 @@ def test_api_unreachable_is_nonfatal():
     p = pub.Publisher(api_url="http://fake")
     p.api = DeadAPI()
     assert p.retry_failed() == 0
+
+
+def test_malformed_updated_at_is_skipped_not_fatal():
+    """A corrupted updated_at cannot prove the backoff elapsed: the post is
+    skipped (fail closed, no transition POST) instead of crashing the retry
+    sweep with ValueError."""
+    bad = _failed()
+    bad["updated_at"] = "not-a-timestamp"
+    p = _worker([bad])
+    p.RETRY_BASE_S = 300
+    assert p.retry_failed() == 0
+    assert not [c for c in p.api.calls if c[0] == "POST"], \
+        "a malformed timestamp must never trigger a requeue"

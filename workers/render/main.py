@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -45,6 +46,7 @@ from api_paging import iter_pages  # noqa: E402
 
 import captions as captions_mod  # noqa: E402
 import covers as covers_mod  # noqa: E402
+import disk_space as disk_space_mod  # noqa: E402
 import explainer as explainer_mod  # noqa: E402
 import reframe as reframe_mod  # noqa: E402
 import motion as motion_mod  # noqa: E402
@@ -421,6 +423,12 @@ class RenderJob:
         and registered render row so approval/publishing can bind to the exact
         language hash.
         """
+        # Disk preflight: a volume that fills mid-encode surfaces as an
+        # opaque ffmpeg I/O error and a half-written project. Skip cleanly
+        # with an operator-actionable reason (MTK_MIN_FREE_DISK_MB) instead.
+        low_disk = disk_space_mod.low_space(self.project)
+        if low_disk:
+            raise SystemExit(low_disk)
         policy = self._load_language_policy()
         allowed = tuple(policy["narration_languages"])
         requested = tuple(languages or (self.language,))
@@ -927,6 +935,13 @@ def _ensure_render_jobs(client: httpx.Client, candidates: list[dict]) -> int:
 
 RENDER_LEASE_S = int(os.environ.get("MTK_RENDER_LEASE_S", "3600"))
 RENDER_LEASE_TOUCH_S = int(os.environ.get("MTK_RENDER_LEASE_TOUCH_S", "600"))
+# Hard cap on TOTAL lease age for one job (MTK_RENDER_MAX_LEASE_S, default
+# 4x the claim lease). Without it a wedged encode is renewed forever and the
+# job never returns to the pool: past the cap the keeper stops touching, sets
+# the existing lease-lost flag, and the lease expires naturally so another
+# worker can pick the job up — exactly like a dead process.
+RENDER_MAX_LEASE_S = int(os.environ.get(
+    "MTK_RENDER_MAX_LEASE_S", str(RENDER_LEASE_S * 4)))
 
 
 def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event,
@@ -940,11 +955,24 @@ def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event,
     every RENDER_LEASE_TOUCH_S until the render finishes or the process dies
     (a dead process stops touching → the lease genuinely expires, as before).
 
+    Renewal is BOUNDED by RENDER_MAX_LEASE_S of total lease age: a render
+    that cannot finish inside the cap is wedged, not legitimate, and the job
+    must return to the pool instead of being held by a zombie.
+
     A 409 means this process no longer holds the lease (expired and taken
     over, or reset by an operator): `lost` is set so the caller does not
     report an outcome for work it no longer owns.
     """
+    started = time.monotonic()
     while not stop.wait(RENDER_LEASE_TOUCH_S):
+        if time.monotonic() - started >= RENDER_MAX_LEASE_S:
+            log.error("render job %s: lease age cap reached (%ss) — a render "
+                      "this long is wedged; stopping renewal so the lease "
+                      "expires and the job returns to the pool",
+                      job_id, RENDER_MAX_LEASE_S)
+            if lost is not None:
+                lost.set()
+            return
         try:
             resp = client.post(f"/jobs/{job_id}/touch",
                                json={"worker": holder,
@@ -962,6 +990,25 @@ def _lease_keeper(client: httpx.Client, job_id: str, stop: threading.Event,
             log.warning("lease renewal for render job %s failed: %s", job_id, exc)
 
 
+# ---------------------------------------------------------- graceful stop
+# SIGTERM (docker stop / systemd) must NOT abandon a render mid-encode: the
+# worker finishes the job it is on, reports the outcome, then exits.
+_STOP = False
+
+
+def _install_stop_handlers() -> None:
+    def _handler(signum, _frame):
+        global _STOP
+        _STOP = True
+        log.info("signal %s received — finishing the current item, then exiting", signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # pragma: no cover — non-main thread
+            pass
+
+
 def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
                        preset_keys: list[str], skip_narration: bool,
                        motion_template: str, candidates: list[dict]) -> set:
@@ -976,6 +1023,9 @@ def _drain_render_jobs(client: httpx.Client, api_url: str, out_root: Path,
     rendered_keys: set = set()
     holder = lease_holder("render")
     for _ in range(50):  # bounded per sweep; results remove claimed jobs
+        if _STOP:
+            log.info("stop requested — remaining render jobs stay queued")
+            break
         try:
             resp = client.post("/jobs/claim", json={
                 "worker": holder, "lease_s": RENDER_LEASE_S,
@@ -1093,6 +1143,10 @@ def sweep(api_url: str, out_root: Path, preset_keys: list[str],
     for candidate in candidates:
         if (candidate["offer_id"], candidate.get("language") or "en") in drained_keys:
             continue  # already rendered via the queue drain this sweep
+        if _STOP:
+            log.info("stop requested — %d candidate(s) left for the next sweep",
+                     len(candidates) - rendered)
+            break
         # The kill switch is re-checked before each irreversible render, so a
         # pause during a long sweep takes effect immediately.
         current = _load_policy(client)
@@ -1143,6 +1197,7 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=900, help="seconds between sweeps")
     args = parser.parse_args()
 
+    _install_stop_handlers()
     _require_ffmpeg()
     ffmpeg_path = shutil.which(FFMPEG_PATH) or FFMPEG_PATH
     hb = WorkerHeartbeat(
@@ -1167,9 +1222,11 @@ def main() -> None:
             return
         hb.start()
         try:
-            while True:  # service mode: the render queue is self-serving
+            while not _STOP:  # service mode: the render queue is self-serving
                 sweep(args.api, Path(args.out), presets, args.skip_narration, args.limit,
                       args.motion)
+                if _STOP:
+                    break
                 time.sleep(max(30, args.interval))
         finally:
             hb.stop()

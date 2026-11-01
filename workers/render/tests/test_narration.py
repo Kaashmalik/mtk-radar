@@ -156,3 +156,30 @@ class TestMixSegments:
     def test_disclosure_stays_false_without_track(self):
         """The contract main.py relies on: no track → used=False → no label."""
         assert narration.disclosure_record(used=False) == {"synthetic_narration": False}
+
+
+class TestSynthesize:
+    def test_a_dead_tts_endpoint_is_a_warning_never_an_exception_or_key_leak(
+            self, tmp_path, monkeypatch, caplog):
+        """The silent capture-audio fallback must at least be visible: the
+        failure is logged with the exception type and output path — never
+        the request, whose Authorization header carries the API key."""
+        import logging
+
+        import httpx
+
+        def boom(*args, **kwargs):
+            raise httpx.ConnectError("tts host unreachable")
+
+        monkeypatch.setattr(httpx, "post", boom)
+        out = tmp_path / "narration-000.mp3"
+        with caplog.at_level(logging.WARNING, logger="render.narration"):
+            result = narration.synthesize(
+                "A line of approved narration.", out,
+                base_url="https://tts.example/v1", api_key="secret-tts-key-123")
+        assert result is None, "a failed synthesis falls back to capture audio"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("ConnectError" in m for m in messages), \
+            "the warning names the failure type so the fallback is traceable"
+        assert all("secret-tts-key-123" not in m for m in messages), \
+            "the API key must never reach the log"

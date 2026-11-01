@@ -294,7 +294,14 @@ class Collector:
             return
         resp = self.client.get(f"{self.api_url}/sources", params={"enabled": "true"})
         resp.raise_for_status()
-        sources = resp.json()
+        try:
+            sources = resp.json()
+        except ValueError:
+            # A malformed registry payload must not kill the loop — return
+            # cleanly and let the monitor heartbeat surface the persistent
+            # failure; this cycle stays a no-op rather than a crash-loop.
+            log.error("sources registry returned a malformed payload — sweep skipped")
+            return
         now = time.time()
 
         # Job-driven first (durable owed work), then the cadence sweep as the
