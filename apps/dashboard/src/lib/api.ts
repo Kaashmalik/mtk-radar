@@ -1,5 +1,8 @@
 /** Server-side API helper for RSC pages — attaches the shared bearer token
- * when MTK_API_TOKEN is configured (matches services/api/api_hardening.py). */
+ * when MTK_API_TOKEN is configured (matches services/api/api_hardening.py).
+ * `server-only` is defense-in-depth: an accidental import from a client
+ * component fails the build instead of shipping MTK_API_TOKEN to browsers. */
+import "server-only";
 
 export const API_URL = process.env.API_URL ?? "http://localhost:8000";
 

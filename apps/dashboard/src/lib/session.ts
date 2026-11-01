@@ -124,11 +124,37 @@ export function cookieOptions(secure: boolean): {
   };
 }
 
-/** True when the user-facing request arrived over HTTPS (directly or via a
- * TLS-terminating proxy). Local `next start` on http:// must still be able to
- * set a non-Secure cookie for the E2E suite. */
+/** True when the deployment is explicitly behind a TLS-terminating reverse
+ * proxy (docker compose / traefik / nginx) and the operator has opted in with
+ * TRUST_PROXY=1. Server-only env: it must NEVER be prefixed NEXT_PUBLIC_.
+ * While unset, every X-Forwarded-* header is treated as client-controlled and
+ * spoofable, so it is ignored. */
+export function trustProxy(): boolean {
+  return (process.env.TRUST_PROXY ?? "").trim().toLowerCase() === "1";
+}
+
+/** Calling address for the login brute-force throttle. Direct-connection
+ * identities are not observable from an App Router route handler, so without
+ * a trusted proxy every caller shares the "unknown" bucket on purpose (a
+ * spoofer must not be able to rotate buckets by forging headers).
+ * Mirror of services/api/api_hardening.py's _client_ip(). */
+export function clientIp(request: Request): string {
+  if (trustProxy()) {
+    const forwarded = request.headers.get("x-forwarded-for");
+    const first = forwarded?.split(",")[0].trim();
+    if (first) return first.slice(0, 120);
+  }
+  return "unknown";
+}
+
+/** True when the user-facing request arrived over HTTPS — either directly or,
+ * only with TRUST_PROXY=1, via a TLS-terminating proxy's forwarded hints.
+ * Local `next start` on http:// must still be able to set a non-Secure cookie
+ * for the E2E suite, so production-only defaults never force `secure` on. */
 export function requestIsSecure(request: Request): boolean {
-  const forwarded = request.headers.get("x-forwarded-proto");
-  if (forwarded) return forwarded.split(",")[0].trim().toLowerCase() === "https";
+  if (trustProxy()) {
+    const forwarded = request.headers.get("x-forwarded-proto");
+    if (forwarded) return forwarded.split(",")[0].trim().toLowerCase() === "https";
+  }
   return new URL(request.url).protocol === "https:";
 }

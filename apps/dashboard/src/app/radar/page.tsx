@@ -11,7 +11,7 @@ import Link from "next/link";
 
 import RadarScope, { type RadarCandidate } from "../RadarScope";
 import { CompetitorEvidence, PromoteButton, ScanButton, TrendAction } from "./RadarActions";
-import { apiFetch } from "@/lib/api";
+import { loadJson, type Loaded } from "@/lib/load";
 
 type Candidate = RadarCandidate & {
   url: string;
@@ -42,14 +42,16 @@ type TrendsResponse = {
   summary: { total: number; hot: number; shortlisted: number; average_score: number };
 };
 
-async function getTrends(): Promise<TrendsResponse> {
-  try {
-    const res = await apiFetch("/trends?limit=100", { cache: "no-store" });
-    if (!res.ok) return { candidates: [], summary: { total: 0, hot: 0, shortlisted: 0, average_score: 0 } };
-    return (await res.json()) as TrendsResponse;
-  } catch {
-    return { candidates: [], summary: { total: 0, hot: 0, shortlisted: 0, average_score: 0 } };
-  }
+const FALLBACK: TrendsResponse = {
+  candidates: [],
+  summary: { total: 0, hot: 0, shortlisted: 0, average_score: 0 },
+};
+
+/** Loaded<T> (the queue/settings/inbox pattern): an outage must not render as
+ * the zero state. loadJson returns the fallback so the page can still render,
+ * but carries `ok` so it can say "unavailable" instead of "Nothing scored yet". */
+async function getTrends(): Promise<Loaded<TrendsResponse>> {
+  return loadJson<TrendsResponse>("/trends?limit=100", FALLBACK);
 }
 
 function scoreTone(score: number): string {
@@ -118,7 +120,8 @@ function scoreRow(label: string, value: number) {
 export const dynamic = "force-dynamic";
 
 export default async function RadarPage() {
-  const data = await getTrends();
+  const trends = await getTrends();
+  const data = trends.data;
   const top = data.candidates[0];
 
   return (
@@ -141,14 +144,24 @@ export default async function RadarPage() {
           <div className="panel-head">
             <div>
               <h2>Signal health</h2>
-              <p>Latest scored cohort</p>
+              <p>{trends.ok ? "Latest scored cohort" : "Live data unavailable"}</p>
             </div>
-            <span className="tag tag-accent">{data.summary.total} leads</span>
+            <span className={`tag ${trends.ok ? "tag-accent" : ""}`}>
+              {trends.ok ? `${data.summary.total} leads` : "unavailable"}
+            </span>
           </div>
-          <div className="metric-row"><span>Hot (≥ 78)</span><strong>{data.summary.hot}</strong></div>
-          <div className="metric-row"><span>Shortlisted</span><strong>{data.summary.shortlisted}</strong></div>
-          <div className="metric-row"><span>Average score</span><strong>{Number(data.summary.average_score || 0).toFixed(1)}</strong></div>
-          <div className="metric-row"><span>Human gate</span><strong>verification</strong></div>
+          {trends.ok ? (
+            <>
+              <div className="metric-row"><span>Hot (≥ 78)</span><strong>{data.summary.hot}</strong></div>
+              <div className="metric-row"><span>Shortlisted</span><strong>{data.summary.shortlisted}</strong></div>
+              <div className="metric-row"><span>Average score</span><strong>{Number(data.summary.average_score || 0).toFixed(1)}</strong></div>
+              <div className="metric-row"><span>Human gate</span><strong>verification</strong></div>
+            </>
+          ) : (
+            <div className="empty-state">
+              Signal health unavailable — the API did not answer. These are not zero scores.
+            </div>
+          )}
         </aside>
       </section>
 
@@ -160,7 +173,14 @@ export default async function RadarPage() {
               <p>Hotter leads sit closer to the centre.</p>
             </div>
           </div>
-          <RadarScope candidates={data.candidates} label="Full topic radar" />
+          {trends.ok ? (
+            <RadarScope candidates={data.candidates} label="Full topic radar" />
+          ) : (
+            <div className="notice notice-danger" role="alert">
+              Radar plot unavailable — the API did not answer. This is not an empty
+              radar; reload once the stack is reachable.
+            </div>
+          )}
         </div>
 
         <div className="panel">
@@ -171,7 +191,12 @@ export default async function RadarPage() {
             </div>
             {top && <span className={`tag ${scoreTone(Number(top.score))}`}>{Number(top.score).toFixed(1)}</span>}
           </div>
-          {!top ? (
+          {!trends.ok ? (
+            <div className="empty-state">
+              Top lead unavailable — the API did not answer. This is not “nothing
+              scored yet”; reload once the stack is reachable.
+            </div>
+          ) : !top ? (
             <div className="empty-state">
               No leads yet. Scan the inbox to score unprocessed items against the radar model.
             </div>
@@ -218,9 +243,14 @@ export default async function RadarPage() {
             <h2>Scored leads</h2>
             <p>Every bar can be recomputed from the item; no opaque model score.</p>
           </div>
-          <span className="tag">{data.candidates.length} shown</span>
+          <span className="tag">{trends.ok ? `${data.candidates.length} shown` : "unavailable"}</span>
         </div>
-        {data.candidates.length === 0 ? (
+        {!trends.ok ? (
+          <div className="notice notice-danger" role="alert">
+            Scored leads unavailable — the API did not answer. This is not an empty
+            radar; reload once the stack is reachable.
+          </div>
+        ) : data.candidates.length === 0 ? (
           <div className="empty-state">
             Nothing scored yet. Use “Scan inbox → radar”; unprocessed items become ranked
             candidates and never enter an offer automatically.

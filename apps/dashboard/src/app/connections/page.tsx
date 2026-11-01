@@ -24,6 +24,8 @@ type Account = {
   last_error: string | null;
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function ConnectionsPage() {
   let accounts: Account[] = [];
   let apiDown = false;

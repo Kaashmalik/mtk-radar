@@ -34,6 +34,11 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // Standalone server output for the Docker runtime image (FIX: build hygiene).
+  // `next start` still works for local/E2E runs (it only warns), but the
+  // dashboard run in containers ships only apps/dashboard/Dockerfile's traced
+  // server.js graph instead of the whole workspace tree.
+  output: "standalone",
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

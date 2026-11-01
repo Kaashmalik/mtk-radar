@@ -444,9 +444,14 @@ export function createDelivery({ fetchImpl, outbox, config,
           lastError: null,
         });
       } else { // terminal failure (auth_expired, rejected, …)
-        await outbox.patch(entry.id, {
-          status: "failed", attempts: entry.attempts + 1, lastError: result.statusKey,
-        });
+        // Terminal statuses are NOT retried forever either: without this cap
+        // a "failed" entry would be re-POSTed on every alarm tick until the
+        // outbox TTL. The cap keeps the manual retry(entry) path (which resets
+        // attempts) as the only way forward.
+        const attempts = entry.attempts + 1;
+        await outbox.patch(entry.id, attempts >= MAX_ATTEMPTS
+          ? { status: "abandoned", attempts, lastError: result.statusKey }
+          : { status: "failed", attempts, lastError: result.statusKey });
       }
       outcomes.push({ id: entry.id, ...result });
     }

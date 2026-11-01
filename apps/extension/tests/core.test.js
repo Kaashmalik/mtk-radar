@@ -365,6 +365,24 @@ describe("delivery engine", () => {
     assert.equal(entry.attempts, 5);
   });
 
+  it("terminal failures (422) stop being retried after MAX_ATTEMPTS too", async () => {
+    const reject = () => ({ status: 422 });
+    const env = makeEngine(Array.from({ length: 9 }, () => reject));
+    await env.enqueue({ url: "https://x.example/c" });
+    for (let i = 0; i < 6; i++) { await env.delivery.flush(); env.tick(); }
+    const entry = (await env.outbox.list())[0];
+    // attempts 1..4 keep it "failed" (still flushable); attempt 5 caps it.
+    assert.equal(entry.status, "abandoned");
+    assert.equal(entry.attempts, 5);
+    assert.equal(entry.lastError, "rejected");
+    // Abandoned entries are no longer in the flush filter — a terminal
+    // failure must not be re-POSTed on every alarm tick until the TTL.
+    const calls = env.calls.length;
+    await env.delivery.flush();
+    env.tick();
+    assert.equal(env.calls.length, calls);
+  });
+
   it("bounded outbox: refuses the 51st unsent entry with a useful action", async () => {
     const env = makeEngine([]);
     for (let i = 0; i < 50; i++) {

@@ -35,6 +35,8 @@ const TIER_COLORS: Record<string, string> = {
   C_excluded: "var(--danger)",
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function SourcesPage() {
   let sources: Source[] = [];
   let adapters: AdapterOption[] = [];
