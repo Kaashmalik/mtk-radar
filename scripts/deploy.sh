@@ -45,7 +45,7 @@ set_in_env() {
   grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"
 }
 # NEVER overwrite an existing value (bucket data / volumes are keyed to it):
-add_if_missing() { grep -q "^$2=" "$ENV_FILE" || echo "$2=$3" >> "$ENV_FILE"; }
+add_if_missing() { grep -q "^$1=" "$ENV_FILE" || echo "$1=$2" >> "$ENV_FILE"; }
 
 if [[ ! -f "$ENV_FILE" ]]; then
   cp .env.example "$ENV_FILE"
