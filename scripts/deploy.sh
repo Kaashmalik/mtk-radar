@@ -28,9 +28,18 @@ ENV_FILE=infra/.env
 COMPOSE="docker compose --env-file $ENV_FILE -f infra/docker/docker-compose.yml"
 PROFILES=()
 
-arg_has() { case " $* " in *" $1 "*) return 0;; *) return 1;; esac; }
-arg_has "$@" --with-workers  && PROFILES+=(--profile workers)
-arg_has "$@" --with-storage  && PROFILES+=(--profile storage)
+# Needle-first membership test: arg_has <flag> "$@". The needle must NOT be
+# part of the haystack it searches — the previous form arg_has "$@" <flag>
+# passed the probe flag into the function's own "$*", so every probe matched
+# and every deploy silently enabled every flag (2026-11-02: --profile storage
+# fired without --with-storage, aborting deploys on quay.io's gated minio
+# images and appending S3 lines to infra/.env).
+arg_has() {
+  local needle="$1"; shift
+  case " $* " in *" $needle "*) return 0 ;; *) return 1 ;; esac
+}
+arg_has --with-workers "$@" && PROFILES+=(--profile workers)
+arg_has --with-storage "$@" && PROFILES+=(--profile storage)
 
 # ---- 1) environment with strong secrets ----------------------------------
 gen() {
@@ -68,7 +77,7 @@ fi
 # keyed to them) and the clients get MTK_STORAGE_BACKEND=s3. Without the
 # flag, session-scoped placeholders keep the parse valid without persisting
 # anything (a storage-less deploy never writes S3 values into infra/.env).
-if arg_has "$@" --with-storage; then
+if arg_has --with-storage "$@"; then
   if ! grep -q '^MTK_S3_ACCESS_KEY=' "$ENV_FILE"; then
     add_if_missing MTK_S3_ACCESS_KEY "$(gen)"
     echo "✔ generated MTK_S3_ACCESS_KEY in $ENV_FILE (one-time; rotate manually)"
@@ -87,15 +96,32 @@ else
 fi
 
 # ---- 2) build + boot ------------------------------------------------------
-# Build the images explicitly first: `up --build` can attempt to resolve images
-# of profiled services that were never requested (e.g. minio on the registry),
-# which breaks deploys on hosts where a registry is unreachable. The workers
-# services share one image, so building `publishing` covers them all — except
-# page-capture, which has its own Dockerfile and, unpulled+unbuilt, makes `up`
-# try to PULL the local-only mtk-radar-page-capture:local from Docker Hub.
+# BUILD before `up`: `up` resolves a named service's image from the registry
+# when no local copy exists — for the local-only :local tags that means a
+# guaranteed-fail Docker Hub pull with a confusing error. The workers
+# services share one image, so building `publishing` covers them all —
+# except page-capture, which has its own Dockerfile and must be built
+# explicitly too.
 $COMPOSE build api dashboard
-if arg_has "$@" --with-workers; then $COMPOSE build publishing page-capture; fi
-$COMPOSE "${PROFILES[@]}" up -d
+if arg_has --with-workers "$@"; then $COMPOSE build publishing page-capture; fi
+
+# Name the services on `up` (belt-and-braces): compose then starts exactly
+# this set, so a mistake in the profile flags can never drag in services the
+# operator did not ask for (minio/storage-init sit behind quay.io's
+# anonymous-pull gate, 2026-11-01). Named services still start their
+# dependencies (postgres, redis, migrate) through depends_on, so boot order
+# and health gating are unchanged; PROFILES keeps explicitly named profiled
+# services startable. (For the record: the earlier storage-less deploys that
+# aborted on the gated minio images were caused by the arg_has bug above,
+# not by an unscoped `up` — this scoping merely limits the blast radius of
+# any future flag-handling bug.)
+CORE_SERVICES=(api dashboard)
+WORKER_SERVICES=(publishing verification collectors batch render page-capture monitor metrics)
+STORAGE_SERVICES=(minio storage-init)
+UP_SERVICES=("${CORE_SERVICES[@]}")
+arg_has --with-workers "$@" && UP_SERVICES+=("${WORKER_SERVICES[@]}")
+arg_has --with-storage "$@"  && UP_SERVICES+=("${STORAGE_SERVICES[@]}")
+$COMPOSE "${PROFILES[@]}" up -d "${UP_SERVICES[@]}"
 
 # ---- 3) connected smoke check --------------------------------------------
 echo "→ waiting for the API to become healthy…"

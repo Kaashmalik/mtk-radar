@@ -82,7 +82,12 @@ below blocks "production-ready".
   for the compose storage profile, `MTK_S3_*` pointed at an external
   S3-compatible store (AWS/R2/B2), or a replacement image. Until decided,
   the stack runs with media on named volumes — fully functional
-  single-host, but without multi-host `s3://` media refs.
+  single-host, but without multi-host `s3://` media refs. Fixed 2026-11-02:
+  `scripts/deploy.sh`'s `arg_has` flag probe matched unconditionally (the
+  probed flag sat inside the function's own `$*`), silently enabling the
+  storage profile on every deploy; both deploy scripts now also name their
+  services on `up`, so a storage-less deploy/start never resolves the
+  gated images at all.
 - [ ] Delete the pre-rewrite backup bundle
   (`D:\MalikTech\mtk-radar-pre-rewrite.bundle`) after verifying the rewritten
   history — the bundle still contains the purged personal data.

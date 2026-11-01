@@ -72,8 +72,18 @@ if [ "${MTK_START_STORAGE:-0}" = "1" ]; then
   PROFILE_ARGS+=(--profile storage)
 fi
 
+# Name the worker services on `up` (belt-and-braces, same as deploy.sh):
+# compose then starts exactly this set, so a profile-flag mistake can never
+# drag in gated services the operator did not ask for (minio/storage-init
+# refuse anonymous registry pulls since 2026-11-01). PROFILE_ARGS stays so
+# the explicitly listed profiled services remain startable.
+WORKER_SERVICES=(publishing verification collectors batch render page-capture monitor metrics)
+if [ "${MTK_START_STORAGE:-0}" = "1" ]; then
+  WORKER_SERVICES+=(minio storage-init)
+fi
+
 echo "→ starting workers (heartbeats become visible at /workers)"
-"${COMPOSE[@]}" "${PROFILE_ARGS[@]}" up -d
+"${COMPOSE[@]}" "${PROFILE_ARGS[@]}" up -d "${WORKER_SERVICES[@]}"
 
 cat <<'EOF'
 
