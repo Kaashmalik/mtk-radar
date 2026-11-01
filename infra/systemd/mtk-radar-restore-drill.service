@@ -2,10 +2,26 @@
 Description=MTK RADAR — monthly restore drill (newest dump → throwaway DB)
 After=docker.service network-online.target
 Wants=docker.service network-online.target
+# A red drill means "backups are unusable" — page exactly like a failed
+# backup instead of hoping someone checks the timer list.
+OnFailure=mtk-radar-backup-failed.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/mtk-radar
+# Same env-file convention as mtk-radar-backup.service (scripts/deploy.sh
+# writes infra/.env): the drill honours MTK_PG_CONTAINER / MTK_BACKUP_DIR /
+# MTK_DRILL_DB overrides. Note the drill restores the newest LOCAL dump —
+# when ./backups is empty you must fetch the dump from the off-site store by
+# hand first; the drill intentionally has no off-site pull code.
+# Override the path if the checkout is not /opt/mtk-radar.
+EnvironmentFile=/opt/mtk-radar/infra/.env
+# Runs as root (deliberate, no User=): drill.sh/restore.sh need `docker exec`
+# on the compose postgres container (docker socket access). Do not "fix"
+# this without granting the user docker access.
 # restore.sh restores into a THROWAWAY database (never prod); the drill fails
 # loudly when the newest dump cannot be restored end-to-end.
-ExecStart=/bin/sh -c 'latest=$(ls -t backups/mtk_radar_*.dump 2>/dev/null | head -1); [ -n "$latest" ] || { echo "NO BACKUP DUMP FOUND — backup timer is broken"; exit 1; }; exec bash ./infra/drill.sh "$latest"'
+# "$$" on purpose: systemd expands a single "$" to the unit environment
+# BEFORE the shell runs — "$latest" would arrive pre-emptied and the unit
+# would always print "NO BACKUP DUMP FOUND". "$$" hands "$" to /bin/sh.
+ExecStart=/bin/sh -c 'latest=$$(ls -t backups/mtk_radar_*.dump 2>/dev/null | head -1); [ -n "$$latest" ] || { echo "NO BACKUP DUMP FOUND — backup timer is broken"; exit 1; }; exec bash ./infra/drill.sh "$$latest"'

@@ -1,0 +1,22 @@
+[Unit]
+# OnFailure companion for mtk-radar-backup.service and the restore drill:
+# when either unit fails, surface it where an operator already looks —
+# journal/syslog (daemon.alert), and the same MTK_NOTIFY_WEBHOOK_URL the
+# monitor worker posts to (schema mtk-radar.notification.v1,
+# docs/notifications.md) when curl is available.
+Description=MTK RADAR — backup failure alert (journal + optional webhook)
+
+[Service]
+Type=oneshot
+# Optional on purpose ("-"): an alert must fire even when infra/.env is
+# missing; logger(1) needs no environment and no curl is required.
+EnvironmentFile=-/opt/mtk-radar/infra/.env
+# Runs as root (default, no User=): the unit only writes to syslog/journal
+# and optionally POSTs the webhook. Keep it in sync with the other units
+# rather than introducing a dedicated user here.
+# "$$" on purpose (systemd eats a single "$"; "$$" reaches /bin/sh as "$");
+# the "%%" in the date format are the same rule for "%" (systemd specifiers
+# like %H/%m/%T would otherwise mangle it before the shell runs).
+# Best-effort by design: the journal is the durable record, so the webhook
+# POST must never make this unit itself fail.
+ExecStart=/bin/sh -c 'logger -p daemon.alert -t mtk-radar "MTK RADAR backup path FAILED: the nightly backup or the monthly restore drill entered the failed state — run \"systemctl --failed\" and \"journalctl -u mtk-radar-backup.service -u mtk-radar-restore-drill.service\". Treat existing local dumps as unverified until investigated."; if [ -n "$${MTK_NOTIFY_WEBHOOK_URL:-}" ] && command -v curl >/dev/null 2>&1; then curl -fsS -m 10 -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $${MTK_NOTIFY_WEBHOOK_TOKEN:-}" -d "{\"schema\":\"mtk-radar.notification.v1\",\"source\":\"mtk-radar.systemd\",\"event\":\"backup.failed\",\"generated_at\":\"$$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\",\"host\":\"$$(hostname 2>/dev/null || echo unknown)\",\"severity\":\"error\",\"alert_count\":1,\"dashboard_url\":null,\"alerts\":[{\"severity\":\"error\",\"event\":\"backup.failed\",\"message\":\"Scheduled MTK RADAR backup or restore-drill unit failed. Inspect systemd; the journal is the durable record.\"}]}" "$$MTK_NOTIFY_WEBHOOK_URL" >/dev/null 2>&1 || logger -p daemon.warning -t mtk-radar "backup-failure webhook POST failed (best-effort) — the journal/syslog alert above is the durable record"; else logger -p daemon.warning -t mtk-radar "backup failure surfaced to journal/syslog only: set MTK_NOTIFY_WEBHOOK_URL in infra/.env (with curl installed) to also page the configured webhook"; fi; exit 0'

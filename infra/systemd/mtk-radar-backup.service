@@ -2,12 +2,27 @@
 Description=MTK RADAR — nightly Postgres backup (pg_dump -Fc, retention prune)
 After=docker.service network-online.target
 Wants=docker.service network-online.target
+# Never pass silently: a failed backup activates the alert unit, which logs a
+# daemon.alert entry (and POSTs the notification webhook when configured).
+OnFailure=mtk-radar-backup-failed.service
 
 [Service]
 Type=oneshot
 # WorkingDirectory must be the repo checkout (backup.sh targets the compose
 # postgres container and writes ./backups by default).
 WorkingDirectory=/opt/mtk-radar
+# infra/.env (created by scripts/deploy.sh) carries MTK_S3_* for the off-site
+# copy (backup.sh:37) plus MTK_PG_CONTAINER / MTK_BACKUP_DIR overrides. The
+# file is REQUIRED for off-site copies: without it the dump silently stays on
+# the same disk as the database, so the unit refuses to start when it is
+# missing (loud failure) instead of degrading to local-only backups.
+# Override the path if the checkout is not /opt/mtk-radar.
+EnvironmentFile=/opt/mtk-radar/infra/.env
+# Runs as root (deliberate, no User=): backup.sh needs `docker exec` on the
+# compose postgres container, i.e. docker socket access. Do not "fix" this to
+# a least-privilege user without granting that user docker access, or every
+# backup fails.
 ExecStart=/usr/bin/env bash ./infra/backup.sh 14
-# a failed backup pages the operator, it never passes silently
+# FailureAction stays "none": rebooting the host cannot fix a failed pg_dump.
+# The operator paging is the OnFailure unit declared above.
 FailureAction=none

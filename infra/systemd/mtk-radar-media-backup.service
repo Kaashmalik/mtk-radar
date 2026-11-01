@@ -1,0 +1,22 @@
+[Unit]
+# Install on the LAPTOP (pull side), never on the public server: the backup
+# destination is the machine that must keep a copy, and a pull cannot be
+# triggered by a compromised server (backup_media.sh header, 3-2-1 policy).
+Description=MTK RADAR — media backup (laptop pull, snapshot + SHA-256 verify)
+
+[Service]
+Type=oneshot
+# Adjust to the laptop's checkout path if it is not /opt/mtk-radar.
+WorkingDirectory=/opt/mtk-radar
+# Same env-file convention as the backup/drill units. Optional ("-") on
+# purpose: a laptop that never ran scripts/deploy.sh has no infra/.env; the
+# unit still starts and backup_media.sh prints its own setup guidance
+# (MTK_MEDIA_DEST, MTK_MEDIA_SOURCE or MTK_RCLONE_REMOTE) to stderr →
+# journal, and exits non-zero so the failure stays visible.
+EnvironmentFile=-/opt/mtk-radar/infra/.env
+ExecStart=/usr/bin/env bash ./infra/backup_media.sh
+# Runs as root (deliberate, no User=): the NAS mount (MTK_MEDIA_SOURCE) and
+# the dedicated backup root (MTK_MEDIA_DEST) are typically root-owned paths;
+# this unit needs no docker socket. Do not "fix" this without granting the
+# replacement user read access to the source and write access to the backup
+# root.

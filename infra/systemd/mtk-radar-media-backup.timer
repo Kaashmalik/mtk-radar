@@ -1,0 +1,15 @@
+[Unit]
+Description=MTK RADAR — daily media backup schedule (03:20 host time; host TZ on the laptop is PKT)
+
+[Timer]
+# 03:20 matches the example in infra/backup_media.sh — right after the 03:00
+# database backup, so the laptop snapshot and the nightly DB backup land in
+# the same window.
+OnCalendar=*-*-* 03:20:00
+# run immediately if the laptop was off/asleep at 03:20 — Persistent
+# catch-up is the whole reason this is a timer and not a cron line
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
