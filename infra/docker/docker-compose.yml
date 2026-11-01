@@ -65,6 +65,11 @@ services:
   # Renders/captions/captures become portable s3:// refs in the DB. Start the
   # stack with --profile workers --profile storage; set MTK_STORAGE_BACKEND=s3
   # plus MTK_S3_* (see .env.example) so workers publish refs.
+  # ⚠ 2026-11-01: upstream MinIO gated all free image pulls — the Docker Hub
+  # repo is deleted and quay.io refuses anonymous pulls (401). Starting this
+  # profile needs an authenticated `docker login quay.io` until the owner
+  # settles a storage source (quay login, external S3 via MTK_S3_*, or an
+  # alternative image). Without this profile media stays on named volumes.
   minio:
     profiles: ["storage"]
     image: quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z

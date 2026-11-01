@@ -26,8 +26,8 @@ Integration happens through pinned packages, pinned images, or APIs.
 | PostgreSQL | `16-alpine` (infra/docker) | PostgreSQL License | Service (container) | Notice retention required |
 | Redis | `7-alpine` (infra/docker) | RSALv2/SSPLv1 (server), MIT (clients) | Service (container) | Self-hosted use is fine; no redistribution of modified forks. Used as the API cache layer (v0.22). |
 | redis-py | `5.2.1` (services/api/requirements.txt) | MIT | Library (optional) | The API imports it lazily; without it the cache layer is disabled and the system runs unchanged. |
-| MinIO (S3-compatible storage) | `quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z` (compose) | AGPL-3.0 | Service (container, optional profile) | Used unmodified as the local S3 endpoint in dev; production deployments can point `MTK_S3_*` at any S3-compatible store. |
-| MinIO client (`mc`) | `quay.io/minio/mc:RELEASE.2024-06-13T16-04-24Z` (compose init job) | AGPL-3.0 | Service (container, optional profile) | Creates the bucket once; not part of the request path. |
+| MinIO (S3-compatible storage) | `quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z` (compose) | AGPL-3.0 | Service (container, optional profile) | Used unmodified as the local S3 endpoint in dev; production deployments can point `MTK_S3_*` at any S3-compatible store. 2026-11-01: upstream gated free pulls (Docker Hub repo deleted; quay.io requires authenticated `docker login`) — see the storage note in `docs/production-readiness-2026-11-01.md`. |
+| MinIO client (`mc`) | `quay.io/minio/mc:RELEASE.2024-06-13T16-04-24Z` (compose init job) | AGPL-3.0 | Service (container, optional profile) | Creates the bucket once; not part of the request path. Same 2026-11-01 pull gating as above. |
 | Next.js / React | `next 16.4.3`, `react 19.3.1` (apps/dashboard/package.json) | MIT | Library | — |
 | TypeScript | `^5.7.2` range (root + dashboard), resolves `5.9.3` in `pnpm-lock.yaml` | Apache-2.0 | Library | Range, not an exact pin |
 | zod | `^3.24.1` range (packages/offer-schema), resolves `3.25.76` | MIT | Library | Offer schema shared with the dashboard; range, not an exact pin |

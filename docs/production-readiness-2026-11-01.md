@@ -76,6 +76,13 @@ below blocks "production-ready".
 - [ ] Confirm backup off-site wiring: `MTK_S3_*` configured so
   `infra/backup.sh` copies every dump off-host and **a failed copy fails
   the backup**; confirm the monthly drill timer is armed.
+- [ ] Decide the local object-store source: upstream MinIO gated all free
+  image pulls on 2026-11-01 (Docker Hub repo deleted; quay.io refuses
+  anonymous pulls with 401). Options: authenticated `docker login quay.io`
+  for the compose storage profile, `MTK_S3_*` pointed at an external
+  S3-compatible store (AWS/R2/B2), or a replacement image. Until decided,
+  the stack runs with media on named volumes — fully functional
+  single-host, but without multi-host `s3://` media refs.
 - [ ] Delete the pre-rewrite backup bundle
   (`D:\MalikTech\mtk-radar-pre-rewrite.bundle`) after verifying the rewritten
   history — the bundle still contains the purged personal data.
