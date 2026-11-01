@@ -379,3 +379,113 @@ def test_approve_and_queue_is_reviewer_only_centrally():
         assert api_hardening.route_authorization_failure(cls, method, path), cls
     assert api_hardening.route_authorization_failure(
         api_hardening.CREDENTIAL_REVIEWER, method, path) is None
+
+
+# ------------------------------ machine actor attribution (P1-1, review fix)
+
+def _request_as(credential: str, actor: str | None = None):
+    """A bare Request stamped with a credential outcome — enough for the
+    identity helpers; no app/DB involved."""
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "method": "GET", "path": "/",
+                       "headers": [], "query_string": b""})
+    request.state.credential_class = credential
+    request.state.actor = actor
+    return request
+
+
+def test_machine_credentials_get_their_own_identity_not_the_route_default():
+    """P1-1: at require=False sites a machine credential is recorded under
+    its class-derived machine actor — never the route's human-sounding
+    default ("reviewer", "operator", …) and never a body-supplied name. The
+    sharpest case this closes: a worker token creating a schedule can no
+    longer file the human-attested fields as "reviewer"."""
+    for cls, expected in (
+        (api_hardening.CREDENTIAL_SERVICE, "system:service"),
+        (api_hardening.CREDENTIAL_WORKER, "system:worker"),
+        (api_hardening.CREDENTIAL_EXTENSION, "system:extension"),
+    ):
+        request = _request_as(cls)
+        assert api_hardening.effective_reviewer(
+            request, "Alice Approver", default="reviewer") == expected, cls
+        assert api_hardening.effective_reviewer(
+            request, None, default="reviewer") == expected, cls
+
+
+def test_machine_credentials_may_still_identify_an_automation_stage():
+    request = _request_as(api_hardening.CREDENTIAL_WORKER)
+    assert api_hardening.effective_reviewer(
+        request, "automation:schedule", default="reviewer") == "automation:schedule"
+
+
+def test_dev_open_body_fallback_is_unchanged():
+    """Dev-open mode (explicit opt-in, P0-1) keeps the legacy body fallback:
+    there is no credential boundary to protect there."""
+    request = _request_as(api_hardening.CREDENTIAL_DISABLED)
+    assert api_hardening.effective_reviewer(
+        request, "Body Name", default="reviewer") == "Body Name"
+    assert api_hardening.effective_reviewer(
+        request, None, default="reviewer") == "reviewer"
+
+
+def test_reviewer_token_identity_still_wins():
+    request = _request_as(api_hardening.CREDENTIAL_REVIEWER, actor="Kashi")
+    assert api_hardening.effective_reviewer(
+        request, "Someone Else", default="reviewer") == "Kashi"
+
+
+def test_is_machine_actor_matches_both_machine_namespaces():
+    assert api_hardening.is_machine_actor("system:worker")
+    assert api_hardening.is_machine_actor("automation:schedule")
+    assert api_hardening.is_machine_actor("System:Service")  # case-insensitive
+    assert not api_hardening.is_machine_actor(None)
+    assert not api_hardening.is_machine_actor("")
+    assert not api_hardening.is_machine_actor("reviewer")
+    assert not api_hardening.is_machine_actor("Kashi")
+
+
+# ------------------------------ fail-closed startup guard (P0-1, review fix)
+
+def _clear_all_credentials(monkeypatch):
+    monkeypatch.delenv("MTK_API_TOKEN", raising=False)
+    monkeypatch.delenv(api_hardening.WORKER_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(api_hardening.EXTENSION_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(api_hardening.ALLOW_UNAUTHENTICATED_ENV, raising=False)
+
+
+def test_boot_refuses_without_credentials(monkeypatch):
+    """No configured credential + no explicit opt-out → RuntimeError."""
+    _clear_all_credentials(monkeypatch)
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        api_hardening.verify_boot_authentication()
+
+
+def test_boot_dev_open_needs_the_explicit_opt_in_and_logs_critically(
+        monkeypatch, caplog):
+    """MTK_ALLOW_UNAUTHENTICATED=1 allows dev-open — loudly. A CRITICAL banner
+    names the mode so it can never run quietly in production by accident."""
+    _clear_all_credentials(monkeypatch)
+    monkeypatch.setenv(api_hardening.ALLOW_UNAUTHENTICATED_ENV, "1")
+    assert api_hardening.allow_unauthenticated() is True
+    with caplog.at_level(logging.CRITICAL, logger="mtk.api"):
+        api_hardening.verify_boot_authentication()  # must NOT raise
+    banners = [r for r in caplog.records if "DEV-OPEN" in r.getMessage()]
+    assert banners, "dev-open mode must be named in a CRITICAL banner"
+    assert banners[0].levelno == logging.CRITICAL
+
+
+@pytest.mark.parametrize("env", [
+    {"MTK_API_TOKEN": "tok"},
+    {"MTK_WORKER_TOKEN": "worker-tok"},
+    {"MTK_EXTENSION_TOKEN": "ext-tok"},
+])
+def test_any_configured_credential_boots_quietly(monkeypatch, env, caplog):
+    """A single credential of any class lifts the guard — no opt-in needed,
+    and no dev-open banner is logged."""
+    _clear_all_credentials(monkeypatch)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with caplog.at_level(logging.CRITICAL, logger="mtk.api"):
+        api_hardening.verify_boot_authentication()  # must NOT raise
+    assert not [r for r in caplog.records if "DEV-OPEN" in r.getMessage()]

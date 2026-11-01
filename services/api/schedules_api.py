@@ -38,6 +38,7 @@ from api_hardening import (
     CREDENTIAL_REVIEWER,
     credential_class,
     effective_reviewer,
+    is_machine_actor,
 )
 from offer_freshness import freshness_problem
 
@@ -239,6 +240,24 @@ async def _create_one_schedule(pool, offer_id: uuid.UUID, body: ScheduleIn,
     """Create ONE platform schedule. Every release gate lives here and is
     identical for single and batch creation (WP-D): the batch path is this
     function called once per platform — never a copy of the checks."""
+    # G23/TikTok: the Music Usage Confirmation (+ Branded Content Policy
+    # consent) is a HUMAN-ONLY attestation — the operator personally agreed
+    # to TikTok's terms for THIS post. A machine credential (system:worker
+    # / automation:<stage>) cannot consent on a person's behalf, so the
+    # schedule is refused before anything else runs; `consent: false` stays
+    # available to machine-created drafts (review P1-1).
+    if (body.platform == "tiktok" and body.tiktok is not None
+            and body.tiktok.consent and is_machine_actor(actor)):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "TikTok consent (Music Usage Confirmation / Branded Content "
+                "Policy) requires a human reviewer credential — a machine "
+                "credential cannot record a person's consent. Create the "
+                "schedule without consent and let a human re-record the "
+                "TikTok choices, or use a reviewer token."
+            ),
+        )
     offer = await pool.fetchrow(
         """
         SELECT id, title, provider, category, offer_type, state::text AS state,

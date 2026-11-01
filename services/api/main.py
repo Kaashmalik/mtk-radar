@@ -9,6 +9,8 @@ Run locally:
 
 import json
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -57,9 +59,32 @@ from upload_sessions_api import router as upload_sessions_router
 from schemas import ItemIn, PollResult, SourceIn, TosReviewIn
 from schemas import MAX_ITEM_CONTEXT_CHARS
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://mtk:mtk@localhost:5432/mtk_radar"
-)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip() or None
+
+#: The pre-hardening local default, kept ONLY as the dev/test fallback
+#: (review P2-3): with MTK_ALLOW_UNAUTHENTICATED=1 the sealed local dev/test
+#: environment keeps working without DATABASE_URL, while a deployment must
+#: set a real URL and never gets a silent hardcoded local postgres DSN.
+_DEV_DATABASE_URL = "postgresql://mtk:mtk@localhost:5432/mtk_radar"
+
+
+def required_database_url() -> str:
+    """The DSN the pool must use — fail fast at startup (review P2-3).
+
+    A deployment without DATABASE_URL refuses to boot instead of quietly
+    connecting to a hardcoded localhost postgres. The historical dev default
+    survives only under the explicit dev-open opt-in, matching the startup
+    authentication guard.
+    """
+    if DATABASE_URL:
+        return DATABASE_URL
+    if api_hardening.allow_unauthenticated():
+        return _DEV_DATABASE_URL
+    raise RuntimeError(
+        "DATABASE_URL is not configured — the API no longer falls back to a "
+        "hardcoded local postgres DSN. Set DATABASE_URL for this deployment "
+        f"(or MTK_ALLOW_UNAUTHENTICATED=1 for local development/tests)."
+    )
 
 app = FastAPI(title="MTK RADAR AI API", version="0.30.0")
 health_api.APP_VERSION = app.version
@@ -92,11 +117,171 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicit, not wildcards (review P2-1): preflights only ever pass what
+    # the real clients send. The dashboard calls go through its same-origin
+    # /api/backend proxy (Authorization, Content-Type), the extension sends
+    # Authorization + Content-Type (apps/extension/core.js), and the dash-
+    # board's verbs are GET/HEAD/POST/PUT/PATCH/DELETE (settings PUT,
+    # tos-review DELETE, items PATCH, everything else GET/POST).
+    allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
     # Cursor pagination is unusable from a browser without this: the
     # dashboard cannot read a header the cross-origin allowlist hides.
     expose_headers=["X-Next-Cursor"],
+)
+
+
+# ------------------------------------ request hardening (review P2-1/P2-2)
+
+#: Request bodies are JSON from the dashboard/extension/workers — a 5 MB cap
+#: sits far above every real payload and far below anything that could
+#: pressure the process. Env-tunable because signed screenshot blobs are the
+#: one payload family that can legitimately grow chunk by chunk.
+MAX_BODY_BYTES = int(os.environ.get("MTK_API_MAX_BODY_BYTES", "5000000"))
+
+#: Per-credential budget (requests per 60 s). One legitimate client
+#: (dashboard proxy, worker, extension) is far under it; a runaway loop is
+#: not. Keyed by the sha256 of the presented bearer credential, so tokens
+#: never appear in process state in plain form.
+RATE_LIMIT_RPM = int(os.environ.get("MTK_API_RATE_LIMIT_RPM", "3000"))
+RATE_WINDOW_S = 60
+
+
+class _RequestHardeningMiddleware:
+    """Pure-ASGI request hardening: body-size cap + per-credential budget.
+
+    (a) Content-Length above MAX_BODY_BYTES is refused with 413 before the
+        body is read. Bodies without Content-Length (chunked/streaming) can't
+        be pre-checked, so their receive channel is BOUNDED: once the cap is
+        passed the stream is disconnected — the request fails loudly (never
+        a silent truncation that would corrupt a "complete-looking" body).
+    (b) Requests are counted per credential token hash in a sliding 60 s
+        window (the same in-memory pattern as api_hardening's auth-failure
+        budget); over the limit the credential gets 429 + Retry-After.
+        Anonymous requests carry no budget key and stay under the auth gate's
+        own throttle — and the budget is DISABLED in dev-open mode (no
+        credentials configured) so tests are unaffected.
+
+    Wired in app.add_middleware below; direct class instantiation keeps it
+    testable without the real app.
+    """
+
+    def __init__(self, app, *, enforce_budget: bool,
+                 max_body_bytes: int = MAX_BODY_BYTES,
+                 requests_per_minute: int = RATE_LIMIT_RPM):  # noqa: ANN001
+        self.app = app
+        # Body cap ALWAYS applies (it protects the process); only the
+        # credential budget is a dev-open opt-out.
+        self.max_body_bytes = max(0, int(max_body_bytes))
+        self.rpm = max(0, int(requests_per_minute))
+        self.enforce_budget = enforce_budget
+        self._hits: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+        # Bounded: a flood of distinct forged credentials cannot grow the
+        # state unboundedly (same discipline as api_hardening).
+        self._max_keys = 10_000
+
+    # ---- (b) budget bookkeeping, sliding window --------------------------
+    def _budget_key(self, scope) -> str | None:  # noqa: ANN001
+        """sha256 of the presented bearer credential; None when absent/other
+        scheme (those requests are the auth gate's problem, not a budget)."""
+        for name, value in scope.get("headers") or ():
+            if name != b"authorization":
+                continue
+            scheme, _, credential = value.partition(b" ")
+            if scheme.lower() != b"bearer" or not credential:
+                return None
+            return api_hardening.token_hash(credential.decode("latin-1"))
+        return None
+
+    def _over_budget_and_record(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, ())
+                    if now - t < RATE_WINDOW_S]
+            if len(hits) >= self.rpm:
+                self._hits[key] = hits
+                return True
+            hits.append(now)
+            if len(self._hits) < self._max_keys or key in self._hits:
+                self._hits[key] = hits
+            elif self._hits:  # dict full, unseen key: drop the oldest
+                oldest = min(self._hits, key=lambda k: self._hits[k][0])
+                del self._hits[oldest]
+                self._hits[key] = hits
+            return False
+
+    # ---- helpers ---------------------------------------------------------
+    @staticmethod
+    async def _reject(send, status: int, message: str,  # noqa: ANN001
+                      extra_headers: tuple[tuple[bytes, bytes], ...] = ()) -> None:
+        body = json.dumps({"detail": message}).encode("utf-8")
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                        *extra_headers,
+                    ]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # (a) declared Content-Length is checkable BEFORE reading anything.
+        declared = None
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = None
+                break
+        if declared is not None and declared > self.max_body_bytes:
+            await self._reject(send, 413, "request body too large")
+            return
+
+        # (b) per-credential budget (auth-gated deployments only).
+        key = self._budget_key(scope)
+        if self.enforce_budget and key and self._over_budget_and_record(key):
+            await self._reject(
+                send, 429,
+                "request budget exceeded for this credential — retry after "
+                f"{RATE_WINDOW_S}s",
+                extra_headers=((b"retry-after",
+                                str(RATE_WINDOW_S).encode("ascii")),),
+            )
+            return
+
+        # (a, streaming) bodies without a checked Content-Length: bound the
+        # receive channel. On cap overflow we surface http.disconnect so the
+        # consumer never accepts a truncated-but-complete-looking body —
+        # "bounded as feasible": Starlette reads raise and the request fails
+        # instead of the process buffering unbounded input.
+        if declared is None:
+            received = 0
+
+            async def bounded_receive():  # noqa: ANN202
+                nonlocal received
+                message = await receive()
+                if message.get("type") == "http.request":
+                    received += len(message.get("body") or b"")
+                    if received > self.max_body_bytes:
+                        return {"type": "http.disconnect"}
+                return message
+
+            await self.app(scope, bounded_receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(
+    _RequestHardeningMiddleware,
+    # No credentials configured (dev-open) → no budget keys would ever bind;
+    # disabling keeps the test suite's request patterns from any budget.
+    enforce_budget=bool(api_hardening.service_tokens()),
 )
 
 app.include_router(offers_router)
@@ -132,7 +317,12 @@ app.include_router(api_hardening.router)
 
 @app.on_event("startup")
 async def startup() -> None:
-    await db.init(DATABASE_URL)
+    # Fail-closed boot policy, FIRST (review P0-1/P2-3): refuse to serve
+    # unauthenticated, and refuse a missing DATABASE_URL, before the pool or
+    # any route is touched. Dev-open (no credentials) needs the EXPLICIT
+    # MTK_ALLOW_UNAUTHENTICATED=1 opt-in and logs a CRITICAL banner.
+    api_hardening.verify_boot_authentication()
+    await db.init(required_database_url())
 
 
 @app.on_event("shutdown")

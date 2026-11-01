@@ -1868,7 +1868,8 @@ def test_reviewer_token_binds_audit_actor_over_body_strings(auth_client):
 
 
 def test_service_token_cannot_supply_a_human_reviewer_name(auth_client):
-    """Service credentials are audited under a role default, never a body name."""
+    """Service credentials are audited under their own MACHINE identity
+    (P1-1) — never a body name, never the route's human-sounding default."""
     res = auth_client.post("/offers", headers=SVC, json={
         "provider": "Svc Co", "category": "domains", "offer_type": "coupon",
         "reviewer": "Alice Approver",
@@ -1876,8 +1877,9 @@ def test_service_token_cannot_supply_a_human_reviewer_name(auth_client):
     assert res.status_code == 201, res.text
     rows = _run("SELECT actor FROM audit_log WHERE entity = 'offers' AND entity_id = $1 "
                 "ORDER BY created_at DESC LIMIT 1", __import__("uuid").UUID(res.json()["id"]))
-    assert rows[0]["actor"] == "reviewer"
+    assert rows[0]["actor"] == "system:service"
     assert rows[0]["actor"] != "Alice Approver"
+    assert rows[0]["actor"] != "reviewer"
 
 
 def test_unknown_token_rejected(auth_client):

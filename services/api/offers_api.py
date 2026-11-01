@@ -32,7 +32,8 @@ from pagination import (
     set_next_cursor,
 )
 from api_hardening import (CREDENTIAL_DISABLED, CREDENTIAL_REVIEWER,
-                           credential_class, effective_reviewer)
+                           credential_class, effective_reviewer,
+                           is_machine_actor)
 import tos_review
 from document_sections import MAX_SECTION_CHARS, SECTIONS_VERSION, split_sections
 from fetch_attestation import verify_provenance
@@ -799,7 +800,11 @@ async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Reque
             await _gate_automation_verify(pool, offer_id, policy, reviewer_on_record)
         elif target == "approved_for_video":
             await _gate_automation_approve(pool, offer_id, policy)
-    elif requires_review(target) and not reviewer_on_record:
+    # P1-1: a machine credential's recorded actor is its class-derived
+    # system:<class> identity — that must gate exactly like the anonymous
+    # case it replaced ("no recorded reviewer"), never like a human.
+    elif requires_review(target) and (
+            not reviewer_on_record or is_machine_actor(reviewer_on_record)):
         raise HTTPException(
             status_code=403,
             detail=f"transition to '{target}' requires a recorded reviewer",
@@ -809,7 +814,8 @@ async def _transition(pool, offer_id: uuid.UUID, t: TransitionIn, request: Reque
     # run above when an explicit automation:verify actor is authorized). A
     # plain service/worker/extension credential with no recorded reviewer must
     # not be able to verify an offer and skip those guardrails.
-    if (target == "verified" and not reviewer_on_record
+    if (target == "verified"
+            and (not reviewer_on_record or is_machine_actor(reviewer_on_record))
             and credential_class(request) not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED)):
         raise HTTPException(
             status_code=403,

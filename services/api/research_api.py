@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import db
-from api_hardening import effective_reviewer
+from api_hardening import effective_reviewer, is_machine_actor
 from settings_store import audit
 
 router = APIRouter(tags=["research"])
@@ -192,7 +192,11 @@ async def get_research(offer_id: uuid.UUID) -> dict:
 async def create_brief_version(offer_id: uuid.UUID, body: BriefIn,
                                request: Request) -> dict:
     actor = effective_reviewer(request, None)
-    if not actor:
+    # P1-1: a machine credential now resolves to its system:<class> actor
+    # instead of None — a brief is still a NAMED-REVIEWER document, so that
+    # machine identity must gate exactly like the missing identity it
+    # replaced.
+    if not actor or is_machine_actor(actor):
         raise HTTPException(status_code=403, detail="a named reviewer is required")
     pool = db.get()
     offer = await _require_offer(pool, offer_id)
@@ -267,11 +271,11 @@ async def set_claim_status(offer_id: uuid.UUID, claim_id: uuid.UUID,
     actor = effective_reviewer(request, None)
     if not actor:
         raise HTTPException(status_code=403, detail="a named reviewer is required")
-    if actor.startswith("automation:"):
+    if actor.startswith("automation:") or is_machine_actor(actor):
         raise HTTPException(
             status_code=403,
-            detail="claim status is a human resolution — automation cannot "
-                   "settle a contradiction")
+            detail="claim status is a human resolution — automation and "
+                   "service credentials cannot settle a contradiction")
     pool = db.get()
     await _require_offer(pool, offer_id)
     row = await pool.fetchrow(

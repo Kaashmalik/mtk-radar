@@ -40,6 +40,7 @@ from object_storage import (  # noqa: E402
     is_managed_ref,
     make_local_from_env,
     make_s3_from_env,
+    root_from_env,
 )
 
 router = APIRouter(tags=["media"])
@@ -96,14 +97,44 @@ def parse_range(header: Optional[str], size: int) -> Optional[tuple[int, int]]:
     return start, min(end, size - 1)
 
 
+def legacy_allowed_roots() -> tuple[Path, ...]:
+    """Host directories a legacy plain-path media ref may resolve inside
+    (review P1-2): the repository checkout, the local storage root and the
+    storage materialization cache. Anything else — the whole host — is off
+    limits to the legacy fallback."""
+    return (
+        REPO_ROOT,
+        root_from_env(),
+        Path(os.environ.get("MTK_STORAGE_CACHE", "./.storage-cache")),
+    )
+
+
 def _legacy_path(ref: str) -> Optional[Path]:
+    """Resolve a legacy plain-path ref (pre-storage DB rows) — CONFINED.
+
+    The ref string comes from the database, not the request, but a hostile
+    or poisoned writer must not turn this fallback into a read-any-file
+    primitive: absolute paths are refused outright (the page-capture route
+    already refuses host paths entirely — media_api.py's image check), and
+    any resolution that escapes the managed roots fails closed to the same
+    404 as a missing file. Managed local:// and s3:// refs never arrive here.
+    """
     candidate = Path(ref)
-    options = [candidate] if candidate.is_absolute() else [
-        candidate, Path.cwd() / candidate, REPO_ROOT / candidate,
-    ]
-    for option in options:
-        if option.is_file():
-            return option
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    roots = legacy_allowed_roots()
+    for root in roots:
+        try:
+            resolved = (root / candidate).resolve()
+        except OSError:  # noqa: BLE001 — a broken ref must never 500
+            continue
+        for base in roots:
+            try:
+                base_resolved = base.resolve()
+            except OSError:  # noqa: BLE001
+                break
+            if resolved.is_relative_to(base_resolved) and resolved.is_file():
+                return resolved
     return None
 
 

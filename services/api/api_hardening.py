@@ -1,9 +1,11 @@
 """API hardening: optional bearer-token auth + request logging (v0.13/v0.16).
 
 Auth model: when MTK_API_TOKEN is set, every route except /health requires
-`Authorization: Bearer <token>`. When unset (local dev), the API is open —
-this matches the runbook's local-development path while closing the exposed
-deployment gap.
+`Authorization: Bearer <token>`. With NO credential configured the app
+refuses to start (verify_boot_authentication, wired from main.py startup);
+the explicit MTK_ALLOW_UNAUTHENTICATED=1 opt-out keeps the old dev-open
+mode for sealed local development and the test suite — never for a
+deployed host — and logs a CRITICAL banner naming the mode.
 
 Credential classes (v0.31):
 - MTK_API_TOKEN — service credential for the dashboard server and trusted
@@ -18,13 +20,20 @@ Credential classes (v0.31):
   the browser. Revocation (active=false) is instant; positive lookups are
   cached for 60s.
 
+- MTK_API_TOKEN or MTK_WORKER_TOKEN or MTK_EXTENSION_TOKEN must be
+  configured for anything beyond localhost: with NO credential enabled the
+  app refuses to start (see the auth model above). The explicit opt-out is
+  the only way back into dev-open mode.
+
 A service/worker/extension credential may only name an `automation:<stage>`
 or `system:` actor. It can never supply a human reviewer name for an approval,
-ToS review, redaction review or correction. That separation is what prevents a
-compromised worker from appearing as a human approver in audit_log. During
-local dev-open mode (no configured token) the old body fallback remains, since
-there is no credential boundary to protect; production always configures a
-token.
+ToS review, redaction review or correction, and at require=False sites it is
+recorded under its class-derived machine actor (system:worker/-service/
+-extension) instead of the route's human-sounding default (P1-1). That
+separation is what prevents a compromised worker from appearing as a human
+approver in audit_log. During dev-open mode (no configured token) the old
+body fallback remains, since there is no credential boundary to protect;
+production always configures a token.
 
 Read identity: GET /whoami → {actor, auth}. Bad reviewer token → 401, same
 as any other unauthorized call.
@@ -51,6 +60,12 @@ OPEN_PATHS = frozenset({"/health"})
 TOKEN_ENV = "MTK_API_TOKEN"
 WORKER_TOKEN_ENV = "MTK_WORKER_TOKEN"
 EXTENSION_TOKEN_ENV = "MTK_EXTENSION_TOKEN"
+#: Explicit opt-out of the fail-closed startup guard (review P0-1). Without
+#: any configured credential every route is unauthenticated AND body-supplied
+#: reviewer names become trusted identity ("dev-open"); only a deliberate
+#: sealed local-development/test environment sets this — a deployed host
+#: configures a token instead, and verify_boot_authentication enforces that.
+ALLOW_UNAUTHENTICATED_ENV = "MTK_ALLOW_UNAUTHENTICATED"
 REVIEWER_CACHE_TTL_S = 60.0
 
 # Credential classes stored on request.state.credential_class.
@@ -61,6 +76,17 @@ CREDENTIAL_WORKER = "worker"
 CREDENTIAL_EXTENSION = "extension"
 SYSTEM_CLASSES = frozenset({CREDENTIAL_SERVICE, CREDENTIAL_WORKER, CREDENTIAL_EXTENSION})
 _AUTOMATION_PREFIXES = ("automation:", "system:")
+
+#: The truthful actor for each machine credential class (review P1-1): at a
+#: require=False site a service/worker/extension credential is recorded under
+#: ITS OWN identity — never the route's human-sounding default actor, never a
+#: body-supplied name. Routers that need a human (consent, attestations,
+#: approvals) refuse these via is_machine_actor / require=True.
+_MACHINE_CLASS_ACTORS: dict[str, str] = {
+    CREDENTIAL_SERVICE: "system:service",
+    CREDENTIAL_WORKER: "system:worker",
+    CREDENTIAL_EXTENSION: "system:extension",
+}
 
 # ---- G05 route/role matrix (evidence-to-video plan) -------------------------
 #
@@ -274,6 +300,20 @@ def _is_system_actor(value: Optional[str]) -> bool:
     return bool(value) and str(value).strip().lower().startswith(_AUTOMATION_PREFIXES)
 
 
+def machine_actor(credential: str) -> str:
+    """The class-derived actor for a non-human credential — never a human
+    name. Unknown classes fail closed to the plain service identity."""
+    return _MACHINE_CLASS_ACTORS.get(credential, "system:service")
+
+
+def is_machine_actor(value: Optional[str]) -> bool:
+    """True for ANY machine actor value — an explicit ``automation:<stage>``
+    identity or the class-derived ``system:<class>`` stamp. Human-only gates
+    (approvals, attestations, TikTok consent) must refuse these regardless
+    of which credential presented them."""
+    return _is_system_actor(value)
+
+
 def effective_reviewer(
     request: Request, supplied: Optional[str], *, default: Optional[str] = None,
     require: bool = False,
@@ -283,7 +323,9 @@ def effective_reviewer(
     - A personal reviewer token binds its owner, overriding every body field.
     - A service/worker/extension credential may only claim an explicit
       automation/system actor. It cannot name a human for `require=True`
-      actions, and its human-looking body fields are ignored everywhere else.
+      actions, and everywhere else it is recorded under its class-derived
+      machine actor (system:worker/-service/-extension) — never the route's
+      human-sounding default and never a body-supplied name (P1-1).
     - In dev-open mode (no token configured) the legacy body fallback remains.
     """
     from fastapi import HTTPException
@@ -321,7 +363,11 @@ def effective_reviewer(
             )
         if _is_system_actor(candidate):
             return candidate
-        return default
+        # P1-1: the credential's OWN identity goes on record — the route's
+        # human-sounding default ("reviewer", "operator", …) is exactly what
+        # a machine must never be filed under, because audit and attribution
+        # fields would then read as a person.
+        return machine_actor(cls)
 
     # Unknown class: never let it satisfy a human-only gate.
     if require:
@@ -347,6 +393,47 @@ def service_tokens(token: str | None = None) -> dict[str, str]:
     if extension:
         out.setdefault(extension, CREDENTIAL_EXTENSION)
     return out
+
+
+def allow_unauthenticated() -> bool:
+    """The operator EXPLICITLY opted into dev-open mode (review P0-1).
+    Defaults to False: never infer dev-open from a missing token."""
+    return os.environ.get(ALLOW_UNAUTHENTICATED_ENV, "").strip().lower() in {
+        "1", "true", "yes"}
+
+
+def verify_boot_authentication(tokens: dict[str, str] | None = None) -> None:
+    """Fail-closed startup guard (review P0-1), wired from main.py startup.
+
+    With NO bearer credential configured every route is unauthenticated AND
+    body-supplied reviewer names become trusted identity (the dev-open body
+    fallback above). That is acceptable ONLY as a deliberate opt-in for a
+    sealed local-development/test environment, so the app refuses to serve
+    otherwise: RuntimeError at startup unless one of MTK_API_TOKEN,
+    MTK_WORKER_TOKEN, MTK_EXTENSION_TOKEN is set or MTK_ALLOW_UNAUTHENTICATED=1
+    is explicit. When dev-open IS allowed, a CRITICAL banner names the mode so
+    it can never run quietly.
+    """
+    configured = service_tokens() if tokens is None else tokens
+    if configured:
+        return
+    if not allow_unauthenticated():
+        raise RuntimeError(
+            "refusing to start: no bearer credential is configured (set "
+            "MTK_API_TOKEN, MTK_WORKER_TOKEN and/or MTK_EXTENSION_TOKEN). "
+            "Without one, every route runs unauthenticated AND body-supplied "
+            "reviewer names become trusted identity. To allow this dev-open "
+            "mode for a sealed local development/test environment, set "
+            f"{ALLOW_UNAUTHENTICATED_ENV}=1 explicitly — never on a host "
+            "reachable beyond localhost."
+        )
+    logger.critical(
+        "MTK API: DEV-OPEN MODE — no bearer credentials configured and "
+        f"{ALLOW_UNAUTHENTICATED_ENV}=1. Every route is unauthenticated and "
+        "body-supplied reviewer names are trusted as identity. This mode is "
+        "for sealed local development/testing ONLY; never expose it beyond "
+        "localhost."
+    )
 
 
 def register(app, token: str | None = None, db_url: str | None = None) -> None:
