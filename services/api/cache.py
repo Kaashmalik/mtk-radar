@@ -91,13 +91,26 @@ async def cache_get_json_with_ttl(key: str) -> tuple[Optional[Any], Optional[int
         return None, None
 
 
+def _json_default(value: Any) -> Any:
+    """Serialize like FastAPI does, so a cache hit has the same shape as a
+    fresh response: datetimes/dates as ISO-8601 (str() would give
+    "2026-11-02 10:00:00+00:00"), Decimals as numbers, UUIDs as strings."""
+    from datetime import date, datetime
+    from decimal import Decimal
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
 async def cache_set_json(key: str, value: Any, ttl_s: int = ANALYTICS_TTL_S) -> bool:
     """Store JSON; returns whether it was stored (False = cache disabled)."""
     client = await _redis_client()
     if client is None:
         return False
     try:
-        await client.setex(key, max(1, int(ttl_s)), json.dumps(value, default=str))
+        await client.setex(key, max(1, int(ttl_s)), json.dumps(value, default=_json_default))
         return True
     except Exception as exc:  # noqa: BLE001 — a cache write never breaks a request
         log.debug("cache write failed for %s: %s", key, exc)

@@ -147,3 +147,16 @@ def test_platform_account_check_survives_an_error_body():
             return FakeResponse({"detail": "internal error"}, status_code=500)
 
     assert monitor.check_platform_accounts(_ErrorClient()) == []
+
+
+def test_naive_expiry_timestamp_still_warns_instead_of_crashing():
+    soon = (datetime.now(timezone.utc) + timedelta(days=1)).replace(tzinfo=None)
+
+    class _Client:
+        def get(self, path, params=None):
+            return FakeResponse([{"status": "active", "platform": "youtube",
+                                  "account_handle": "main",
+                                  "expires_at": soon.isoformat()}])
+
+    alerts = monitor.check_platform_accounts(_Client())
+    assert [a["event"] for a in alerts] == ["platform_account.expiring"]

@@ -123,6 +123,8 @@ def check_platform_accounts(client: httpx.Client) -> list[dict]:
         elif status == "active" and account.get("expires_at"):
             try:
                 exp = datetime.fromisoformat(str(account["expires_at"]).replace("Z", "+00:00"))
+                if exp.tzinfo is None:  # naive - aware would raise TypeError
+                    exp = exp.replace(tzinfo=timezone.utc)
                 days = (exp - now).total_seconds() / 86400
                 if days <= TOKEN_WARN_DAYS:
                     log.warning("ALERT token for %s (%s) expires in %.1f day(s) — refresh soon",

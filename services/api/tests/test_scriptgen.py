@@ -273,3 +273,22 @@ class TestFormatWordingGuard:
         evidence, not the wording."""
         assert_format_wording("I claimed this offer — here is the real proof.",
                               "claim_walkthrough")
+
+
+class TestFactPackSuppression:
+    """2026-10-23 review P2 (closed 2026-11-02): a promo code the latest fact
+    pack marks contradicted or unproven is never asserted in a script."""
+
+    def test_supported_promo_code_is_rendered(self):
+        offer = {**OFFER, "fact_pack": {"promo_code": {"status": "supported"}}}
+        assert "STUDENT24" in generate(offer, EVIDENCE)["markdown"]
+
+    @pytest.mark.parametrize("status", ["contradicted", "unknown"])
+    def test_unproven_promo_code_is_dropped(self, status):
+        offer = {**OFFER, "fact_pack": {"promo_code": {"status": status}}}
+        assert "STUDENT24" not in generate(offer, EVIDENCE)["markdown"]
+        urdu = generate(offer, EVIDENCE, language="ur")["markdown"]
+        assert "STUDENT24" not in urdu
+
+    def test_legacy_offer_without_fact_pack_keeps_its_promo_code(self):
+        assert "STUDENT24" in generate(OFFER, EVIDENCE)["markdown"]

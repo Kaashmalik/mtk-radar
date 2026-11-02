@@ -13,6 +13,7 @@ risk instead of hiding it.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Final
@@ -76,12 +77,13 @@ def build_thumbnail_text(offer: dict[str, Any]) -> str:
             return None
         return " ".join(words).upper()
 
-    value = offer.get("value") if isinstance(offer.get("value"), dict) else {}
-    amount = _clean(value.get("amount")) if isinstance(value, dict) else ""
-    currency = _clean(value.get("currency")) if isinstance(value, dict) else ""
+    value = _asserted_field(offer, "value")
+    value = value if isinstance(value, dict) else {}
+    amount = _clean(value.get("amount"))
+    currency = _clean(value.get("currency"))
     candidates = [
         f"{amount} {currency}".strip() if amount and currency else "",
-        _clean(offer.get("promo_code")),
+        _clean(_asserted_field(offer, "promo_code")),
         "verified claim",
         "walkthrough",
     ]
@@ -92,6 +94,22 @@ def build_thumbnail_text(offer: dict[str, Any]) -> str:
         if fitted:
             return fitted
     return "VERIFIED CLAIM"
+
+
+def _asserted_field(offer: dict[str, Any], name: str) -> Any:
+    """Mirror of `services/api/offer_terms.asserted_field` (the render worker
+    cannot import the API package): a field the fact pack marks contradicted
+    or unknown is never drawn on the thumbnail."""
+    pack = offer.get("fact_pack")
+    if isinstance(pack, str):
+        try:
+            pack = json.loads(pack)
+        except ValueError:
+            pack = None
+    entry = pack.get(name) if isinstance(pack, dict) else None
+    if isinstance(entry, dict) and entry.get("status") in ("contradicted", "unknown"):
+        return None
+    return offer.get(name)
 
 
 def build_cover_spec(

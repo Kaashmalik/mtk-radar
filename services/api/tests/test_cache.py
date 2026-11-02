@@ -158,3 +158,19 @@ def test_mem_put_is_safe_without_explicit_ttl():
     assert 0 < expires_at - time.time() <= 31
     import json as _json
     assert _json.loads(raw) == {"a": 1}
+
+
+def test_cached_payload_serializes_like_a_fresh_response():
+    """B6: datetimes are ISO-8601 (as FastAPI renders them), Decimals numbers."""
+    import json
+    import uuid
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from cache import _json_default
+
+    when = datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc)
+    out = json.loads(json.dumps({"at": when, "n": Decimal("1.5"), "id": uuid.UUID(int=1)},
+                                default=_json_default))
+    assert out == {"at": "2026-11-02T10:00:00+00:00", "n": 1.5,
+                   "id": "00000000-0000-0000-0000-000000000001"}

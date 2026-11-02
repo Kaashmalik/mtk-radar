@@ -738,25 +738,35 @@ class Publisher:
         if not any(key == "youtube" or key.startswith("youtube:")
                    for key in adapters):
             return 0
-
+        candidates = [p for p in posts
+                      if p.get("platform") == "youtube" and p.get("remote_post_id")
+                      and not p.get("description_patched_at")]
+        if not candidates:
+            return 0
+        # One list call for the corrected offers instead of one offer fetch
+        # per published post on every sweep (2026-11-02 review B5).
+        try:
+            corrected = fetch_all(self.api, "/offers", {"state": "corrected"}, limit=200)
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("correction sweep skipped (offers unreachable): %s", exc)
+            return 0
+        if not isinstance(corrected, list):
+            return 0
+        notes = {str(o.get("id")): (o.get("correction_note") or "").strip()
+                 for o in corrected if isinstance(o, dict)}
+        candidates = [p for p in candidates if notes.get(str(p.get("offer_id")))]
         patched = 0
-        for post in posts:
+        for post in candidates:
+            # A pause stops an in-progress sweep before the next remote write.
             if not self._automation_allowed():
                 break
-            if post.get("platform") != "youtube" or not post.get("remote_post_id"):
-                continue
-            if post.get("description_patched_at"):
-                continue
             adapter = self._adapter_for(post, adapters)
             if adapter is None:
                 log.warning("schedule %s: correction skipped — its YouTube account "
                             "is not configured", post["id"])
                 continue
             try:
-                offer = self.api.get(f"/offers/{post['offer_id']}").json()
-                note = (offer.get("correction_note") or "").strip()
-                if offer.get("state") != "corrected" or not note:
-                    continue
+                note = notes[str(post["offer_id"])]
                 notice = (f"⚠ CORRECTION ({datetime.now(timezone.utc).date().isoformat()}): "
                           f"{note}")
                 adapter.apply_correction_notice(post["remote_post_id"], notice)

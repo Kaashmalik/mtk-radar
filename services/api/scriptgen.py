@@ -13,11 +13,11 @@ HARD RULE: generation is blocked unless the offer state allows video
 Every factual statement cites its evidence URL.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Final
 
 from jsonb import decode_list, decode_mapping
-from offer_terms import CONTRADICTED, SUPPORTED, UNKNOWN
+from offer_terms import CONTRADICTED, SUPPORTED, UNKNOWN, asserted_field
 
 VIDEO_STATES: Final = frozenset({"verified", "approved_for_video", "published"})
 SUPPORTED_LANGUAGES: Final = ("en", "ur")
@@ -447,7 +447,7 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
     # never borrows them — a paper has no promo code, and rendering one would
     # be invention even if a stray field were present.
     is_offer_track = content_type_of(offer) == "offer"
-    promo_code = offer.get("promo_code") if is_offer_track else None
+    promo_code = asserted_field(offer, "promo_code") if is_offer_track else None
     outcome = capture.get("claim_outcome") if capture else None
 
     titles = {
@@ -458,7 +458,7 @@ def _render_en(offer: dict, checklist: list[dict], command_cards: list[dict],
     lines: list[str] = []
     lines.append(f"# {title} — {titles[script_format]}")
     lines.append("")
-    lines.append(f"_Checked on {datetime.utcnow().strftime('%d %b %Y')}. Terms may change; "
+    lines.append(f"_Checked on {datetime.now(timezone.utc).strftime('%d %b %Y')}. Terms may change; "
                  "source links below and in the description._")
     lines.append("")
     lines.append(f"> Format: `{script_format}`. "
@@ -612,7 +612,7 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
     # G18: انگریزی برانچ کا ہم آہنگ — ریسرچ ٹریک کبھی کوپن/قیمت کے میدان
     # نہیں اٹھاتا؛ کاغذ کا پرومو کوڈ ہوتا ہی نہیں، نکالنا جعلسازی ہے۔
     is_offer_track = content_type_of(offer) == "offer"
-    promo_code = offer.get("promo_code") if is_offer_track else None
+    promo_code = asserted_field(offer, "promo_code") if is_offer_track else None
     outcome = capture.get("claim_outcome") if capture else None
 
     titles = {
@@ -623,7 +623,7 @@ def _render_ur(offer: dict, checklist: list[dict], command_cards: list[dict],
     lines: list[str] = []
     lines.append(f"# {title} — {titles[script_format]}")
     lines.append("")
-    lines.append(f"_چیک کیا گیا: {datetime.utcnow().strftime('%d %b %Y')}۔ شرائط بدل سکتی ہیں؛ "
+    lines.append(f"_چیک کیا گیا: {datetime.now(timezone.utc).strftime('%d %b %Y')}۔ شرائط بدل سکتی ہیں؛ "
                  "ذرائع نیچے اور ڈسکرپشن میں موجود ہیں۔_")
     lines.append("")
     lines.append(f"> فارمیٹ: `{script_format}`۔ "

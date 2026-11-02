@@ -21,6 +21,8 @@ from datetime import datetime
 from typing import Any, Final
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from offer_terms import asserted_field
+
 PLATFORMS: Final[tuple[str, ...]] = ("youtube", "facebook", "instagram", "tiktok")
 
 PLATFORM_LIMITS: Final[dict[str, dict[str, int]]] = {
@@ -167,7 +169,7 @@ def build_youtube_tags(offer: dict[str, Any], *,
     provider = _clean(offer.get("provider")).lower()
     if provider and len(provider) <= 40 and provider != broad:
         specific.append(provider)
-    promo = _clean(offer.get("promo_code")).lower()
+    promo = _clean(asserted_field(offer, "promo_code")).lower()
     if promo and re.fullmatch(r"[a-z0-9][a-z0-9-]*", promo) and promo not in broad:
         specific.append(promo)
     ordered: list[str] = [broad, f"{broad} 2026", *specific, "verified walkthrough"]
@@ -222,12 +224,13 @@ def build_thumbnail_text(offer: dict[str, Any]) -> str:
             return None
         return " ".join(words).upper()
 
-    value = offer.get("value") if isinstance(offer.get("value"), dict) else {}
-    amount = _clean(value.get("amount")) if isinstance(value, dict) else ""
-    currency = _clean(value.get("currency")) if isinstance(value, dict) else ""
+    value = asserted_field(offer, "value")
+    value = value if isinstance(value, dict) else {}
+    amount = _clean(value.get("amount"))
+    currency = _clean(value.get("currency"))
     candidates = [
         f"{amount} {currency}".strip() if amount and currency else "",
-        _clean(offer.get("promo_code")),
+        _clean(asserted_field(offer, "promo_code")),
         "verified claim",
         "walkthrough",
     ]

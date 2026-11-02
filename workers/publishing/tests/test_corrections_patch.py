@@ -22,7 +22,7 @@ class FakeResponse:
 
 
 class FakeAPI:
-    """route-aware: /schedules (published list), /offers/{id}, mark-patched."""
+    """route-aware: /schedules (published list), /offers (list), mark-patched."""
 
     def __init__(self, posts, offer):
         self.posts = posts
@@ -33,6 +33,11 @@ class FakeAPI:
         self.calls.append(("GET", path))
         if path == "/schedules":
             return FakeResponse(self.posts)
+        if path == "/offers":
+            # the real list filters by state; the worker asks for 'corrected'
+            wanted = (params or {}).get("state")
+            match = self.offer.get("state") == wanted
+            return FakeResponse([{"id": "off-1", **self.offer}] if match else [])
         if path.startswith("/offers/"):
             return FakeResponse(self.offer)
         raise AssertionError(f"unexpected GET {path}")
@@ -114,3 +119,15 @@ def test_platform_failure_leaves_post_unmarked_for_next_sweep():
 def test_missing_youtube_adapter_is_a_noop():
     p = _worker([_published()], _corrected_offer())
     assert p.apply_corrections({}) == 0
+
+
+def test_correction_sweep_lists_corrected_offers_once_not_per_post():
+    """B5: one /offers?state=corrected call per sweep, never a GET per
+    published post (hundreds of posts x every minute)."""
+    yt = FakeYouTube()
+    posts = [_published(schedule_id=f"sch-{i}", remote=f"vid-{i}") for i in range(5)]
+    p = _worker(posts, _corrected_offer())
+    p.apply_corrections({"youtube": yt})
+    gets = [c[1] for c in p.api.calls if c[0] == "GET"]
+    assert gets.count("/offers") == 1
+    assert not any(g.startswith("/offers/") for g in gets)

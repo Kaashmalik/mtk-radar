@@ -155,3 +155,17 @@ def test_variants_thread_the_format_hint():
     a, b = build_variants("youtube", OFFER, format_hint="official_explainer")
     assert "official terms explained" in a["title"]
     assert "real claim walkthrough" not in b["title"]
+
+
+def test_thumbnail_and_hashtags_never_assert_an_unproven_promo_or_value():
+    from seo import build_thumbnail_text
+    base = {"title": "A very long descriptive runtime title",
+            "promo_code": "SAVE2026", "value": {"amount": 12, "currency": "credits"}}
+    assert build_thumbnail_text(base) == "12 CREDITS"
+    no_value = {**base, "fact_pack": {"value": {"status": "contradicted"}}}
+    assert build_thumbnail_text(no_value) == "SAVE2026"
+    neither = {**base, "fact_pack": {"value": {"status": "unknown"},
+                                     "promo_code": {"status": "contradicted"}}}
+    assert build_thumbnail_text(neither) == "VERIFIED CLAIM"
+    as_json = {**base, "fact_pack": '{"value": {"status": "contradicted"}}'}
+    assert build_thumbnail_text(as_json) == "SAVE2026"

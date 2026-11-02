@@ -20,6 +20,7 @@ import uuid
 from offer_freshness import freshness_problem
 from schedules_state import script_version_hash
 from hashtags import hashtag_gate_problems
+from seo import build_thumbnail_text
 
 #: Offer states from which a release may be attempted. Anything else needs a
 #: human re-verification first — a declined/expired offer must not ship.
@@ -37,6 +38,26 @@ def _json_value(value, default):
 
 def _problem(code: str, detail: str) -> dict:
     return {"code": code, "detail": detail, "blocking": True}
+
+
+async def _drawn_thumbnail_text(pool, offer_id) -> str | None:
+    """The thumbnail text the renderer derives from the current offer."""
+    row = await pool.fetchrow(
+        """
+        SELECT o.title, o.promo_code, o.value::text AS value,
+               (SELECT x.fact_pack::text FROM extractions x WHERE x.offer_id = o.id
+                ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS fact_pack
+        FROM offers o WHERE o.id = $1
+        """,
+        offer_id,
+    )
+    if row is None:
+        return None
+    return build_thumbnail_text({
+        "title": row["title"], "promo_code": row["promo_code"],
+        "value": _json_value(row["value"], {}),
+        "fact_pack": _json_value(row["fact_pack"], {}),
+    })
 
 
 async def offer_problems(pool, offer_id) -> list[dict]:
@@ -305,6 +326,19 @@ async def release_problems(pool, schedule_id: uuid.UUID) -> list[dict]:
                         "thumbnail_text_too_long",
                         f"approved thumbnail text is {len(thumb_text.split())} "
                         "words — keep it at most 3 words, readable on a phone",
+                    ))
+                # Parity (2026-10-23 review P2): the renderer draws the cover
+                # from the CURRENT offer + fact pack (workers/render/covers.py
+                # mirrors seo.build_thumbnail_text). If that no longer yields
+                # the approved wording, the viewer sees text no one approved.
+                drawn = await _drawn_thumbnail_text(pool, schedule["offer_id"])
+                if thumb_text and drawn is not None                         and thumb_text.upper() != drawn.upper():
+                    problems.append(_problem(
+                        "thumbnail_text_mismatch",
+                        f"the cover draws '{drawn}' but the approved thumbnail "
+                        f"text is '{thumb_text}' — the offer changed after the "
+                        "cover was approved; regenerate/approve the cover in "
+                        "Studio and re-render",
                     ))
 
         # ---- final human playback review ----------------------------------

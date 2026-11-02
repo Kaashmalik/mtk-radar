@@ -442,6 +442,29 @@ def classify_field(name: str, field: Mapping[str, Any] | Any) -> dict[str, Any]:
     }
 
 
+def asserted_field(offer: Mapping[str, Any], name: str) -> Any:
+    """The offer's own `name` field — unless the latest extraction's fact pack
+    says the official terms contradict it or never established it.
+
+    Defense in depth for generated copy (2026-10-23 review P2): the
+    verification gate already blocks contradicted fields before `verified`,
+    but a promo code or value that a reviewer typed in (or that a newer
+    extraction no longer supports) must not be asserted in a script,
+    thumbnail or hashtag. No fact pack (legacy rows) keeps the field.
+    """
+    pack = offer.get("fact_pack")
+    if isinstance(pack, str):
+        import json
+        try:
+            pack = json.loads(pack)
+        except ValueError:
+            pack = None
+    entry = pack.get(name) if isinstance(pack, Mapping) else None
+    if isinstance(entry, Mapping) and entry.get("status") in (CONTRADICTED, UNKNOWN):
+        return None
+    return offer.get(name)
+
+
 def required_fields(offer_type: str) -> tuple[str, ...]:
     """The published contract for this offer type, if there is one."""
     return OFFER_TYPE_REQUIREMENTS.get((offer_type or "").strip().lower(), ())

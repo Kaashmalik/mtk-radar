@@ -101,6 +101,11 @@ def test_both_implementations_agree_with_the_api_side():
         {**OFFER, "promo_code": "SAVE2026"},
         {**OFFER, "value": {"amount": 12, "currency": "credits"}},
         {"title": "Totally different runtime title", "provider": "X"},
+        # the fact-pack suppression must be mirrored exactly, too
+        {**OFFER, "promo_code": "SAVE2026", "value": {"amount": 12, "currency": "credits"},
+         "fact_pack": {"value": {"status": "contradicted"}}},
+        {**OFFER, "promo_code": "SAVE2026",
+         "fact_pack": '{"promo_code": {"status": "unknown"}}'},
     ]
     for offer in offers:
         assert build_thumbnail_text(offer) == api_side(offer), offer.get("title")
