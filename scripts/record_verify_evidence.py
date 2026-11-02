@@ -60,7 +60,7 @@ def summarize(log: str) -> dict:
                                   "failed": int(failed or 0)}
     if len(tests) > 1:  # the Playwright suite reports last
         checks["playwright"] = {"passed": int(tests[-1][0])}
-    node = re.search(r"# pass (\d+)", log)
+    node = re.search(r"(?:#|ℹ) pass (\d+)", log)  # node:test prints "ℹ pass N"
     if node:
         checks["extension_node_tests"] = int(node.group(1))
     checks["steps_ok"] = re.findall(r"✔ (.+)", log)
