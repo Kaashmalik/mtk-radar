@@ -112,3 +112,13 @@ The existing pattern to follow is the
 [2026-10-25 evidence log](evidence/verify-pnpm-2026-10-25.log) and its
 [metadata sidecar](evidence/verify-pnpm-2026-10-25.json). A claim without a
 committed artifact is a proposal, not a proof.
+
+Since 2026-11-02 both files are produced by one command (it never commits):
+
+```bash
+python scripts/record_verify_evidence.py            # docker throwaway Postgres
+MTK_VERIFY_DATABASE_URL=postgresql://mtk@127.0.0.1:55499/postgres \
+  python scripts/record_verify_evidence.py          # existing Postgres, no Docker
+```
+
+`infra/systemd/mtk-radar-verify.timer` runs it nightly on the home/CI box.

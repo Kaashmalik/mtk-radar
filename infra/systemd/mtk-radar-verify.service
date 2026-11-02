@@ -1,0 +1,18 @@
+[Unit]
+Description=MTK RADAR — nightly full verification, recorded as evidence
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+# A red verify means a regression landed — page like a failed backup.
+OnFailure=mtk-radar-backup-failed.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mtk-radar
+# Interim CI while GitHub Actions is billing-locked
+# (docs/production-readiness-2026-11-01.md): runs scripts/verify.sh against a
+# throwaway Postgres and writes docs/evidence/verify-pnpm-<date>.{log,json}.
+# It never commits; review and commit the two files.
+# Runs as root (deliberate, no User=): verify.sh starts the throwaway
+# Postgres with `docker run` (docker socket access).
+ExecStart=/usr/bin/env python3 scripts/record_verify_evidence.py
+TimeoutStartSec=3600

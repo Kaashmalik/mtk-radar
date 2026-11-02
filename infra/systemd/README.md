@@ -19,6 +19,7 @@ systemctl list-timers | grep mtk-radar
 | `mtk-radar-backup.timer` → `.service` | daily 03:00 host time, `Persistent=true` | `./infra/backup.sh 14` — `pg_dump -Fc` of the compose Postgres, atomic temp-file write, 14-day retention prune, off-site copy when `MTK_S3_*` is set |
 | `mtk-radar-restore-drill.timer` → `.service` | monthly, 1st 04:00, `Persistent=true` | restores the NEWEST dump into a throwaway database (`restore.sh`); refuses to run when no dump exists |
 | `mtk-radar-media-backup.timer` → `.service` | daily 03:20, `Persistent=true` (LAPTOP) | runs `./infra/backup_media.sh` on the laptop: pulls media from the NAS mount / rclone remote and verifies the newest snapshot |
+| `mtk-radar-verify.timer` → `.service` | nightly 03:30, `Persistent=true` (optional, home/CI box) | interim CI while Actions is billing-locked: `scripts/record_verify_evidence.py` runs `scripts/verify.sh` and writes `docs/evidence/verify-pnpm-<date>.{log,json}` (never commits; review and commit them). Enable with `sudo systemctl enable --now mtk-radar-verify.timer` after copying both files |
 
 Notes:
 - The drill failing (unit red) means **backups are unusable** — treat like a
