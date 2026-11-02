@@ -9,7 +9,7 @@ SAMPLE = """
 ▸ Unit + integration tests
 1210 passed, 4 skipped, 55 warnings in 140.2s
 ✔ tests green
-# pass 29
+ℹ pass 29
 9 passed (33.1s)
 """
 
