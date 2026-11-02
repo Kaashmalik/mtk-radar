@@ -14,6 +14,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon, { type IconName } from "./Icon";
 
 type CheckStatus = "pass" | "warn" | "fail";
 
@@ -55,16 +56,16 @@ const MODES = [
   ["autopilot_private", "Start autopilot · private", "Every stage may advance inside guardrails. Uploads stay private; two auto-approved posts/day."],
 ] as const;
 
-function icon(status: CheckStatus): string {
-  if (status === "pass") return "✓";
-  if (status === "warn") return "!";
-  return "✕";
+function icon(status: CheckStatus): IconName {
+  if (status === "pass") return "check";
+  if (status === "warn") return "exclaim";
+  return "x";
 }
 
 function StatusRow({ check }: { check: PreflightCheck }) {
   return (
     <li className={`preflight-check preflight-${check.status}`}>
-      <span className="preflight-icon" aria-hidden="true">{icon(check.status)}</span>
+      <span className="preflight-icon" aria-hidden="true"><Icon name={icon(check.status)} strokeWidth={2.6} /></span>
       <span>
         <strong>{check.label}</strong>
         <span className="muted small"> — {check.detail}</span>
@@ -281,7 +282,7 @@ export default function AutomationCard() {
         ))}
         {!paused && activeMode !== "manual" && (
           <button type="button" className="btn btn-danger" onClick={stop} disabled={busy !== null}>
-            {busy === "stop" ? "Stopping…" : "⏸ Stop automation"}
+            {busy === "stop" ? <><Icon name="spinner" /> Stopping…</> : <><Icon name="pause" /> Stop automation</>}
           </button>
         )}
         <button
@@ -291,7 +292,7 @@ export default function AutomationCard() {
           disabled={busy !== null}
           onClick={runNow}
         >
-          {busy === "run-now" ? "Arming…" : "▶ Run now"}
+          {busy === "run-now" ? <><Icon name="spinner" /> Arming…</> : <><Icon name="play" /> Run now</>}
         </button>
         <Link href="/settings" className="btn btn-ghost">Guardrails &amp; budget</Link>
       </div>

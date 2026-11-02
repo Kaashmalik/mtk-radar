@@ -13,6 +13,7 @@ import ResearchPanel, { type ResearchBrief } from "./ResearchPanel";
 import ScheduleForm from "./ScheduleForm";
 import SnapshotInspector from "./SnapshotInspector";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 /**
  * Offer workspace (weeks 5-6): verified offer → script versions, command-card
@@ -285,7 +286,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
   if (!offer) {
     return (
       <main className="page">
-        <a href="/review" className="back">← Review desk</a>
+        <a href="/review" className="back"><Icon name="arrow-left" /> Review desk</a>
         <h1>Offer not found</h1>
       </main>
     );
@@ -308,15 +309,15 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
 
   return (
     <main className="page">
-      <a href="/review" className="back">← Review desk</a>
+      <a href="/review" className="back"><Icon name="arrow-left" /> Review desk</a>
       <h1>{offer.title}</h1>
       <p className="tagline">
         {offer.provider}
         {offer.promo_code && <> · code <code>{offer.promo_code}</code></>}
         {offer.expires_at && <> · expires {new Date(offer.expires_at).toLocaleDateString("en-GB")}</>}
-        {offer.correction_note && <> · ⚠ {offer.correction_note}</>}
+        {offer.correction_note && <> · <Icon name="alert" /> {offer.correction_note}</>}
         {" · "}
-        <a href="/calendar">Open calendar →</a>
+        <a href="/calendar">Open calendar <Icon name="arrow-right" /></a>
       </p>
 
       <OfferActions offerId={offer.id} state={offer.state} />
@@ -391,9 +392,9 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
                 <div>
                   {new Date(c.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })} —{" "}
                   {c.redaction_reviewed ? (
-                    <span style={{ color: "var(--ok)" }}>redaction reviewed ✓</span>
+                    <span style={{ color: "var(--ok)" }}><Icon name="check" /> redaction reviewed</span>
                   ) : (
-                    <span style={{ color: "#f0883e" }}>redaction review pending ⚠</span>
+                    <span style={{ color: "#f0883e" }}><Icon name="alert" /> redaction review pending</span>
                   )}
                   {c.reviewer && <span className="muted small"> ({c.reviewer})</span>}
                 </div>
@@ -492,7 +493,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
           <div style={{ display: "grid", gap: "0.6rem" }}>
             {offer.correction_note && (
               <p className="small" style={{ color: "#f0883e" }}>
-                ⚠ Current correction note: {offer.correction_note}
+                <Icon name="alert" /> Current correction note: {offer.correction_note}
               </p>
             )}
             {corrections.map((c) => (
@@ -548,7 +549,7 @@ export default async function OfferPage({ params }: { params: Promise<{ id: stri
               <li key={ev.id} style={{ marginBottom: "0.7rem" }}>
                 <a href={ev.url} target="_blank" rel="noreferrer">{ev.url}</a>{" "}
                 {ev.official && <span className="pill ok-pill">official</span>}{" "}
-                {!ev.domain_ok && <span className="pill bad-pill">domain ✗</span>}
+                {!ev.domain_ok && <span className="pill bad-pill"><Icon name="x" /> domain</span>}
                 {ev.source_provider && (
                   <span className="muted small"> · {ev.source_provider} ({ev.trust_tier})</span>
                 )}

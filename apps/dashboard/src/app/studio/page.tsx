@@ -7,6 +7,7 @@ import "../styles.css";
 import Link from "next/link";
 
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 type OfferRow = {
   id: string;
@@ -96,7 +97,7 @@ export default async function StudioIndexPage() {
                     <td>{offer.provider}</td>
                     <td><span className="tag tag-ok">{offer.state.replace(/_/g, " ")}</span></td>
                     <td>{offer.official_evidence}/{offer.evidence_count} official</td>
-                    <td><Link href={`/studio/${offer.id}`} className="btn btn-ghost">Open studio →</Link></td>
+                    <td><Link href={`/studio/${offer.id}`} className="btn btn-ghost">Open studio <Icon name="arrow-right" /></Link></td>
                   </tr>
                 ))}
               </tbody>

@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 type Kind = "title" | "claim" | "page" | "close";
 
@@ -259,9 +260,9 @@ export default function StoryboardEditor({ offerId }: { offerId: string }) {
               <div className="scene-rail">
                 <span className="scene-index">{index + 1}</span>
                 <button type="button" className="icon-btn" aria-label="Move scene up"
-                  disabled={index === 0} onClick={() => move(index, index - 1)}>↑</button>
+                  disabled={index === 0} onClick={() => move(index, index - 1)}><Icon name="arrow-up" /></button>
                 <button type="button" className="icon-btn" aria-label="Move scene down"
-                  disabled={index === scenes.length - 1} onClick={() => move(index, index + 1)}>↓</button>
+                  disabled={index === scenes.length - 1} onClick={() => move(index, index + 1)}><Icon name="arrow-down" /></button>
               </div>
               <div className="scene-main">
                 <div className="scene-top">
@@ -303,7 +304,7 @@ export default function StoryboardEditor({ offerId }: { offerId: string }) {
                 </label>
               </div>
               <button type="button" className="icon-btn scene-remove" aria-label="Remove scene"
-                onClick={() => update(scenes.filter((_, i) => i !== index))}>✕</button>
+                onClick={() => update(scenes.filter((_, i) => i !== index))}><Icon name="x" /></button>
             </li>
           );
         })}

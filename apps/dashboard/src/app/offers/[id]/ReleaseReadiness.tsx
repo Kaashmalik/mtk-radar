@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 /**
  * Release readiness (plan §17) — the SAME gate the upload authorization runs,
@@ -114,8 +115,9 @@ export function ReleaseReadiness({
                 className="btn btn-ghost"
                 onClick={() => void check(s.id)}
                 title="Re-run the release check"
+                aria-label="Re-run the release check"
               >
-                ↻
+                <Icon name="refresh" />
               </button>
             </div>
             {result && result !== "error" && !result.ok && (

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 type Props = {
   kind: string;
@@ -82,7 +83,7 @@ export default function AttentionActions({ kind, entityId, action }: Props) {
     return (
       <span className="attention-action">
         <button type="button" className="btn btn-primary btn-small" onClick={retryJob} disabled={busy}>
-          {busy ? "Retrying…" : "↻ Retry job"}
+          {busy ? <><Icon name="spinner" /> Retrying…</> : <><Icon name="refresh" /> Retry job</>}
         </button>
         {error && <span className="muted small" role="alert"> {error}</span>}
       </span>

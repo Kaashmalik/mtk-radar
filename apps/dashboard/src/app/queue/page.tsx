@@ -8,6 +8,7 @@ import "./styles.css";
 import { apiFetch } from "@/lib/api";
 
 import { QueueRowActions } from "./QueueRowActions";
+import Icon from "@/app/Icon";
 
 async function getJson<T>(path: string, fallback: T): Promise<T> {
   try {
@@ -90,22 +91,22 @@ function daysUntil(iso: string | null): number | null {
 /** One primary action per offer state — the queue row tells the operator
  * which human gate the topic is actually waiting on. */
 function primaryAction(row: QueueRow): { href: string; label: string } {
-  if (!row.offer_id) return { href: "/radar", label: "Find the trend ↗" };
+  if (!row.offer_id) return { href: "/radar", label: "Find the trend" };
   switch (row.offer_state) {
     case "candidate":
-      return { href: `/offers/${row.offer_id}`, label: "Start verification →" };
+      return { href: `/offers/${row.offer_id}`, label: "Start verification" };
     case "evidence_needed":
-      return { href: `/offers/${row.offer_id}`, label: "Verify evidence →" };
+      return { href: `/offers/${row.offer_id}`, label: "Verify evidence" };
     case "verified":
-      return { href: `/offers/${row.offer_id}`, label: "Prepare capture →" };
+      return { href: `/offers/${row.offer_id}`, label: "Prepare capture" };
     case "approved_for_video":
-      return { href: "/offers", label: "Check the render list →" };
+      return { href: "/offers", label: "Check the render list" };
     case "published":
-      return { href: "/analytics", label: "Measure it →" };
+      return { href: "/analytics", label: "Measure it" };
     case "expired":
-      return { href: `/offers/${row.offer_id}`, label: "Recheck →" };
+      return { href: `/offers/${row.offer_id}`, label: "Recheck" };
     default:
-      return { href: `/offers/${row.offer_id}`, label: "Open offer →" };
+      return { href: `/offers/${row.offer_id}`, label: "Open offer" };
   }
 }
 
@@ -237,7 +238,7 @@ export default async function QueuePage() {
 
   return (
     <main className="page">
-      <a href="/" className="back">← Inbox</a>
+      <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
       <h1>Queue</h1>
       <p className="tagline">
         What the workers handle by themselves, and what still needs a person.
@@ -251,7 +252,7 @@ export default async function QueuePage() {
           {summary.automation_stages.length ? summary.automation_stages.join(", ") : "none"} ·{" "}
           human: {summary.human_stages.length ? summary.human_stages.join(", ") : "none"}
           {" · "}
-          <a href="/settings">change in Settings →</a>
+          <a href="/settings">change in Settings <Icon name="arrow-right" /></a>
         </p>
       </section>
 
@@ -320,7 +321,7 @@ export default async function QueuePage() {
               return (
                 <div className="pq-row" key={row.id}>
                   <span className="pq-rank">
-                    {row.rank_pinned !== null ? `📌 ${row.rank_pinned}` : row.rank.toFixed(0)}
+                    {row.rank_pinned !== null ? <><Icon name="pin" /> {row.rank_pinned}</> : row.rank.toFixed(0)}
                   </span>
                   <div className="pq-main">
                     <strong>
@@ -338,17 +339,17 @@ export default async function QueuePage() {
                       )}
                       {(row.velocity ?? 0) > 0 && (
                         <span className="pill pill-accent" title="Score gained per hour between radar observations">
-                          🔥 {(row.velocity as number).toFixed(1)}/h
+                          <Icon name="flame" /> {(row.velocity as number).toFixed(1)}/h
                         </span>
                       )}
                       {(row.corroboration ?? 0) >= 2 && (
                         <span className="pill" title="Independent sources on this story">
-                          🧵 {row.corroboration} sources
+                          <Icon name="layers" /> {row.corroboration} sources
                         </span>
                       )}
                       {(row.evidence_count ?? 0) > 0 && (
                         <span className="pill" style={{ color: "var(--ok)" }} title="Evidence snapshots on the offer">
-                          🧪 {row.evidence_count}
+                          <Icon name="flask" /> {row.evidence_count}
                         </span>
                       )}
                       {days !== null && (
@@ -357,13 +358,13 @@ export default async function QueuePage() {
                           style={{ color: days <= 3 ? "var(--danger)" : undefined }}
                           title="Freshness deadline"
                         >
-                          {days < 0 ? "⏳ overdue" : `⏳ ${days}d`}
+                          <Icon name="hourglass" /> {days < 0 ? "overdue" : `${days}d`}
                         </span>
                       )}
                     </span>
                   </div>
                   <div className="pq-actions">
-                    <a className="btn btn-primary" href={action.href}>{action.label}</a>
+                    <a className="btn btn-primary" href={action.href}>{action.label} <Icon name="arrow-right" /></a>
                     <QueueRowActions id={row.id} pinned={row.rank_pinned} />
                   </div>
                 </div>

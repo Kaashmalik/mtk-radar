@@ -13,6 +13,7 @@ import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 
 import AttentionActions from "./AttentionActions";
+import Icon from "@/app/Icon";
 
 export const dynamic = "force-dynamic";
 
@@ -89,7 +90,7 @@ export default async function AttentionPage() {
   if (!data) {
     return (
       <main className="page">
-        <Link href="/" className="back">← Overview</Link>
+        <Link href="/" className="back"><Icon name="arrow-left" /> Overview</Link>
         <h1>Needs You</h1>
         <div className="card">
           <p className="down">The API did not return the attention inbox.</p>
@@ -110,7 +111,7 @@ export default async function AttentionPage() {
 
   return (
     <main className="page attention-page">
-      <Link href="/" className="back">← Overview</Link>
+      <Link href="/" className="back"><Icon name="arrow-left" /> Overview</Link>
       <div className="header">
         <div>
           <h1>Needs You</h1>

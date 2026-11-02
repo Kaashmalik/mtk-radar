@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 /**
  * Production-queue row actions (v0.35, WP-C). Archive and pin-to-top are
@@ -73,7 +74,7 @@ export function QueueRowActions({
           disabled={busy !== null}
           title="Pin this row above the computed ranking"
         >
-          {busy === "pin" ? "Pinning…" : "📌 Pin top"}
+          {busy === "pin" ? <><Icon name="spinner" /> Pinning…</> : <><Icon name="pin" /> Pin top</>}
         </button>
       )}
       <button

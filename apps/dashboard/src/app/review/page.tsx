@@ -1,6 +1,7 @@
 import "./styles.css";
 import OfferActions from "./OfferActions";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 /**
  * Review desk (Weeks 3-4): the reviewer queue.
@@ -72,7 +73,7 @@ export default async function ReviewPage() {
   return (
     <main className="page">
       <header>
-        <a href="/" className="back">← Inbox</a>
+        <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
         <h1>Review desk</h1>
         <p className="tagline">
           Unverified offers cannot advance: verified requires official,
@@ -82,7 +83,7 @@ export default async function ReviewPage() {
 
       {stale.length > 0 && (
         <section className="card stale">
-          <h2>⚠ Stale / expiring ({stale.length})</h2>
+          <h2><Icon name="alert" /> Stale / expiring ({stale.length})</h2>
           <ul>
             {stale.map((s) => (
               <li key={s.id}>
@@ -139,7 +140,7 @@ export default async function ReviewPage() {
                   {offer.evidence_count} total
                   {Array.isArray(offer.conflicts) && offer.conflicts.length > 0 && (
                     <span style={{ color: "#f0883e" }}>
-                      {" "}· ⚠ {offer.conflicts.length} extraction conflict(s)
+                      {" "}· <Icon name="alert" /> {offer.conflicts.length} extraction conflict(s)
                     </span>
                   )}
                   {offer.correction_note && !offer.conflicts && (

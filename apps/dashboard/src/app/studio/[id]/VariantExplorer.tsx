@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 type Variant = {
   id: string;
@@ -152,7 +153,7 @@ export default function VariantExplorer({ variants }: { variants: Variant[] }) {
                     {hashtags.length > 0 && (
                       <p className="small muted" style={{ marginBottom: 0 }}>{hashtags.join(" ")}</p>
                     )}
-                    {website && <p className="small" style={{ marginBottom: 0 }}>↗ {website}</p>}
+                    {website && <p className="small" style={{ marginBottom: 0 }}><Icon name="external" /> {website}</p>}
                     {pinned && <p className="small muted" style={{ marginBottom: 0 }}>Pinned: {pinned}</p>}
                   </>
                 )}

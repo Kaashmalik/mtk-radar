@@ -10,6 +10,8 @@
  * the ledger records usage, never a bill.
  */
 
+import Icon from "@/app/Icon";
+
 type ByKind = {
   kind: string;
   unit_type: string;
@@ -240,7 +242,7 @@ export default function CostsCard({
           >
             Extraction:{" "}
             {providers.extraction.reachable
-              ? `${providers.extraction.model ?? "llm"} (${providers.extraction.models.slice(0, 3).join(", ") || "models listed"}) — reachable ✓`
+              ? <>{`${providers.extraction.model ?? "llm"} (${providers.extraction.models.slice(0, 3).join(", ") || "models listed"}) — reachable`} <Icon name="check" /></>
               : providers.extraction.configured
                 ? "configured but unreachable — the rules extractor stays authoritative"
                 : "not configured — deterministic rules extraction"}
@@ -249,7 +251,7 @@ export default function CostsCard({
           <span style={{ color: providers.tts.reachable ? "var(--ok)" : "var(--text-muted)" }}>
             TTS:{" "}
             {providers.tts.reachable
-              ? `${providers.tts.model ?? "tts"} — reachable ✓`
+              ? <>{`${providers.tts.model ?? "tts"} — reachable`} <Icon name="check" /></>
               : providers.tts.configured
                 ? "configured but unreachable — capture audio stays the fallback"
                 : "not configured — no synthetic narration"}

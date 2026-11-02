@@ -11,6 +11,7 @@ import "./styles.css";
 import ConnectForm from "./ConnectForm";
 import { ConnectionTest } from "./ConnectionTest";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 type Account = {
   id: string;
@@ -42,7 +43,7 @@ export default async function ConnectionsPage() {
 
   return (
     <main className="page">
-      <a href="/" className="back">← Inbox</a>
+      <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
       <h1>Connections</h1>
       <p className="tagline">
         Social accounts this deployment may publish to (§6). Keys live in the

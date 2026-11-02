@@ -14,6 +14,7 @@ import AutomationCard from "./AutomationCard";
 import { InboxActions } from "./InboxActions";
 import RadarScope, { type RadarCandidate } from "./RadarScope";
 import { apiFetch } from "@/lib/api";
+import Icon from "./Icon";
 
 type ItemRow = {
   id: string;
@@ -117,7 +118,7 @@ export default async function Home({
             every claim and every publish.
           </p>
           <div className="hero-actions">
-            <Link href="/radar" className="btn btn-primary">Open radar →</Link>
+            <Link href="/radar" className="btn btn-primary">Open radar <Icon name="arrow-right" /></Link>
             <Link href="/review" className="btn">Review desk</Link>
             <Link href="/attention" className="btn btn-ghost">Needs You{needsYou ? ` · ${needsYou}` : ""}</Link>
           </div>

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
 import MediaPlayer from "./MediaPlayer";
+import Icon from "@/app/Icon";
 
 export type CaptureReview = {
   id: string;
@@ -39,7 +40,7 @@ export default function RedactionReview({
   if (capture.redaction_reviewed) {
     return (
       <div className="small" style={{ marginTop: 4 }}>
-        <span style={{ color: "var(--ok)" }}>redaction reviewed ✓</span>
+        <span style={{ color: "var(--ok)" }}><Icon name="check" /> redaction reviewed</span>
         {capture.reviewer && <> by {capture.reviewer}</>}
         {capture.claim_outcome && (
           <> · claim outcome: <strong>{capture.claim_outcome.replaceAll("_", " ")}</strong></>

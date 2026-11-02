@@ -12,6 +12,7 @@ import Link from "next/link";
 import RadarScope, { type RadarCandidate } from "../RadarScope";
 import { CompetitorEvidence, PromoteButton, ScanButton, TrendAction } from "./RadarActions";
 import { loadJson, type Loaded } from "@/lib/load";
+import Icon, { type IconName } from "@/app/Icon";
 
 type Candidate = RadarCandidate & {
   url: string;
@@ -60,24 +61,28 @@ function scoreTone(score: number): string {
   return "";
 }
 
+type MomentumChip = { label: string; tone: string; title: string; icon?: IconName };
+
 /**
  * Momentum chips (Trend Radar v2): the radar measured these itself — score
  * delta per hour between re-scores, how many independent sources observed the
  * story, and the all-time peak. Nothing here is invented: a lead with no
  * re-score history simply shows no chip.
  */
-function momentumChips(candidate: Candidate): { label: string; tone: string; title: string }[] {
-  const chips: { label: string; tone: string; title: string }[] = [];
+function momentumChips(candidate: Candidate): MomentumChip[] {
+  const chips: MomentumChip[] = [];
   const velocity = Number(candidate.velocity ?? 0);
   if (velocity > 0) {
     chips.push({
-      label: `▲ ${formatVelocity(velocity)}/h`,
+      label: `${formatVelocity(velocity)}/h`,
+      icon: "trend-up",
       tone: "tag-accent",
       title: "Score gained per hour between the last two radar observations",
     });
   } else if (velocity < 0) {
     chips.push({
-      label: `▼ ${formatVelocity(Math.abs(velocity))}/h`,
+      label: `${formatVelocity(Math.abs(velocity))}/h`,
+      icon: "trend-down",
       tone: "tag",
       title: "Score fading between the last two radar observations",
     });
@@ -86,6 +91,7 @@ function momentumChips(candidate: Candidate): { label: string; tone: string; tit
   if (corroborating >= 2) {
     chips.push({
       label: `${corroborating} sources`,
+      icon: "layers",
       tone: "tag-accent",
       title: "Independent sources that observed this story",
     });
@@ -209,7 +215,7 @@ export default async function RadarPage() {
               <div className="chip-row" style={{ marginTop: "0.3rem" }}>
                 {momentumChips(top).map((chip) => (
                   <span key={chip.label} className={`tag ${chip.tone}`} title={chip.title}>
-                    {chip.label}
+                    {chip.icon && <><Icon name={chip.icon} />{" "}</>}{chip.label}
                   </span>
                 ))}
               </div>
@@ -230,7 +236,7 @@ export default async function RadarPage() {
                 {scoreRow("Monetization", Number(top.monetization))}
               </div>
               <a className="btn btn-ghost" href={top.url} target="_blank" rel="noreferrer" style={{ marginTop: "0.7rem" }}>
-                Open official lead ↗
+                Open official lead <Icon name="external" />
               </a>
             </>
           )}
@@ -271,7 +277,7 @@ export default async function RadarPage() {
                     <div className="chip-row" style={{ marginTop: 4 }}>
                       {momentumChips(candidate).map((chip) => (
                         <span key={chip.label} className={`tag ${chip.tone}`} title={chip.title}>
-                          {chip.label}
+                          {chip.icon && <><Icon name={chip.icon} />{" "}</>}{chip.label}
                         </span>
                       ))}
                     </div>

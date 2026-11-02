@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Icon from "@/app/Icon";
 
 /**
  * Authenticated media playback for review.
@@ -25,7 +26,7 @@ export default function MediaPlayer({
   if (!open) {
     return (
       <button type="button" className="btn btn-ghost btn-small" onClick={() => setOpen(true)}>
-        ▶ Watch {label}
+        <Icon name="play" /> Watch {label}
       </button>
     );
   }

@@ -9,6 +9,7 @@ import "./styles.css";
 import SourceActions from "./SourceActions";
 import SourceForm, { type AdapterOption } from "./SourceForm";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 type Source = {
   id: string;
@@ -63,7 +64,7 @@ export default async function SourcesPage() {
 
   return (
     <main className="page">
-      <a href="/" className="back">← Inbox</a>
+      <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
       <h1>Sources</h1>
       <p className="tagline">
         Where discovery starts. Tier A sources can back a verified offer (§3);

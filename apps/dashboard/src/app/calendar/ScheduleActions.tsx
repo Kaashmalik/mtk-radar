@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
+import Icon, { type IconName } from "@/app/Icon";
 
 
 type Props = { scheduleId: string; state: string };
@@ -35,10 +36,11 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
     }
   }
 
-  const buttons: Array<{ label: string; action: () => void }> = [];
+  const buttons: Array<{ label: string; icon: IconName; danger?: boolean; action: () => void }> = [];
   if (state === "draft") {
     buttons.push({
-      label: "→ Needs approval",
+      label: "Needs approval",
+      icon: "arrow-right",
       action: () => call(
         `/schedules/${scheduleId}/transition`,
         { to: "needs_approval" },
@@ -47,7 +49,8 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
   }
   if (state === "failed" || state === "paused") {
     buttons.push({
-      label: state === "paused" ? "▶ Resume" : "↻ Retry",
+      label: state === "paused" ? "Resume" : "Retry",
+      icon: state === "paused" ? "play" : "refresh",
       action: () => {
         // A failed post may have uploaded before the error was recorded. The
         // worker re-confirms a known remote id, but an unknown outcome must be
@@ -67,22 +70,25 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
   }
   if (state === "needs_approval") {
     buttons.push({
-      label: "✓ Approve",
+      label: "Approve",
+      icon: "check",
       action: () => call(`/schedules/${scheduleId}/transition`, { to: "approved" }),
     });
   }
   if (state === "approved") {
     buttons.push({
-      label: "🗓 Schedule",
+      label: "Schedule",
+      icon: "calendar-plus",
       action: () => call(`/schedules/${scheduleId}/transition`, { to: "scheduled" }),
     });
   }
   if (state === "approved" || state === "scheduled" || state === "failed") {
-    buttons.push({ label: "⏸ Pause", action: () => call(`/schedules/${scheduleId}/pause`) });
+    buttons.push({ label: "Pause", icon: "pause", danger: true, action: () => call(`/schedules/${scheduleId}/pause`) });
   }
   if (state === "scheduled" || state === "paused" || state === "failed") {
     buttons.push({
-      label: "⏱ Reschedule",
+      label: "Reschedule",
+      icon: "timer",
       action: () => {
         setRescheduling((v) => !v);
         setNewTime("");
@@ -113,16 +119,19 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
             disabled={busy}
             onClick={b.action}
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
               padding: "0.25rem 0.6rem",
               fontSize: "0.75rem",
               borderRadius: 6,
               border: "1px solid #30363d",
-              background: b.label.startsWith("⏸") ? "#62222a" : "#21262d",
+              background: b.danger ? "#62222a" : "#21262d",
               color: "#e8eaf0",
               cursor: busy ? "wait" : "pointer",
             }}
           >
-            {b.label}
+            <Icon name={b.icon} /> {b.label}
           </button>
         ))}
       </div>
@@ -148,6 +157,9 @@ export default function ScheduleActions({ scheduleId, state }: Props) {
             disabled={busy || !newTime}
             onClick={reschedule}
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
               padding: "0.25rem 0.6rem",
               fontSize: "0.75rem",
               borderRadius: 6,

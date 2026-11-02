@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import Icon from "./Icon";
 
 /** Shows the signed-in reviewer and clears the HttpOnly session cookie.
  * The token itself is never available to this component. */
@@ -34,7 +35,7 @@ export default function IdentityBadge({ actor }: { actor: string }) {
         aria-label="Sign out"
         style={btnStyle}
       >
-        ⎋
+        <Icon name="logout" size={14} />
       </button>
     </span>
   );
@@ -47,4 +48,7 @@ const btnStyle: React.CSSProperties = {
   padding: "2px 8px",
   cursor: "pointer",
   fontSize: 13,
+  color: "inherit",
+  display: "inline-grid",
+  placeItems: "center",
 };

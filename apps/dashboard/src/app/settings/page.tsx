@@ -18,6 +18,7 @@ import NotificationsCard from "./NotificationsCard";
 import ReleasePolicyForm, { type ReleasePolicy } from "./ReleasePolicyForm";
 import SettingsForm from "./SettingsForm";
 import { loadJson, unavailableSections } from "@/lib/load";
+import Icon from "@/app/Icon";
 
 
 type QuotaUsage = {
@@ -274,7 +275,7 @@ export default async function SettingsPage() {
 
   return (
     <main className="page">
-      <a href="/" className="back">← Inbox</a>
+      <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
       <h1>Settings</h1>
       <p className="tagline">
         Human-vs-automation control for every pipeline stage · guardrails ·
@@ -356,7 +357,7 @@ export default async function SettingsPage() {
         </div>
         {budget?.exhausted && (
           <p className="small" style={{ color: "var(--warn)" }}>
-            ⚠ The daily automation budget is exhausted. Autopilot stops approving
+            <Icon name="alert" /> The daily automation budget is exhausted. Autopilot stops approving
             posts; a human can still approve manually or raise the limit.
           </p>
         )}

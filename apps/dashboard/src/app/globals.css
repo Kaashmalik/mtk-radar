@@ -211,25 +211,44 @@ body {
 
 .brand-mark {
   position: relative;
-  display: inline-block;
+  display: inline-grid;
   width: 26px;
   height: 26px;
   border-radius: 8px;
-  background:
-    radial-gradient(circle at 50% 50%, var(--accent-contrast) 0 2px, transparent 2.5px),
-    radial-gradient(circle at 50% 50%, transparent 0 6px, color-mix(in srgb, var(--accent-contrast) 55%, transparent) 6.5px 7.5px, transparent 8px),
-    linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--accent-contrast);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
   box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 70%, transparent);
   overflow: hidden;
+  transition: transform var(--speed-slow) var(--ease-spring), box-shadow var(--speed-slow) ease;
 }
 
-.brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: conic-gradient(from 0deg, color-mix(in srgb, white 45%, transparent), transparent 28%);
+.brand-mark svg { display: block; }
+.bm-ring { stroke: currentColor; stroke-opacity: 0.45; stroke-width: 1.2; }
+.bm-core { fill: currentColor; }
+.bm-beam {
+  fill: currentColor;
+  fill-opacity: 0.32;
+  transform-box: view-box;
+  transform-origin: 12px 12px;
   animation: radar-sweep 3.6s linear infinite;
-  mix-blend-mode: overlay;
+}
+.bm-blip {
+  fill: currentColor;
+  opacity: 0;
+  animation: bm-ping 3.6s var(--ease-out) infinite;
+  animation-delay: calc(var(--i, 0) * 1.5s + 0.45s);
+}
+
+@keyframes bm-ping {
+  0%, 100% { opacity: 0; }
+  6% { opacity: 1; }
+  45% { opacity: 0; }
+}
+
+.brand:hover .brand-mark,
+.brand:focus-visible .brand-mark {
+  transform: rotate(-8deg) scale(1.08);
+  box-shadow: 0 6px 18px -4px color-mix(in srgb, var(--accent) 85%, transparent);
 }
 
 .sidebar-nav {
@@ -279,9 +298,8 @@ body {
 }
 
 .site-nav a .nav-icon {
-  flex-shrink: 0;
   opacity: 0.85;
-  transition: transform var(--speed-slow) var(--ease-spring), opacity var(--speed) ease;
+  transition: opacity var(--speed) ease, filter var(--speed-slow) ease;
 }
 
 .site-nav a:hover {
@@ -289,7 +307,7 @@ body {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
-.site-nav a:hover .nav-icon { transform: scale(1.08); opacity: 1; }
+.site-nav a:hover .nav-icon { opacity: 1; }
 
 .site-nav a[aria-current="page"] {
   color: var(--text);
@@ -297,7 +315,11 @@ body {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
-.site-nav a[aria-current="page"] .nav-icon { color: var(--accent); opacity: 1; }
+.site-nav a[aria-current="page"] .nav-icon {
+  color: var(--accent);
+  opacity: 1;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 55%, transparent));
+}
 
 .site-nav a[aria-current="page"]::before {
   content: "";
@@ -1160,3 +1182,116 @@ main.page th:last-child { border-top-right-radius: var(--radius-sm); }
   .scene { grid-template-columns: minmax(0, 1fr) auto; }
   .scene-rail { grid-auto-flow: column; grid-column: 1 / -1; justify-content: start; }
 }
+
+/* ---------- icons (Icon.tsx) ----------
+   One line-icon set on a 24px grid, drawn in currentColor. Moving parts
+   carry an m-* class naming their micro-animation; it plays while the
+   nearest link / enabled button / pill / tag is hovered or keyboard-focused.
+   Only stateful transforms (menu morph, clapper rest pose) live outside the
+   no-preference query: every decorative motion is skipped entirely under
+   prefers-reduced-motion rather than just shortened. */
+
+.icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.14em;
+  overflow: visible;
+}
+
+.icon * {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
+
+/* parts that scale from their own edge */
+.icon .m-grow-y, .icon .m-squish, .icon .m-flame { transform-box: fill-box; transform-origin: 50% 100%; }
+.icon .m-grow-x, .icon .m-scan { transform-box: fill-box; transform-origin: 0 50%; }
+.icon .m-bubble { transform-box: fill-box; transform-origin: 50% 50%; }
+
+/* film clapper rests open */
+.icon .m-clap { transform-origin: 4px 11px; transform: rotate(-14deg); transition: transform var(--speed-slow) var(--ease-spring); }
+
+/* hamburger -> close morph, driven by the button's aria-expanded */
+.icon .m-bar-1, .icon .m-bar-2, .icon .m-bar-3 {
+  transition: transform var(--speed-slow) var(--ease-out), opacity var(--speed) ease;
+}
+[aria-expanded="true"] > .icon .m-bar-1 { transform: rotate(45deg) translateY(5px); }
+[aria-expanded="true"] > .icon .m-bar-2 { opacity: 0; transform: scaleX(0.2); }
+[aria-expanded="true"] > .icon .m-bar-3 { transform: rotate(-45deg) translateY(-5px); }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* ongoing motion */
+  .icon.m-spinning { animation: i-spin 0.85s linear infinite; }
+  .icon.m-pulse { animation: i-pulse 1.6s ease-in-out 3; }
+
+  /* entrance: checks draw themselves in; swapped icons spin in */
+  .icon .m-draw { stroke-dasharray: 1; animation: i-draw 480ms var(--ease-out) 80ms both; }
+  .icon-swap { animation: i-swap-in 420ms var(--ease-spring) both; }
+
+  /* transitions the hover rules below move between */
+  .icon, .icon .m-lift, .icon .m-turn, .icon .m-rays, .icon .m-sink,
+  .icon [class*="m-nudge"] {
+    transition: transform var(--speed-slow) var(--ease-spring);
+  }
+  .icon .m-turn { transition-duration: 600ms; }
+  .icon .m-rays { transition-duration: 700ms; }
+
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-lift { transform: translateY(-1.6px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-turn { transform: rotate(90deg); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-rays { transform: rotate(45deg); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-turn-self { transform: rotate(90deg); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-sink { transform: translateY(1.6px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-r, :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-nudge-r { transform: translateX(2px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-l { transform: translateX(-2px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-u { transform: translateY(-2px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-d { transform: translateY(2px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-ur, :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-nudge-ur { transform: translate(1.5px, -1.5px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-nudge-dr { transform: translate(1.5px, 1.5px); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-clap { animation: i-clap 520ms var(--ease-out); }
+
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-sweep { animation: i-spin 1.4s linear infinite; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-blip { animation: i-blink 1.4s ease-out infinite; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-draw { animation-name: i-draw-again; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-dip { animation: i-dip 520ms var(--ease-spring); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-hop { animation: i-hop 480ms var(--ease-spring); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-grow-y { animation: i-grow-y 560ms var(--ease-spring) calc(var(--i, 0) * 70ms) both; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-grow-x { animation: i-grow-x 520ms var(--ease-out) calc(var(--i, 0) * 70ms) both; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-squish { animation: i-squish 600ms ease-in-out calc(var(--i, 0) * 120ms); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-spin-once { animation: i-spin 700ms var(--ease-out); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-press { animation: i-press 480ms var(--ease-spring); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-flame { animation: i-flame 900ms ease-in-out infinite; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-bubble { animation: i-bubble 1.2s ease-out calc(var(--i, 0) * 300ms) infinite; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-twinkle { animation: i-twinkle 900ms ease-in-out infinite; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon .m-scan { animation: i-grow-x 700ms var(--ease-out) infinite alternate; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-shake { animation: i-shake 520ms ease-in-out; }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-flicker { animation: i-flicker 700ms steps(1, end); }
+  :is(a, button:not(:disabled), summary, label, .pill, .tag, .icon-host):is(:hover, :focus-visible) > .icon.m-flip { animation: i-flip 900ms var(--ease-spring); }
+
+  /* the current page's icon pops in and its radar keeps sweeping */
+  .site-nav a[aria-current="page"] .nav-icon { animation: i-pop 460ms var(--ease-spring); }
+  .site-nav a[aria-current="page"] .nav-icon .m-sweep { animation: i-spin 3.6s linear infinite; }
+}
+
+@keyframes i-spin { to { transform: rotate(360deg); } }
+@keyframes i-pulse { 50% { transform: scale(1.18); opacity: 0.7; } }
+@keyframes i-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes i-draw-again { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes i-swap-in { from { transform: rotate(-90deg) scale(0.4); opacity: 0; } }
+@keyframes i-pop { 40% { transform: scale(1.22); } }
+@keyframes i-blink { 0%, 100% { opacity: 0; } 30% { opacity: 1; } }
+@keyframes i-dip { 45% { transform: translateY(2px); } }
+@keyframes i-hop { 40% { transform: translateY(-2px); } }
+@keyframes i-grow-y { from { transform: scaleY(0.25); } }
+@keyframes i-grow-x { from { transform: scaleX(0.3); } }
+@keyframes i-squish { 50% { transform: scaleY(0.55); } }
+@keyframes i-press { 45% { transform: translateY(2px) scaleY(0.9); } }
+@keyframes i-clap { 40% { transform: rotate(0); } 70% { transform: rotate(-5deg); } }
+@keyframes i-flame { 0%, 100% { transform: scale(1, 1); } 33% { transform: scale(0.94, 1.08); } 66% { transform: scale(1.05, 0.95); } }
+@keyframes i-bubble { from { transform: translateY(0); opacity: 1; } to { transform: translateY(-7px); opacity: 0; } }
+@keyframes i-twinkle { 50% { transform: scale(0.4) rotate(45deg); opacity: 0.4; } }
+@keyframes i-shake { 20% { transform: rotate(-10deg); } 40% { transform: rotate(9deg); } 60% { transform: rotate(-6deg); } 80% { transform: rotate(3deg); } }
+@keyframes i-flicker { 15% { opacity: 0.35; } 30% { opacity: 1; } 45% { opacity: 0.5; } 60% { opacity: 1; } }
+@keyframes i-flip { to { transform: rotate(180deg); } }
+
+/* preflight status chips use the same set */
+.preflight-icon .icon { width: 0.8rem; height: 0.8rem; }

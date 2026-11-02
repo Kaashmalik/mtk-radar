@@ -13,6 +13,7 @@ import ScriptRevise from "./ScriptRevise";
 import StoryboardEditor from "./StoryboardEditor";
 import VariantExplorer from "./VariantExplorer";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 type Script = {
   id: string;
@@ -122,7 +123,7 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
   if (!data) {
     return (
       <main className="page">
-        <Link href="/studio" className="back">← Studio</Link>
+        <Link href="/studio" className="back"><Icon name="arrow-left" /> Studio</Link>
         <h1>Content studio unavailable</h1>
         <p className="tagline">The offer was not found, or the API is unreachable.</p>
       </main>
@@ -146,7 +147,7 @@ export default async function StudioOfferPage({ params }: { params: Promise<{ id
 
   return (
     <main className="page">
-      <Link href="/studio" className="back">← Content studio</Link>
+      <Link href="/studio" className="back"><Icon name="arrow-left" /> Content studio</Link>
       <section className="hero" style={{ marginTop: "0.6rem" }}>
         <div className="hero-copy">
           <span className="eyebrow">Content studio</span>

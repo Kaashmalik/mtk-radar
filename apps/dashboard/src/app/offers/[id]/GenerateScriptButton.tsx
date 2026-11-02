@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 const FORMATS = [
   {
@@ -105,7 +106,7 @@ export default function GenerateScriptButton({
           onClick={generate}
           type="button"
         >
-          {busy ? "Generating…" : "⚡ Generate script"}
+          {busy ? <><Icon name="spinner" /> Generating…</> : <><Icon name="zap" /> Generate script</>}
         </button>
       </div>
       <p className="muted small" style={{ margin: 0 }}>{selected.hint}</p>
@@ -116,7 +117,7 @@ export default function GenerateScriptButton({
             : "No redaction-reviewed capture is available. Use official explainer, or review a capture first."}
         </p>
       )}
-      {error && <p role="alert" style={{ color: "var(--warn)", fontSize: "0.8rem", margin: 0 }}>⚠ {error}</p>}
+      {error && <p role="alert" style={{ color: "var(--warn)", fontSize: "0.8rem", margin: 0 }}><Icon name="alert" motion="pulse" /> {error}</p>}
     </div>
   );
 }

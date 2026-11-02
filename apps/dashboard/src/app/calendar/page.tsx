@@ -3,6 +3,7 @@ import BatchApprove from "./BatchApprove";
 import HeldReconcile from "./HeldReconcile";
 import ScheduleActions from "./ScheduleActions";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 /**
  * Content calendar (week 9, master plan §17; WP-H polish 2026-10-24).
@@ -211,8 +212,8 @@ export default async function CalendarPage() {
 
   return (
     <main className="page">
-      <a href="/review" className="back">← Review desk</a>
-      <a href="/analytics" className="back" style={{ marginLeft: "0.9rem" }}>Analytics →</a>
+      <a href="/review" className="back"><Icon name="arrow-left" /> Review desk</a>
+      <a href="/analytics" className="back" style={{ marginLeft: "0.9rem" }}>Analytics <Icon name="arrow-right" /></a>
       <h1>Content calendar</h1>
       <p className="tagline">
         Week grid · per-platform/day publish windows · conflicts (same platform
@@ -278,7 +279,7 @@ export default async function CalendarPage() {
                         {a.last_refreshed_at && (
                           <> · last refreshed {dayKey(a.last_refreshed_at)}</>
                         )}
-                        {a.last_error && <> · ⚠ {a.last_error}</>}
+                        {a.last_error && <> · <Icon name="alert" /> {a.last_error}</>}
                       </div>
                     </div>
                     <span
@@ -375,7 +376,7 @@ export default async function CalendarPage() {
                             </a>
                             {s.conflict && (
                               <div className="small" style={{ color: "var(--danger)" }}>
-                                ⚠ {s.platform} posts again within an hour — move one BEFORE
+                                <Icon name="alert" motion="pulse" /> {s.platform} posts again within an hour — move one BEFORE
                                 approving (double-posting reads as spam to the audience and
                                 the platform).
                               </div>
@@ -430,14 +431,14 @@ export default async function CalendarPage() {
                         </div>
                         {s.conflict && (
                           <div className="small" style={{ color: "var(--danger)" }}>
-                            ⚠ {s.platform} posts again within an hour — move one BEFORE
+                            <Icon name="alert" motion="pulse" /> {s.platform} posts again within an hour — move one BEFORE
                             approving (double-posting reads as spam to the audience and
                             the platform).
                           </div>
                         )}
                         {(held || openAttempt) && (
                           <div className="small" style={{ color: "#f0883e" }}>
-                            ⚠ {held ? "HELD" : "UNKNOWN UPLOAD"} — needs operator review:
+                            <Icon name="alert" motion="pulse" /> {held ? "HELD" : "UNKNOWN UPLOAD"} — needs operator review:
                             check the platform before re-queueing (a previous upload may
                             already be live).
                           </div>

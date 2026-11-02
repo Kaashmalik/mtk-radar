@@ -117,11 +117,11 @@ test("source permission can be attested and revoked from the desk", async ({ pag
   await expect(row).toBeVisible();
   await row.getByLabel(`Terms reference for ${provider}`).fill("https://example.com/terms");
   await row.getByRole("button", { name: "Attest permission" }).click();
-  await expect(row.getByText("permission current ✓")).toBeVisible();
+  await expect(row.getByText("permission current")).toBeVisible();
 
   page.once("dialog", (dialog) => dialog.accept());
   await row.getByRole("button", { name: "Revoke permission" }).click();
-  await expect(row.getByText("not reviewed ⚠")).toBeVisible();
+  await expect(row.getByText("not reviewed")).toBeVisible();
 });
 
 test("verified offer workspace exposes evidence, claims and format-gated script generation", async ({ page }) => {

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 export function ScanButton() {
   const router = useRouter();
@@ -32,7 +33,7 @@ export function ScanButton() {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
       <button className="btn btn-primary" type="button" onClick={scan} disabled={busy}>
-        {busy ? "Scanning…" : "Scan inbox → radar"}
+        {busy ? <><Icon name="spinner" /> Scanning…</> : "Scan inbox → radar"}
       </button>
       {message && <span className="small muted" role="status">{message}</span>}
     </span>
@@ -129,7 +130,7 @@ export function PromoteButton({ id, status }: { id: string; status: string }) {
         disabled={busy}
         onClick={promote}
       >
-        {busy ? "Promoting…" : "Promote → queue"}
+        {busy ? <><Icon name="spinner" /> Promoting…</> : "Promote → queue"}
       </button>
       {message && <span className="small muted" role="status">{message}</span>}
     </span>

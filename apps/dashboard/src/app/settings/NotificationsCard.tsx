@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 type ProbeResult = {
   configured: boolean;
@@ -63,9 +64,9 @@ export default function NotificationsCard() {
           style={{ marginTop: "0.6rem", color: result.ok ? "var(--ok)" : "var(--danger)" }}
         >
           {result.ok
-            ? "✔ delivered"
+            ? <><Icon name="check" /> delivered</>
             : result.configured
-              ? "✖ not delivered"
+              ? <><Icon name="x" /> not delivered</>
               : "• not configured"}{" "}
           <span className="muted">
             {result.status != null ? `(HTTP ${result.status}) ` : ""}

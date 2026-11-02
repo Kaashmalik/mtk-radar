@@ -6,6 +6,7 @@
 
 import "./styles.css";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 
 type Analytics = {
@@ -155,7 +156,7 @@ export default async function AnalyticsPage() {
 
   return (
     <main className="page">
-      <a href="/" className="back">← Inbox</a>
+      <a href="/" className="back"><Icon name="arrow-left" /> Inbox</a>
       <h1>Analytics</h1>
       <p className="tagline">
         Pipeline health, verification load, publishing outcomes, source freshness (§7).

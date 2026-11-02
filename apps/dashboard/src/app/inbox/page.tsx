@@ -13,6 +13,7 @@ import Link from "next/link";
 
 import { InboxActions } from "../InboxActions";
 import { apiFetch } from "@/lib/api";
+import Icon from "@/app/Icon";
 
 export const dynamic = "force-dynamic";
 
@@ -213,7 +214,7 @@ export default async function InboxPage({
         {next ? (
           <div style={{ marginTop: "0.8rem" }}>
             <Link href={buildHref(q, filter, next)} className="btn">
-              Older items →
+              Older items <Icon name="arrow-right" />
             </Link>
           </div>
         ) : null}

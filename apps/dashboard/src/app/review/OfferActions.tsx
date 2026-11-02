@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
+import Icon, { type IconName } from "@/app/Icon";
 
 type Props = { offerId: string; state: string };
 
@@ -35,18 +36,18 @@ export default function OfferActions({ offerId, state }: Props) {
     }
   }
 
-  const actions: Array<{ to: string; label: string; note?: string }> = [];
+  const actions: Array<{ to: string; label: string; icon?: IconName; note?: string }> = [];
   if (["candidate", "evidence_needed", "corrected"].includes(state)) {
-    actions.push({ to: "verified", label: "✓ Verify evidence" });
+    actions.push({ to: "verified", label: "Verify evidence", icon: "check" });
   }
   if (state === "verified") {
-    actions.push({ to: "approved_for_video", label: "✓ Approve for video" });
+    actions.push({ to: "approved_for_video", label: "Approve for video", icon: "check" });
   }
   if (state === "verified" || state === "approved_for_video") {
-    actions.push({ to: "evidence_needed", label: "↻ Request re-verification" });
+    actions.push({ to: "evidence_needed", label: "Request re-verification", icon: "refresh" });
   }
   if (state !== "published" && state !== "expired") {
-    actions.push({ to: "expired", label: "Mark expired" });
+    actions.push({ to: "expired", label: "Mark expired", icon: "hourglass" });
   }
 
   if (actions.length === 0) {
@@ -76,6 +77,9 @@ export default function OfferActions({ offerId, state }: Props) {
             disabled={busy}
             onClick={() => transition(a.to, note.trim() || a.note)}
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
               padding: "0.3rem 0.65rem",
               fontSize: "0.78rem",
               borderRadius: 6,
@@ -86,7 +90,7 @@ export default function OfferActions({ offerId, state }: Props) {
               cursor: busy ? "wait" : "pointer",
             }}
           >
-            {a.label}
+            {a.icon && <Icon name={a.icon} />} {a.label}
           </button>
         ))}
       </div>

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 export type SourcePermission = {
   id: string;
@@ -76,7 +77,7 @@ export default function SourceActions({ source }: { source: SourcePermission }) 
     <div style={{ display: "grid", gap: 4, minWidth: 190 }}>
       {source.tos_valid ? (
         <>
-          <span className="small" style={{ color: "var(--ok)" }}>permission current ✓</span>
+          <span className="small" style={{ color: "var(--ok)" }}><Icon name="check" /> permission current</span>
           <span className="muted small">
             by {source.tos_reviewer ?? "unknown"}
             {source.tos_expires_at && (
@@ -98,7 +99,7 @@ export default function SourceActions({ source }: { source: SourcePermission }) 
       ) : (
         <form onSubmit={attest} style={{ display: "grid", gap: 4 }}>
           <span className="small" style={{ color: "var(--warn)" }}>
-            {source.tos_reviewed_at ? "permission expired ⚠" : "not reviewed ⚠"}
+            <Icon name="alert" /> {source.tos_reviewed_at ? "permission expired" : "not reviewed"}
           </span>
           <span className="muted small">
             Machine reads are blocked until a human records the terms reference.

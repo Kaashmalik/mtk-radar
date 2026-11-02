@@ -13,6 +13,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 export type AutomationPolicy = {
   schema_version?: number;
@@ -150,7 +151,7 @@ export default function AutomationForm({
             disabled={busy !== null}
             onClick={togglePause}
           >
-            {policy.paused ? "▶ Resume automation" : "⏸ Pause all automation"}
+            {policy.paused ? <><Icon name="play" /> Resume automation</> : <><Icon name="pause" /> Pause all automation</>}
           </button>
         </div>
       </div>

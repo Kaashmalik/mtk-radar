@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 /**
  * Human playback sign-off (plan §6.F) — the final gate before release.
@@ -70,8 +71,8 @@ export function PlaybackReview({
         <button type="button" className="btn" disabled={busy} onClick={() => void submit(false)}>
           Rejected
         </button>
-        <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
-          ✕
+        <button type="button" className="btn btn-ghost" aria-label="Close playback review" onClick={() => setOpen(false)}>
+          <Icon name="x" />
         </button>
         {error && <span style={{ color: "var(--danger)" }}>{error}</span>}
       </span>

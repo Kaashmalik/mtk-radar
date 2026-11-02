@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { clientFetch } from "@/lib/api-client";
+import Icon from "@/app/Icon";
 
 type SourceOption = {
   id: string;
@@ -66,7 +67,7 @@ export default function EvidenceForm({
         body.duplicate
           ? "Identical snapshot already stored — evidence was not duplicated."
           : `Evidence stored (${body.content_hash?.slice(0, 12)}…). Official: ${
-              official ? (body.domain_ok ? "domain confirmed ✓" : "domain mismatch ✗") : "no"
+              official ? (body.domain_ok ? "domain confirmed" : "domain MISMATCH") : "no"
             }.`,
       );
       setUrl("");
