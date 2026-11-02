@@ -1,0 +1,43 @@
+{
+  "name": "mtk-codex",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://mtkcodex.tech",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "outreach:doc": "node scripts/outreach-doc.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "1.66.0",
+    "marked": "^18.1.2",
+    "next": "16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "topojson-client": "^3.1.0",
+    "web-push": "^3.6.7",
+    "world-atlas": "^2.0.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/topojson-client": "^3.1.5",
+    "@types/web-push": "^3.6.4",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.4.3",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=20.9"
+  }
+}

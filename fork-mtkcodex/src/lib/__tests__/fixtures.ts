@@ -1,0 +1,28 @@
+import type { Lead } from '@/lib/lead-types';
+
+export const makeLead = (over: Partial<Lead> = {}): Lead => ({
+  id: 'x',
+  name: 'Acme',
+  business_type: '',
+  area: '',
+  phone: '+923001234567',
+  email: '',
+  website: '',
+  lead_score: 50,
+  lead_tier: 'B',
+  scenario: '',
+  rating: null,
+  reviews: null,
+  google_maps_url: '',
+  recommended_pitch: '',
+  message: '',
+  status: 'new',
+  channel: 'whatsapp',
+  notes: '',
+  last_contacted: null,
+  next_followup: null,
+  do_not_contact: false,
+  created_at: '2026-11-01T00:00:00Z',
+  updated_at: '2026-11-01T00:00:00Z',
+  ...over,
+});
