@@ -138,3 +138,12 @@ def test_legacy_api_without_attention_is_quiet():
             return FakeResponse([])
 
     assert monitor.check_attention(Legacy()) == []
+
+
+def test_platform_account_check_survives_an_error_body():
+    """An API 5xx returns a dict; iterating it used to crash the monitor."""
+    class _ErrorClient:
+        def get(self, path, params=None):
+            return FakeResponse({"detail": "internal error"}, status_code=500)
+
+    assert monitor.check_platform_accounts(_ErrorClient()) == []

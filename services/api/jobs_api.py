@@ -68,6 +68,11 @@ class JobResultIn(BaseModel):
     # Lease fencing: when given, only the CURRENT holder may settle the job.
     # Omitted by older workers (accepted, unfenced, as before).
     worker: Optional[str] = Field(default=None, min_length=3, max_length=120)
+    # Deferral: "not my turn yet" (not due, automation paused, account cooling
+    # down, outcome decided on the entity row). The job is re-checked after
+    # retry_after_s WITHOUT spending an attempt — only real failures count
+    # toward max_attempts, so a waiting job is never dead-lettered.
+    defer: bool = False
 
 
 @router.post("/jobs", status_code=201)
@@ -212,6 +217,17 @@ async def result(job_id: uuid.UUID, body: JobResultIn) -> dict:
                     job_id,
                 )
                 return {"id": str(job_id), "status": "done"}
+            if body.defer and not body.ok:
+                await conn.execute(
+                    "UPDATE jobs SET status = 'pending', last_error = $2, "
+                    "attempts = GREATEST(attempts - 1, 0), "
+                    "lease_expires_at = NULL, lease_holder = NULL, "
+                    "run_after = now() + make_interval(secs => $3::int), "
+                    "updated_at = now() WHERE id = $1",
+                    job_id, body.detail,
+                    body.retry_after_s or DEFAULT_RETRY_AFTER_S,
+                )
+                return {"id": str(job_id), "status": "pending", "deferred": True}
             if row["attempts"] >= row["max_attempts"] or body.retry_after_s is None:
                 dead = row["attempts"] >= row["max_attempts"]
                 # A failure without an explicit delay gets the default backoff,

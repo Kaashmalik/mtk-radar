@@ -4621,6 +4621,32 @@ def test_job_failure_without_retry_delay_gets_default_backoff(auth_client):
     assert row["delayed"] is True, "failure without retry_after_s must back off"
 
 
+def test_deferred_job_result_does_not_spend_an_attempt(auth_client):
+    """A deferral ("not due", "paused", "cooling down") re-queues the job for
+    later without consuming its attempt budget, so a waiting publish job is
+    never dead-lettered."""
+    import uuid as uuidlib
+    job = auth_client.post("/jobs", headers=SVC,
+                           json={"kind": "notify", "entity_id": str(uuidlib.uuid4()),
+                                 "payload": {}, "max_attempts": 1})
+    jid = job.json()["id"]
+    claimed = auth_client.post("/jobs/claim", headers=SVC,
+                               json={"worker": "pytest-worker", "lease_s": 60,
+                                     "kinds": ["notify"]})
+    if claimed.json().get("id") != jid:
+        return
+    res = auth_client.post(f"/jobs/{jid}/result", headers=SVC,
+                           json={"ok": False, "detail": "not due", "defer": True,
+                                 "retry_after_s": 120, "worker": "pytest-worker"})
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "pending"
+    row = _run("SELECT status::text AS status, attempts, run_after > now() AS delayed "
+               "FROM jobs WHERE id = $1", uuidlib.UUID(jid))[0]
+    assert row["status"] == "pending", "max_attempts=1 must not dead-letter a deferral"
+    assert row["attempts"] == 0
+    assert row["delayed"] is True
+
+
 def test_trend_radar_rescans_stale_candidates_records_velocity_and_rearms_job(client, source):
     """Trend Radar v2 (WP-B): rescan-after-6h produces real velocity math.
 

@@ -242,9 +242,14 @@ class Batch:
                 if not offer.get("official_evidence"):
                     continue  # no official evidence → nothing to script from
                 try:
-                    scripts = self.api.get(f"/offers/{offer['id']}/scripts").json()
-                except httpx.HTTPError as exc:
+                    res = self.api.get(f"/offers/{offer['id']}/scripts")
+                    scripts = res.json() if res.status_code < 300 else None
+                except (httpx.HTTPError, ValueError) as exc:
                     log.warning("scripts for %s unavailable: %s", offer["id"], exc)
+                    continue
+                if not isinstance(scripts, list):
+                    log.warning("scripts for %s unavailable (HTTP %s)",
+                                offer["id"], res.status_code)
                     continue
                 if scripts:
                     continue

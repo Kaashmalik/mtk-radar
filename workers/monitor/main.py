@@ -92,6 +92,12 @@ def check_platform_accounts(client: httpx.Client) -> list[dict]:
     except (httpx.HTTPError, ValueError) as exc:
         log.error("cannot list platform accounts: %s", exc)
         return alerts
+    if not isinstance(accounts, list):
+        # An error body (5xx/401) is a dict: iterating it would crash the
+        # whole monitor pass. Report it; the next pass retries.
+        log.error("cannot list platform accounts: unexpected payload %r",
+                  str(accounts)[:200])
+        return alerts
 
     now = datetime.now(timezone.utc)
     for account in accounts:

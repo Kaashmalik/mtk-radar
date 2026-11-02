@@ -244,3 +244,107 @@ def test_knob_disables_the_drain(monkeypatch):
     worker = _publisher(api)
     assert worker._drain_publish_jobs(datetime.now(timezone.utc)) == 0
     assert api.claims == 0
+
+
+# ---- 2026-11-02 review: failure injection for the drain ---------------------
+
+class _RecordingAPI(JobQueueAPI):
+    """JobQueueAPI that also records every POST and can inject failures."""
+
+    def __init__(self, *a, offer_status=200, paused=False, lock_ok=True, **kw):
+        super().__init__(*a, **kw)
+        self.offer_status = offer_status
+        self.paused = paused
+        self.lock_ok = lock_ok
+        self.posts = []
+
+    def get(self, path, params=None):
+        if path == "/automation/policy":
+            return FakeResponse({"policy": {"paused": self.paused}})
+        if path.startswith("/offers/") and self.offer_status != 200:
+            return FakeResponse({"detail": "boom"}, self.offer_status)
+        return JobQueueAPI.get(self, path, params)
+
+    def post(self, path, json=None):  # noqa: A002
+        self.posts.append((path, json))
+        if path == "/locks/acquire":
+            return FakeResponse({"acquired": self.lock_ok})
+        return JobQueueAPI.post(self, path, json)
+
+
+def test_transient_offer_lookup_error_retries_instead_of_pausing(monkeypatch):
+    """B1: an API 5xx on the moment-of-upload offer recheck is not evidence
+    that the offer is unpublishable — the post must be retried, never held
+    and paused for a human."""
+    api = _RecordingAPI(offer_status=503)
+    worker = _publisher(api)
+    adapter = FakeAdapter()
+    monkeypatch.setattr(worker, "build_adapters", lambda: {"youtube": adapter})
+    worker._drain_publish_jobs(datetime.now(timezone.utc))
+    assert adapter.uploads == []
+    reports = [j for p, j in api.posts if p == "/schedules/sch-1/result"]
+    assert reports and reports[0]["ok"] is False
+    assert not reports[0].get("hold"), "a transient error must not hold the post"
+    assert ("/schedules/sch-1/pause", None) not in api.posts
+
+
+def test_pause_before_claim_stops_the_drain_without_leasing():
+    """B3: a paused policy stops the drain BEFORE a claim, so nothing is left
+    leased (expired leases are never auto-reclaimed)."""
+    api = _RecordingAPI(paused=True)
+    worker = _publisher(api)
+    assert worker._drain_publish_jobs(datetime.now(timezone.utc)) == 0
+    assert api.claims == 0
+
+
+def test_pause_after_claim_releases_the_job_as_deferred(monkeypatch):
+    api = _RecordingAPI()
+    worker = _publisher(api)
+    calls = iter([True, False])  # allowed at claim time, paused before upload
+    monkeypatch.setattr(worker, "_automation_allowed", lambda: next(calls, False))
+    monkeypatch.setattr(worker, "build_adapters", lambda: {"youtube": FakeAdapter()})
+    worker._drain_publish_jobs(datetime.now(timezone.utc))
+    job_id, payload = api.results[0]
+    assert payload["ok"] is False and payload["defer"] is True
+    assert payload["retry_after_s"] > 0
+
+
+def test_lost_sweep_lock_aborts_the_drain_before_claiming():
+    """B2: the drain re-asserts the sweep lock before every job, like the
+    classic sweep — a lost lock means a second publisher may have joined."""
+    api = _RecordingAPI(lock_ok=False)
+    worker = _publisher(api)
+    worker._sweep_holder = "publishing-worker-test"
+    assert worker._drain_publish_jobs(datetime.now(timezone.utc)) == 0
+    assert api.claims == 0
+    assert worker._lock_lost is True
+
+
+def test_lost_lock_in_drain_also_skips_the_classic_sweep(monkeypatch):
+    api = _RecordingAPI()
+    worker = _publisher(api)
+    acquired = iter([True])  # the initial acquire succeeds, renewal fails
+    real_post = api.post
+
+    def post(path, json=None):  # noqa: A002
+        if path == "/locks/acquire":
+            api.posts.append((path, json))
+            return FakeResponse({"acquired": next(acquired, False)})
+        return real_post(path, json)
+
+    api.post = post
+    swept = []
+    monkeypatch.setattr(worker, "_sweep", lambda now: swept.append(now) or 0)
+    worker.run_once()
+    assert swept == [], "a sweep that lost its lock must not continue"
+
+
+def test_not_due_and_incomplete_jobs_are_deferred_not_failed():
+    """B4: waiting must not spend the job's attempt budget (max 3) — a post
+    held for a human or an account cooling down would otherwise be
+    dead-lettered within minutes and raise a false alarm."""
+    video = _real_video()
+    api = JobQueueAPI(schedule=_schedule(video, due=False), video_path=video)
+    worker = _publisher(api)
+    worker._drain_publish_jobs(datetime.now(timezone.utc))
+    assert api.results[0][1]["defer"] is True

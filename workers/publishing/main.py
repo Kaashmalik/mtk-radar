@@ -332,8 +332,11 @@ class Publisher:
             return 0
         if not self._acquire_sweep_lock("publishing"):
             return 0
+        self._lock_lost = False
         try:
             drained = self._drain_publish_jobs(now)
+            if self._lock_lost:
+                return drained
             self.token_maintenance(now)
             self.refresh_capabilities()
             return drained + self._sweep(now)
@@ -538,6 +541,16 @@ class Publisher:
                 break
             if self.policy and self.policy.get("dry_run"):
                 return published
+            # Same rules as the classic sweep: a pause stops the drain before
+            # the next claim, and exclusivity is re-asserted before every job
+            # (a drain of long uploads can outlive the lock's TTL).
+            if not self._automation_allowed():
+                return published
+            if getattr(self, "_sweep_holder", None)                     and not self._renew_sweep_lock("publishing"):
+                log.error("sweep lock lost during the job drain after %d post(s) — "
+                          "aborting this sweep", published)
+                self._lock_lost = True
+                return published
             try:
                 res = self.api.post(
                     "/jobs/claim",
@@ -572,8 +585,12 @@ class Publisher:
         return published
 
     def _job_result(self, job_id: str, *, ok: bool, detail: str | None = None,
-                    retry_after_s: int | None = None) -> None:
+                    retry_after_s: int | None = None, defer: bool = False) -> None:
         payload: dict = {"ok": ok}
+        if defer:
+            # Waiting is not failing: the API re-checks later without spending
+            # one of the job's (few) attempts.
+            payload["defer"] = True
         if detail:
             payload["detail"] = detail[:1900]
         if retry_after_s is not None:
@@ -635,11 +652,15 @@ class Publisher:
             except ValueError:
                 wait_s = 3600
             self._job_result(job_id, ok=False, detail="publish time not reached",
-                             retry_after_s=wait_s)
+                             retry_after_s=wait_s, defer=True)
             return 0
         adapters = self.build_adapters()
         if not self._automation_allowed():
-            log.info("automation policy paused mid-drain — job %s left leased", job_id)
+            # Never leave the job leased: expired leases are not auto-reclaimed,
+            # so it would sit wedged in attention until a human retried it.
+            log.info("automation policy paused mid-drain — job %s released", job_id)
+            self._job_result(job_id, ok=False, detail="automation paused",
+                             retry_after_s=300, defer=True)
             return 0
         if self._publish(post, adapters):
             self._job_result(job_id, ok=True, detail="published")
@@ -648,7 +669,7 @@ class Publisher:
         # job re-checks shortly and resolves itself from the schedule state.
         self._job_result(job_id, ok=False,
                          detail="publish attempt did not complete — see schedule outcome",
-                         retry_after_s=600)
+                         retry_after_s=600, defer=True)
         return 0
 
     def _sweep(self, now: datetime) -> int:
@@ -893,7 +914,13 @@ class Publisher:
                                 "(duplicate protection)")
             return False
 
-        render = self._render_for_post(post)
+        try:
+            render = self._render_for_post(post)
+        except httpx.HTTPError as exc:
+            # Before the attempt claim: nothing was sent, so a plain retryable
+            # failure (not a hold) is safe.
+            self._report(post["id"], ok=False, detail=f"cannot load the pinned render: {exc}")
+            return False
         if render is None:
             self._report(post["id"], ok=False,
                          detail="the pinned render no longer exists — re-render and re-schedule")
@@ -903,7 +930,23 @@ class Publisher:
         # trigger pauses scheduled posts when an offer expires/changes; this is
         # the second, moment-of-upload defense.
         try:
-            offer = self.api.get(f"/offers/{post['offer_id']}").json()
+            offer_res = self.api.get(f"/offers/{post['offer_id']}")
+            if offer_res.status_code >= 300:
+                # A transient API error says nothing about the offer: retry
+                # (backoff) instead of pausing the post for a human.
+                self._report(post["id"], ok=False,
+                             detail=f"cannot verify offer state (HTTP "
+                                    f"{offer_res.status_code}) — will retry")
+                return False
+            try:
+                offer = offer_res.json()
+            except ValueError:
+                self._report(post["id"], ok=False,
+                             detail="cannot verify offer state (non-JSON response) "
+                                    "— will retry")
+                return False
+            if not isinstance(offer, dict):
+                offer = {}
             if offer.get("state") not in PUBLISHABLE_OFFER_STATES:
                 self._block(
                     post["id"],
@@ -1341,11 +1384,18 @@ class Publisher:
         render_id = post.get("render_id")
         if not render_id:
             return None
-        try:
-            render = self.api.get(f"/renders/{render_id}").json()
-        except (httpx.HTTPError, ValueError):
+        res = self.api.get(f"/renders/{render_id}")
+        if res.status_code == 404:
             return None
-        if str(render.get("id")) != str(render_id):
+        if res.status_code >= 300:
+            # Transient: raise so the caller retries instead of telling the
+            # operator to re-render a render that still exists.
+            raise httpx.HTTPError(f"render lookup failed (HTTP {res.status_code})")
+        try:
+            render = res.json()
+        except ValueError as exc:
+            raise httpx.HTTPError("render lookup returned non-JSON") from exc
+        if not isinstance(render, dict) or str(render.get("id")) != str(render_id):
             return None
         if str(render.get("offer_id")) != str(post.get("offer_id") or ""):
             log.error("pinned render %s belongs to a different offer — refusing", render_id)

@@ -316,3 +316,17 @@ def test_failed_owed_script_job_reports_failure_with_retry_hint():
     results = [j for p, j in api.posts if p.endswith("/result")]
     assert results and results[-1]["ok"] is False
     assert results[-1]["retry_after_s"] == 300, "failure retries with backoff"
+
+
+def test_scripts_lookup_error_skips_the_offer_without_crashing():
+    """A 5xx error body is a truthy dict — it must not read as "already has
+    scripts", and a non-JSON body must not crash the batch pass."""
+    class _Broken(FakeAPI):
+        def get(self, path, params=None):
+            if path.endswith("/scripts"):
+                return FakeResponse({"detail": "boom"}, status_code=503)
+            return FakeAPI.get(self, path, params)
+
+    api = _Broken(offers=[_offer()])
+    assert _batch(api).generate_scripts() == 0
+    assert api.posts == []
