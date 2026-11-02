@@ -381,6 +381,41 @@ def test_approve_and_queue_is_reviewer_only_centrally():
         api_hardening.CREDENTIAL_REVIEWER, method, path) is None
 
 
+def test_account_settings_and_policy_writes_are_reviewer_only_centrally():
+    """2026-11-02 review (S1-S4): writes that choose a channel's credentials,
+    re-activate a revoked account, change a setting or flip the kill switch
+    are human-only at the transport layer — while the machine routes that
+    share their prefixes stay open to workers."""
+    raf = api_hardening.route_authorization_failure
+    human_only = [
+        ("POST", "/platform-accounts"),
+        ("POST", "/platform-accounts/0b8f/revoke"),
+        ("PUT", "/settings/brand"),
+        ("PUT", "/settings/language_policy"),
+        ("PUT", "/settings/publish_windows"),
+        ("PUT", "/settings/automation_policy"),
+        ("PUT", "/automation/policy"),
+        ("POST", "/automation/pause"),
+        ("POST", "/automation/resume"),
+        ("POST", "/automation/preset/autopilot"),
+    ]
+    for method, path in human_only:
+        for cls in (api_hardening.CREDENTIAL_SERVICE, api_hardening.CREDENTIAL_WORKER):
+            assert raf(cls, method, path), (cls, method, path)
+        assert raf(api_hardening.CREDENTIAL_REVIEWER, method, path) is None
+    machine_ok = [
+        ("PUT", "/settings/media_backup"),
+        ("GET", "/settings/brand"),
+        ("GET", "/automation/policy"),
+        ("GET", "/platform-accounts"),
+        ("POST", "/platform-accounts/0b8f/refreshed"),
+        ("POST", "/platform-accounts/0b8f/mark-expired"),
+        ("PUT", "/platform-accounts/0b8f/capabilities"),
+    ]
+    for method, path in machine_ok:
+        assert raf(api_hardening.CREDENTIAL_WORKER, method, path) is None, (method, path)
+
+
 # ------------------------------ machine actor attribution (P1-1, review fix)
 
 def _request_as(credential: str, actor: str | None = None):

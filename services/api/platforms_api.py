@@ -13,10 +13,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import db
+from api_hardening import effective_reviewer
 
 router = APIRouter(tags=["platform-accounts"])
 
@@ -77,8 +78,13 @@ def sanitize_capabilities(platform: str, raw: dict) -> dict:
 
 
 @router.post("/platform-accounts", status_code=201)
-async def register_account(account: PlatformAccountIn) -> dict:
-    """Register/refresh credential REFERENCES. Idempotent per platform+handle."""
+async def register_account(account: PlatformAccountIn, request: Request) -> dict:
+    """Register/refresh credential REFERENCES. Idempotent per platform+handle.
+
+    Human-only: re-pointing `credential_source` decides which channel a
+    pinned schedule uploads to, and re-registering re-activates a revoked
+    account — neither may be done by a worker/service credential."""
+    actor = effective_reviewer(request, None, default="operator", require=True)
     pool = db.get()
     if account.platform not in PLATFORMS:
         raise HTTPException(status_code=400,
@@ -104,6 +110,12 @@ async def register_account(account: PlatformAccountIn) -> dict:
         account.platform, account.account_handle, account.credential_source,
         account.scopes, account.expires_at,
     )
+    await _audit(pool, actor=actor,
+                 action="platform_account:registered" if row["inserted"]
+                 else "platform_account:updated",
+                 entity_id=str(row["id"]),
+                 detail={"platform": account.platform, "handle": account.account_handle,
+                         "credential_source": account.credential_source})
     return {"id": row["id"], "created": bool(row["inserted"]), "status": "active"}
 
 
@@ -220,7 +232,8 @@ async def mark_expired(account_id: uuid.UUID, body: MarkExpiredIn) -> dict:
     )
     if not row:
         raise HTTPException(status_code=404, detail="account not found")
-    await _audit(pool, action="platform_account:token_expired", entity_id=account_id.__str__(),
+    await _audit(pool, actor="system:worker", action="platform_account:token_expired",
+                 entity_id=str(account_id),
                  detail={"platform": row["platform"], "reason": body.detail})
     return {"id": row["id"], "status": row["status"]}
 
@@ -232,8 +245,10 @@ async def mark_refreshed(account_id: uuid.UUID, body: RefreshedIn) -> dict:
     row = await pool.fetchrow(
         """
         UPDATE platform_accounts
-        SET status = 'active', expires_at = $2, last_refreshed_at = now(),
-            last_error = NULL, updated_at = now()
+        SET status = CASE WHEN status = 'revoked' THEN status ELSE 'active' END,
+            expires_at = $2, last_refreshed_at = now(),
+            last_error = CASE WHEN status = 'revoked' THEN last_error ELSE NULL END,
+            updated_at = now()
         WHERE id = $1
         RETURNING id, status
         """,
@@ -263,7 +278,8 @@ async def set_capabilities(account_id: uuid.UUID, body: CapabilitiesIn) -> dict:
 
 
 @router.post("/platform-accounts/{account_id}/revoke")
-async def revoke(account_id: uuid.UUID) -> dict:
+async def revoke(account_id: uuid.UUID, request: Request) -> dict:
+    actor = effective_reviewer(request, None, default="operator", require=True)
     pool = db.get()
     row = await pool.fetchrow(
         "UPDATE platform_accounts SET status = 'revoked', updated_at = now() WHERE id = $1 "
@@ -272,14 +288,16 @@ async def revoke(account_id: uuid.UUID) -> dict:
     )
     if not row:
         raise HTTPException(status_code=404, detail="account not found")
-    await _audit(pool, action="platform_account:revoked", entity_id=str(account_id))
+    await _audit(pool, actor=actor, action="platform_account:revoked",
+                 entity_id=str(account_id))
     return {"id": row["id"], "status": row["status"]}
 
 
-async def _audit(pool, *, action: str, entity_id: str, detail: Optional[dict] = None) -> None:
+async def _audit(pool, *, actor: str, action: str, entity_id: str,
+                 detail: Optional[dict] = None) -> None:
     await pool.execute(
         "INSERT INTO audit_log (actor, action, entity, entity_id, detail) "
         "VALUES ($1, $2, $3, $4, $5::jsonb)",
-        "worker", action, "platform_accounts", uuid.UUID(entity_id) if entity_id else None,
+        actor, action, "platform_accounts", uuid.UUID(entity_id) if entity_id else None,
         json.dumps(detail or {}, default=str),
     )

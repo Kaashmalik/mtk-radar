@@ -41,6 +41,9 @@ KNOWN_KEYS: dict[str, str] = {
     "language_policy": "English-first metadata/captions + opt-in Urdu voiceover",
 }
 
+#: Settings a worker/service credential may write; everything else is human-only.
+MACHINE_WRITABLE_KEYS = frozenset({"media_backup"})
+
 SUPPORTED_LANGUAGES = ("en", "ur")
 
 
@@ -249,12 +252,14 @@ async def put_setting(key: str, body: SettingIn, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     pool = db.get()
-    # Automation policy and release policy are human controls, not worker
-    # preferences. The same values can be written through this generic route,
-    # so the human gate must apply here too (not only on /automation/policy).
+    # Settings are human controls, not worker preferences: automation and
+    # release policy gate publishing, `brand` supplies the CTA link written
+    # into every new description, `language_policy` decides what may be
+    # rendered and `publish_windows` when it goes out. Only the backup status
+    # (written by scripts/media_backup.py) is machine-writable.
     updated_by = effective_reviewer(
         request, None, default="operator",
-        require=key in ("automation_policy", "release_policy"),
+        require=key not in MACHINE_WRITABLE_KEYS,
     )
     await put_value(pool, key, normalized, updated_by=updated_by)
     await audit(pool, actor=updated_by, action="settings:update", entity="settings",

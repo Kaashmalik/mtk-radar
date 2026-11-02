@@ -1978,11 +1978,11 @@ def test_settings_roundtrip_and_validation(auth_client):
     assert auth_client.get("/settings/no_such_setting", headers=SVC).status_code == 404
     assert auth_client.get("/settings/publish_windows", headers=SVC).json()["value"] is None
 
-    bad = auth_client.put("/settings/publish_windows", headers=SVC,
+    bad = auth_client.put("/settings/publish_windows", headers=HUMAN,
                           json={"value": {"windows": ["25:00", "18:00"]}})
     assert bad.status_code == 422, "out-of-range windows must be refused"
 
-    ok = auth_client.put("/settings/publish_windows", headers=SVC,
+    ok = auth_client.put("/settings/publish_windows", headers=HUMAN,
                          json={"value": {"windows": ["09:30", "18:00", "09:30"]}})
     assert ok.status_code == 200, ok.text
     assert ok.json()["value"]["windows"] == ["09:30", "18:00"], "dedup + order preserved"
@@ -2000,12 +2000,12 @@ def test_language_policy_is_english_first_and_urdu_is_opt_in(auth_client):
     assert value["narration_languages"] == ["en"]
     assert value["urdu_voiceover_enabled"] is False
 
-    bad = auth_client.put("/settings/language_policy", headers=SVC, json={
+    bad = auth_client.put("/settings/language_policy", headers=HUMAN, json={
         "value": {"narration_languages": ["en", "fr"]},
     })
     assert bad.status_code == 422, "unknown voiceover languages must be refused"
 
-    enabled = auth_client.put("/settings/language_policy", headers=SVC, json={
+    enabled = auth_client.put("/settings/language_policy", headers=HUMAN, json={
         "value": {
             "metadata_language": "en",
             "captions_language": "en",
@@ -2018,7 +2018,7 @@ def test_language_policy_is_english_first_and_urdu_is_opt_in(auth_client):
     assert enabled.json()["value"]["metadata_language"] == "en"
 
     # Leave the shared test database on the English-first default.
-    reset = auth_client.put("/settings/language_policy", headers=SVC, json={
+    reset = auth_client.put("/settings/language_policy", headers=HUMAN, json={
         "value": {"narration_languages": ["en"], "default_narration_language": "en"},
     })
     assert reset.status_code == 200, reset.text
@@ -4619,6 +4619,28 @@ def test_job_failure_without_retry_delay_gets_default_backoff(auth_client):
                "FROM jobs WHERE id = $1", uuidlib.UUID(jid))[0]
     assert row["status"] == "failed"
     assert row["delayed"] is True, "failure without retry_after_s must back off"
+
+
+def test_platform_account_writes_are_human_only_and_revoked_stays_revoked(auth_client):
+    """S1/S2: a machine credential cannot register/re-point or revoke an
+    account, and a worker's token-refresh report never revives a revoked one."""
+    import uuid as uuidlib
+    handle = f"pytest-{uuidlib.uuid4().hex[:8]}"
+    body = {"platform": "youtube", "account_handle": handle,
+            "credential_source": "env:YOUTUBE_PYTEST_"}
+    assert auth_client.post("/platform-accounts", headers=SVC, json=body).status_code == 403
+    created = auth_client.post("/platform-accounts", headers=HUMAN, json=body)
+    assert created.status_code == 201, created.text
+    aid = created.json()["id"]
+    assert auth_client.post(f"/platform-accounts/{aid}/revoke", headers=SVC).status_code == 403
+    assert auth_client.post(f"/platform-accounts/{aid}/revoke", headers=HUMAN).status_code == 200
+    refreshed = auth_client.post(f"/platform-accounts/{aid}/refreshed", headers=SVC,
+                                 json={"expires_at": "2030-01-01T00:00:00+00:00"})
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["status"] == "revoked"
+    actors = _run("SELECT actor FROM audit_log WHERE entity_id = $1 ORDER BY id",
+                  uuidlib.UUID(str(aid)))
+    assert all(r["actor"] != "worker" for r in actors), actors
 
 
 def test_deferred_job_result_does_not_spend_an_attempt(auth_client):

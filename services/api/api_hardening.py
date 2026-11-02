@@ -45,6 +45,7 @@ can be exercised by tests without a database or the real app startup.
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from typing import Optional
@@ -115,6 +116,22 @@ REVIEWER_ONLY_ROUTES: tuple[tuple[str, frozenset[str]], ...] = (
     ("/schedules/approve-and-queue", frozenset({"POST"})),  # G20 human publish decision
 )
 
+#: Exact-shape human-only writes (2026-11-02 review). The routers enforce the
+#: same rule with effective_reviewer(require=True); this is the central
+#: backstop, so a router refactor cannot silently hand them to a worker
+#: token. Patterns, because these share prefixes with machine routes
+#: (/platform-accounts/{id}/refreshed, /settings/media_backup, GET policy).
+REVIEWER_ONLY_PATTERNS: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
+    # which credentials a channel uploads with; re-activation of revoked accounts
+    (re.compile(r"^/platform-accounts/?$"), frozenset({"POST"})),
+    (re.compile(r"^/platform-accounts/[^/]+/revoke/?$"), frozenset({"POST"})),
+    # every setting except the backup status written by scripts/media_backup.py
+    (re.compile(r"^/settings/(?!media_backup/?$)[^/]+/?$"), frozenset({"PUT"})),
+    # the automation policy and its kill switch
+    (re.compile(r"^/automation/(policy|preset/[^/]+|pause|resume|start|stop)/?$"),
+     frozenset({"PUT", "POST"})),
+)
+
 
 #: Classes with an explicit allowlist — everything NOT granted here is denied
 #: for these classes (deny-by-default). Workers are intentionally NOT in this
@@ -136,6 +153,12 @@ def route_authorization_failure(credential_class: str, method: str,
     by the non-human matrix."""
     for prefix, methods in REVIEWER_ONLY_ROUTES:
         if method in methods and _route_matches(prefix, path):
+            if credential_class not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
+                return (f"route {method} {path} is reserved for human reviewers "
+                        f"(credential class '{credential_class}' is not)")
+            return None
+    for pattern, methods in REVIEWER_ONLY_PATTERNS:
+        if method in methods and pattern.match(path):
             if credential_class not in (CREDENTIAL_REVIEWER, CREDENTIAL_DISABLED):
                 return (f"route {method} {path} is reserved for human reviewers "
                         f"(credential class '{credential_class}' is not)")
