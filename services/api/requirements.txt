@@ -1,14 +1,14 @@
-fastapi==0.146.0
+fastapi==0.162.0
 uvicorn[standard]==0.54.0
 asyncpg==0.32.0
-pydantic==2.14.1
-pydantic-settings==2.16.1
+pydantic==2.14.2
+pydantic-settings==2.16.2
 # compose/CI YAML sanity (scripts/verify.sh) + the G13 env-matrix guard test
 PyYAML==6.0.3
 # IANA timezone data: Linux CI gets it from the OS, but Python on Windows does
 # not — schedules resolve ZoneInfo("Asia/Karachi") and the YouTube quota day
 # rolls at America/Los_Angeles; both crash without this package.
-tzdata==2026.4
+tzdata==2026.6
 # optional cache layer (v0.22) - the system runs without it
 redis==5.2.1
 # media_api imports packages/object_storage (the S3 driver) and schemas.py
